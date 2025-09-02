@@ -10,6 +10,7 @@ local watchdogs = {}
 local snapshots = {} -- client_id -> { [path]=mtime_ns }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
+local autocmds = {} -- client_id -> autocmd id
 
 -- Tunables (will use config.options if present, otherwise defaults)
 local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
@@ -139,26 +140,35 @@ M.start = function(client)
 	end
 
 	local function cleanup()
+		-- stop fs_event
 		if watchers[client.id] then
 			watchers[client.id]:stop()
 			watchers[client.id] = nil
 		end
+		-- stop poller
 		if pollers[client.id] then
 			pollers[client.id]:stop()
 			pollers[client.id]:close()
 			pollers[client.id] = nil
 		end
+		-- stop watchdog
 		if watchdogs[client.id] then
 			watchdogs[client.id]:stop()
 			watchdogs[client.id]:close()
 			watchdogs[client.id] = nil
 		end
+		-- clear batch queue timer
 		if batch_queues[client.id] then
 			if batch_queues[client.id].timer then
 				batch_queues[client.id].timer:stop()
 				batch_queues[client.id].timer:close()
 			end
 			batch_queues[client.id] = nil
+		end
+		-- remove autocmd if present
+		if autocmds[client.id] then
+			pcall(vim.api.nvim_del_autocmd, autocmds[client.id])
+			autocmds[client.id] = nil
 		end
 	end
 
@@ -324,6 +334,31 @@ M.start = function(client)
 		end
 	end)
 	watchdogs[client.id] = watchdog
+
+	-- -------- autocmd to detect buffer-close-of-deleted-file (Unity case) --------
+	-- When a buffer is closed for a file that was already deleted externally,
+	-- Neovim's internal handling can cause the fs_event handle to become invalid.
+	-- Restart that client's watcher when that happens.
+	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+		callback = function(args)
+			-- args.buf is the buffer number being removed
+			local bufpath = vim.api.nvim_buf_get_name(args.buf)
+			if not bufpath or bufpath == "" then
+				return
+			end
+			-- only consider files under this project's root
+			-- use plain find to avoid pattern magic
+			if bufpath:sub(1, #root) ~= root then
+				return
+			end
+			-- if file doesn't exist on disk, it was deleted externally earlier
+			if not uv.fs_stat(bufpath) then
+				notify("Buffer closed for deleted file: " .. bufpath .. " -> restarting watcher", vim.log.levels.DEBUG)
+				restart_watcher()
+			end
+		end,
+	})
+	autocmds[client.id] = id
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
