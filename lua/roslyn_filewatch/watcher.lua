@@ -147,7 +147,7 @@ M.start = function(client)
 					end
 					batch_queues[client.id] = nil
 				end
-				notify("Watcher stopped for client " .. client.name)
+				notify("Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,
 	})
