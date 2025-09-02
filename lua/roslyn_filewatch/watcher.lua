@@ -70,7 +70,7 @@ M.start = function(client)
 			end
 
 			if not filename then
-				notify("Watcher invalidated, restarting...", vim.log.levels.WARN)
+				notify("Watcher invalidated, restarting...", vim.log.levels.DEBUG)
 				handle:stop()
 				watchers[client.id] = nil
 				vim.schedule(function()
