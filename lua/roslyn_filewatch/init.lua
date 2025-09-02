@@ -9,7 +9,7 @@ M.setup = function(opts)
 	vim.api.nvim_create_autocmd("LspAttach", {
 		callback = function(args)
 			local client = vim.lsp.get_client_by_id(args.data.client_id)
-			if client and (client.name == "roslyn" or client.name == "roslyn_ls") then
+			if client and vim.tbl_contains(config.options.client_names, client.name) then
 				watcher.start(client)
 			end
 		end,
