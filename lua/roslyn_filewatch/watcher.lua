@@ -377,6 +377,32 @@ M.start = function(client)
 			end
 		end,
 	})
+
+	-- -------- proactive detection: file vanished while buffer still open --------
+	-- If Unity deletes a file but the buffer is still open, Neovim will later
+	-- close the handle when you close the buffer, invalidating fs_event.
+	-- Catch this early and restart the watcher before it breaks.
+	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
+		callback = function(args)
+			local bufpath = vim.api.nvim_buf_get_name(args.buf)
+			if not bufpath or bufpath == "" then
+				return
+			end
+			-- only consider files under this project's root
+			if bufpath:sub(1, #root) ~= root then
+				return
+			end
+			-- check if file is missing on disk while buffer is still open
+			if not uv.fs_stat(bufpath) then
+				notify(
+					"File vanished on disk while buffer open: " .. bufpath .. " -> restarting watcher",
+					vim.log.levels.DEBUG
+				)
+				restart_watcher()
+			end
+		end,
+	})
+	autocmds[client.id .. "_earlycheck"] = id2
 end
 
 return M
