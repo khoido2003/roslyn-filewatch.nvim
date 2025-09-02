@@ -179,12 +179,33 @@ M.start = function(client)
 		restart_scheduled[client.id] = true
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
+
+			-- preserve old snapshot for diffing after restart
+			local old_snapshot = snapshots[client.id]
+
 			cleanup()
 			if not client.is_stopped() then
 				notify("Restarting watcher for client " .. client.name, vim.log.levels.DEBUG)
 				M.start(client)
+
+				-- after restart, do immediate rescan + diff so we don’t lose deletes
+				if old_snapshot then
+					local new_map = {}
+					scan_tree(client.config.root_dir, new_map)
+
+					local evs = {}
+					for path, _ in pairs(old_snapshot) do
+						if new_map[path] == nil then
+							table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 }) -- Deleted
+						end
+					end
+					if #evs > 0 then
+						notify("Backfilled " .. #evs .. " lost deletes after restart", vim.log.levels.DEBUG)
+						queue_events(client.id, evs)
+					end
+				end
 			end
-		end, 300) -- debounce 300ms
+		end, 300) -- debounce
 	end
 
 	-- -------- fs_event (fine-grained events) --------
