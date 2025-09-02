@@ -11,6 +11,11 @@ local snapshots = {} -- client_id -> { [path]=mtime_ns }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
 
+-- Tunables (will use config.options if present, otherwise defaults)
+local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
+local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
+local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
+
 local function notify(msg, level)
 	vim.schedule(function()
 		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
@@ -44,7 +49,6 @@ local function mtime_ns(stat)
 	if not stat or not stat.mtime then
 		return 0
 	end
-	-- uv.fs_stat on Windows provides { sec, nsec }
 	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
 end
 
@@ -98,6 +102,7 @@ local function scan_tree(root, out_map)
 				-- skip ignored directories
 				local skip = false
 				for _, dir in ipairs(config.options.ignore_dirs) do
+					-- match only directory segment
 					if fullpath:find("[/\\]" .. dir .. "$") then
 						skip = true
 						break
@@ -183,6 +188,7 @@ M.start = function(client)
 		handle:start(root, { recursive = true }, function(err2, filename, events)
 			if err2 then
 				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
+				-- try to restart fast on error
 				restart_watcher()
 				return
 			end
@@ -208,10 +214,9 @@ M.start = function(client)
 					snapshots[client.id][fullpath] = mtime_ns(st)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 				else
-					-- Deleted
+					-- Deleted: update snapshot and send delete
 					snapshots[client.id][fullpath] = nil
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-					-- do NOT restart here; poller & fs_event will recover if still live
 				end
 			elseif events.rename then
 				if st then
@@ -223,7 +228,6 @@ M.start = function(client)
 					snapshots[client.id][fullpath] = nil
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 				end
-				-- Avoid immediate restart; rely on poller if fs_event dies silently
 			end
 
 			if #evs > 0 then
@@ -246,14 +250,13 @@ M.start = function(client)
 
 	-- -------- fs_poll (snapshot diff / resync) --------
 	local poller = uv.new_fs_poll()
-	-- 3000ms is a good balance for Unity projects
-	poller:start(root, 3000, function(errp, prev, curr)
+	poller:start(root, POLL_INTERVAL, function(errp, prev, curr)
 		if errp then
 			notify("Poller error: " .. tostring(errp), vim.log.levels.ERROR)
 			return
 		end
 
-		-- If the root directory's identity changed (replacement), a restart helps.
+		-- If the root directory's identity changed, do a restart
 		if
 			prev
 			and curr
@@ -291,11 +294,19 @@ M.start = function(client)
 		end
 
 		if #evs > 0 then
+			-- deliver events immediately so LSP sees them even if fs_event is dead
 			snapshots[client.id] = new_map
 			queue_events(client.id, evs)
 			last_events[client.id] = os.time()
+
+			-- If fs_event hasn't reported anything recently, force a restart quickly so it can pick up future events
+			local last = last_events[client.id] or 0
+			if os.time() - last > POLLER_RESTART_THRESHOLD then
+				notify("Poller detected diffs while fs_event quiet; restarting watcher", vim.log.levels.DEBUG)
+				restart_watcher()
+			end
 		else
-			-- Keep the snapshot fresh even if no diffs (handles timestamp-only drift)
+			-- keep snapshot fresh even if no diffs
 			snapshots[client.id] = new_map
 		end
 	end)
@@ -306,9 +317,8 @@ M.start = function(client)
 	watchdog:start(15000, 15000, function()
 		if watchers[client.id] and not client.is_stopped() then
 			local last = last_events[client.id] or 0
-			-- If absolutely nothing has happened for a long while, recycle.
-			if os.time() - last > 60 then
-				notify("No fs activity for 60s, recycling watcher (safety)", vim.log.levels.DEBUG)
+			if os.time() - last > WATCHDOG_IDLE then
+				notify("No fs activity for " .. WATCHDOG_IDLE .. "s, recycling watcher (safety)", vim.log.levels.DEBUG)
 				restart_watcher()
 			end
 		end

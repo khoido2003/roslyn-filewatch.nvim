@@ -19,6 +19,16 @@ M.options = {
 
 	--- Which LSP client names should trigger watching
 	client_names = { "roslyn", "roslyn_ls" },
+
+	--- Poller interval in ms (used for fallback resync scan)
+	poll_interval = 3000,
+
+	--- If poller detects changes while fs_event was quiet for this many seconds,
+	--- we restart the watcher (heals silent-death cases).
+	poller_restart_threshold = 2,
+
+	--- If absolutely no fs activity for this many seconds, restart watcher (safety).
+	watchdog_idle = 60,
 }
 
 M.setup = function(opts)
