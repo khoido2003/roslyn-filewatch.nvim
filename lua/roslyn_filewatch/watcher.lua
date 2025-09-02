@@ -158,8 +158,10 @@ M.start = function(client)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
 				else
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+					queue_events(client.id, evs) -- send before restart
 					notify("File deleted, restarting watcher", vim.log.levels.DEBUG)
 					restart_watcher()
+					return
 				end
 			elseif events.rename then
 				if stat then
@@ -167,8 +169,10 @@ M.start = function(client)
 				else
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
 				end
+				queue_events(client.id, evs) -- send before restart
 				notify("Rename detected, restarting watcher", vim.log.levels.DEBUG)
 				restart_watcher()
+				return
 			end
 
 			if #evs > 0 then
