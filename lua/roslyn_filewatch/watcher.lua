@@ -132,7 +132,7 @@ M.start = function(client)
 	end
 
 	watchers[client.id] = handle
-	notify("Watcher started for client " .. client.name .. " at root: " .. root)
+	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
 	vim.api.nvim_create_autocmd("LspDetach", {
 		once = true,
