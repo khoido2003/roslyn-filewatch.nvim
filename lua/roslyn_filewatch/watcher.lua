@@ -7,6 +7,8 @@ local watchers = {}
 local pollers = {}
 local batch_queues = {}
 local watchdogs = {}
+local last_events = {} -- track last event timestamp
+local restart_scheduled = {}
 
 local function notify(msg, level)
 	vim.schedule(function()
@@ -82,16 +84,11 @@ M.start = function(client)
 		return
 	end
 
-	-- -------- fs_event (changes + rename) --------
-	local handle, err = uv.new_fs_event()
-	if not handle then
-		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
-		return
-	end
-
-	local function restart_watcher()
-		handle:stop()
-		watchers[client.id] = nil
+	local function cleanup()
+		if watchers[client.id] then
+			watchers[client.id]:stop()
+			watchers[client.id] = nil
+		end
 		if pollers[client.id] then
 			pollers[client.id]:stop()
 			pollers[client.id]:close()
@@ -102,11 +99,35 @@ M.start = function(client)
 			watchdogs[client.id]:close()
 			watchdogs[client.id] = nil
 		end
-		vim.schedule(function()
+		if batch_queues[client.id] then
+			if batch_queues[client.id].timer then
+				batch_queues[client.id].timer:stop()
+				batch_queues[client.id].timer:close()
+			end
+			batch_queues[client.id] = nil
+		end
+	end
+
+	local function restart_watcher()
+		if restart_scheduled[client.id] then
+			return -- debounce
+		end
+		restart_scheduled[client.id] = true
+		vim.defer_fn(function()
+			restart_scheduled[client.id] = nil
+			cleanup()
 			if not client.is_stopped() then
+				notify("Restarting watcher for client " .. client.name, vim.log.levels.DEBUG)
 				M.start(client)
 			end
-		end)
+		end, 300) -- debounce 300ms
+	end
+
+	-- -------- fs_event (changes + rename) --------
+	local handle, err = uv.new_fs_event()
+	if not handle then
+		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
+		return
 	end
 
 	local ok, start_err = pcall(function()
@@ -128,6 +149,7 @@ M.start = function(client)
 				return
 			end
 
+			last_events[client.id] = os.time() -- mark activity
 			local stat = uv.fs_stat(fullpath)
 			local evs = {}
 
@@ -135,7 +157,6 @@ M.start = function(client)
 				if stat then
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
 				else
-					-- Deleted externally while buffer still open → restart
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
 					notify("File deleted, restarting watcher", vim.log.levels.DEBUG)
 					restart_watcher()
@@ -162,6 +183,7 @@ M.start = function(client)
 	end
 
 	watchers[client.id] = handle
+	last_events[client.id] = os.time()
 
 	-- -------- fs_poll (create/delete fallback) --------
 	local poller = uv.new_fs_poll()
@@ -173,8 +195,9 @@ M.start = function(client)
 		if not prev or not curr then
 			return
 		end
-		-- Directory replaced or recreated
+		-- Detect dir recreation
 		if prev.mtime ~= curr.mtime then
+			notify("Poller detected directory change", vim.log.levels.DEBUG)
 			restart_watcher()
 		end
 	end)
@@ -182,10 +205,13 @@ M.start = function(client)
 
 	-- -------- watchdog timer (safety) --------
 	local watchdog = uv.new_timer()
-	watchdog:start(10000, 10000, function()
+	watchdog:start(5000, 5000, function()
 		if watchers[client.id] and not client.is_stopped() then
-			notify("No fs events for 10s, restarting watcher (safety)", vim.log.levels.DEBUG)
-			restart_watcher()
+			local last = last_events[client.id] or 0
+			if os.time() - last > 10 then
+				notify("No fs events for 10s, restarting watcher (safety)", vim.log.levels.DEBUG)
+				restart_watcher()
+			end
 		end
 	end)
 	watchdogs[client.id] = watchdog
@@ -196,25 +222,7 @@ M.start = function(client)
 		once = true,
 		callback = function(args)
 			if args.data.client_id == client.id then
-				handle:stop()
-				watchers[client.id] = nil
-				if pollers[client.id] then
-					pollers[client.id]:stop()
-					pollers[client.id]:close()
-					pollers[client.id] = nil
-				end
-				if watchdogs[client.id] then
-					watchdogs[client.id]:stop()
-					watchdogs[client.id]:close()
-					watchdogs[client.id] = nil
-				end
-				if batch_queues[client.id] then
-					if batch_queues[client.id].timer then
-						batch_queues[client.id].timer:stop()
-						batch_queues[client.id].timer:close()
-					end
-					batch_queues[client.id] = nil
-				end
+				cleanup()
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,
