@@ -121,13 +121,23 @@ M.start = function(client)
 				return
 			end
 
+			local stat = uv.fs_stat(fullpath)
 			local evs = {}
+
 			if events.change then
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
+				if stat then
+					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
+				else
+					-- Deleted externally while buffer still open → restart
+					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+					restart_watcher()
+				end
 			elseif events.rename then
-				-- Renames are unreliable: restart watcher
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 }) -- Created
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+				if stat then
+					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 }) -- Created
+				else
+					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+				end
 				restart_watcher()
 			end
 
