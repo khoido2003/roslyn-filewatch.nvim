@@ -4,11 +4,8 @@ local config = require("roslyn_filewatch.config")
 local M = {}
 
 local watchers = {}
+local pollers = {}
 local batch_queues = {}
-
--- ///////////////////////////////////////////////////////////
--- HELPERS
--- ///////////////////////////////////////////////////////////
 
 local function notify(msg, level)
 	vim.schedule(function()
@@ -16,7 +13,6 @@ local function notify(msg, level)
 	end)
 end
 
---- Send file changes to Roslyn
 local function notify_roslyn(changes)
 	local clients = vim.lsp.get_clients()
 	for _, client in ipairs(clients) do
@@ -26,7 +22,6 @@ local function notify_roslyn(changes)
 	end
 end
 
---- Check if path should be watched
 local function should_watch(path)
 	for _, dir in ipairs(config.options.ignore_dirs) do
 		if path:find("[/\\]" .. dir .. "[/\\]") then
@@ -41,13 +36,43 @@ local function should_watch(path)
 	return false
 end
 
--- ///////////////////////////////////////////////////////////
--- CORE WATCH LOGIC
--- ///////////////////////////////////////////////////////////
+-- ================================================================
+-- Helper: queue + batch flush
+-- ================================================================
+local function queue_events(client_id, evs)
+	if config.options.batching.enabled then
+		if not batch_queues[client_id] then
+			batch_queues[client_id] = { events = {}, timer = nil }
+		end
+		local queue = batch_queues[client_id]
+		vim.list_extend(queue.events, evs)
 
+		if not queue.timer then
+			queue.timer = uv.new_timer()
+			queue.timer:start(config.options.batching.interval, 0, function()
+				local changes = queue.events
+				queue.events = {}
+				queue.timer:stop()
+				queue.timer:close()
+				queue.timer = nil
+				if #changes > 0 then
+					vim.schedule(function()
+						notify_roslyn(changes)
+					end)
+				end
+			end)
+		end
+	else
+		notify_roslyn(evs)
+	end
+end
+
+-- ================================================================
+-- Core Watch Logic
+-- ================================================================
 M.start = function(client)
 	if watchers[client.id] then
-		return -- already running, no spam
+		return -- already running
 	end
 
 	local root = client.config.root_dir
@@ -56,28 +81,38 @@ M.start = function(client)
 		return
 	end
 
+	-- -------- fs_event (changes + rename) --------
 	local handle, err = uv.new_fs_event()
 	if not handle then
 		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
 		return
 	end
 
+	local function restart_watcher()
+		handle:stop()
+		watchers[client.id] = nil
+		if pollers[client.id] then
+			pollers[client.id]:stop()
+			pollers[client.id]:close()
+			pollers[client.id] = nil
+		end
+		vim.schedule(function()
+			if not client.is_stopped() then
+				M.start(client)
+			end
+		end)
+	end
+
 	local ok, start_err = pcall(function()
 		handle:start(root, { recursive = true }, function(err, filename, events)
 			if err then
-				notify("Error in watcher: " .. tostring(err), vim.log.levels.ERROR)
+				notify("Watcher error: " .. tostring(err), vim.log.levels.ERROR)
 				return
 			end
 
 			if not filename then
 				notify("Watcher invalidated, restarting...", vim.log.levels.DEBUG)
-				handle:stop()
-				watchers[client.id] = nil
-				vim.schedule(function()
-					if not client.is_stopped() then
-						M.start(client)
-					end
-				end)
+				restart_watcher()
 				return
 			end
 
@@ -88,40 +123,16 @@ M.start = function(client)
 
 			local evs = {}
 			if events.change then
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
+				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
 			elseif events.rename then
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
+				-- Renames are unreliable: restart watcher
+				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 }) -- Created
+				table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+				restart_watcher()
 			end
 
-			if #evs == 0 then
-				return
-			end
-
-			if config.options.batching.enabled then
-				if not batch_queues[client.id] then
-					batch_queues[client.id] = { events = {}, timer = nil }
-				end
-				local queue = batch_queues[client.id]
-				vim.list_extend(queue.events, evs)
-
-				if not queue.timer then
-					queue.timer = uv.new_timer()
-					queue.timer:start(config.options.batching.interval, 0, function()
-						local changes = queue.events
-						queue.events = {}
-						queue.timer:stop()
-						queue.timer:close()
-						queue.timer = nil
-						if #changes > 0 then
-							vim.schedule(function()
-								notify_roslyn(changes) -- silent in normal use
-							end)
-						end
-					end)
-				end
-			else
-				notify_roslyn(evs) -- silent
+			if #evs > 0 then
+				queue_events(client.id, evs)
 			end
 		end)
 	end)
@@ -132,6 +143,24 @@ M.start = function(client)
 	end
 
 	watchers[client.id] = handle
+
+	-- -------- fs_poll (create/delete fallback) --------
+	local poller = uv.new_fs_poll()
+	poller:start(root, 2000, function(err, prev, curr)
+		if err then
+			notify("Poller error: " .. tostring(err), vim.log.levels.ERROR)
+			return
+		end
+		if not prev or not curr then
+			return
+		end
+		-- Directory replaced or recreated
+		if prev.mtime ~= curr.mtime then
+			restart_watcher()
+		end
+	end)
+	pollers[client.id] = poller
+
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
 	vim.api.nvim_create_autocmd("LspDetach", {
@@ -140,6 +169,11 @@ M.start = function(client)
 			if args.data.client_id == client.id then
 				handle:stop()
 				watchers[client.id] = nil
+				if pollers[client.id] then
+					pollers[client.id]:stop()
+					pollers[client.id]:close()
+					pollers[client.id] = nil
+				end
 				if batch_queues[client.id] then
 					if batch_queues[client.id].timer then
 						batch_queues[client.id].timer:stop()
@@ -147,7 +181,7 @@ M.start = function(client)
 					end
 					batch_queues[client.id] = nil
 				end
-				notify("LspDetach: Watcher stopped for closed buffer " .. client.name, vim.log.levels.DEBUG)
+				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,
 	})
