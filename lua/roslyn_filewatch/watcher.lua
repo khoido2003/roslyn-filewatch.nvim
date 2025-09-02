@@ -147,7 +147,7 @@ M.start = function(client)
 					end
 					batch_queues[client.id] = nil
 				end
-				notify("Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
+				notify("LspDetach: Watcher stopped for closed buffer " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,
 	})
