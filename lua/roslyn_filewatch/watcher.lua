@@ -342,13 +342,34 @@ M.start = function(client)
 	watchdogs[client.id] = watchdog
 
 	-- -------- autocmds --------
+	local function resync_snapshot()
+		local new_map = {}
+		scan_tree(root, new_map)
+
+		local old_map = snapshots[client.id] or {}
+		local evs = {}
+
+		for path, _ in pairs(old_map) do
+			if new_map[path] == nil then
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+			end
+		end
+
+		if #evs > 0 then
+			notify("Resynced " .. #evs .. " deletes from buffer autocmd", vim.log.levels.DEBUG)
+			queue_events(client.id, evs)
+		end
+
+		snapshots[client.id] = new_map
+	end
+
 	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and bufpath:sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
-					notify("Buffer closed for deleted file: " .. bufpath .. " -> restart", vim.log.levels.DEBUG)
-					restart_watcher()
+					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync snapshot", vim.log.levels.DEBUG)
+					resync_snapshot()
 				end
 			end
 		end,
@@ -360,8 +381,11 @@ M.start = function(client)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and bufpath:sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
-					notify("File vanished while buffer open: " .. bufpath .. " -> restart", vim.log.levels.DEBUG)
-					restart_watcher()
+					notify(
+						"File vanished while buffer open: " .. bufpath .. " -> resync snapshot",
+						vim.log.levels.DEBUG
+					)
+					resync_snapshot()
 				end
 			end
 		end,
