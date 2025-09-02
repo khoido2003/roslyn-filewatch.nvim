@@ -6,6 +6,7 @@ local M = {}
 local watchers = {}
 local pollers = {}
 local batch_queues = {}
+local watchdogs = {}
 
 local function notify(msg, level)
 	vim.schedule(function()
@@ -96,6 +97,11 @@ M.start = function(client)
 			pollers[client.id]:close()
 			pollers[client.id] = nil
 		end
+		if watchdogs[client.id] then
+			watchdogs[client.id]:stop()
+			watchdogs[client.id]:close()
+			watchdogs[client.id] = nil
+		end
 		vim.schedule(function()
 			if not client.is_stopped() then
 				M.start(client)
@@ -107,6 +113,7 @@ M.start = function(client)
 		handle:start(root, { recursive = true }, function(err, filename, events)
 			if err then
 				notify("Watcher error: " .. tostring(err), vim.log.levels.ERROR)
+				restart_watcher()
 				return
 			end
 
@@ -130,6 +137,7 @@ M.start = function(client)
 				else
 					-- Deleted externally while buffer still open → restart
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
+					notify("File deleted, restarting watcher", vim.log.levels.DEBUG)
 					restart_watcher()
 				end
 			elseif events.rename then
@@ -138,6 +146,7 @@ M.start = function(client)
 				else
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
 				end
+				notify("Rename detected, restarting watcher", vim.log.levels.DEBUG)
 				restart_watcher()
 			end
 
@@ -171,6 +180,16 @@ M.start = function(client)
 	end)
 	pollers[client.id] = poller
 
+	-- -------- watchdog timer (safety) --------
+	local watchdog = uv.new_timer()
+	watchdog:start(10000, 10000, function()
+		if watchers[client.id] and not client.is_stopped() then
+			notify("No fs events for 10s, restarting watcher (safety)", vim.log.levels.DEBUG)
+			restart_watcher()
+		end
+	end)
+	watchdogs[client.id] = watchdog
+
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
 	vim.api.nvim_create_autocmd("LspDetach", {
@@ -183,6 +202,11 @@ M.start = function(client)
 					pollers[client.id]:stop()
 					pollers[client.id]:close()
 					pollers[client.id] = nil
+				end
+				if watchdogs[client.id] then
+					watchdogs[client.id]:stop()
+					watchdogs[client.id]:close()
+					watchdogs[client.id] = nil
 				end
 				if batch_queues[client.id] then
 					if batch_queues[client.id].timer then
