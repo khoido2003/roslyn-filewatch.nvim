@@ -12,7 +12,7 @@ local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
 local autocmds = {} -- client_id -> autocmd id
 
--- Tunables (will use config.options if present, otherwise defaults)
+-- Tunables
 local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
 local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
 local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
@@ -100,10 +100,8 @@ local function scan_tree(root, out_map)
 			end
 			local fullpath = path .. "/" .. name
 			if typ == "directory" then
-				-- skip ignored directories
 				local skip = false
 				for _, dir in ipairs(config.options.ignore_dirs) do
-					-- match only directory segment
 					if fullpath:find("[/\\]" .. dir .. "$") then
 						skip = true
 						break
@@ -140,24 +138,20 @@ M.start = function(client)
 	end
 
 	local function cleanup()
-		-- stop fs_event
 		if watchers[client.id] then
 			watchers[client.id]:stop()
 			watchers[client.id] = nil
 		end
-		-- stop poller
 		if pollers[client.id] then
 			pollers[client.id]:stop()
 			pollers[client.id]:close()
 			pollers[client.id] = nil
 		end
-		-- stop watchdog
 		if watchdogs[client.id] then
 			watchdogs[client.id]:stop()
 			watchdogs[client.id]:close()
 			watchdogs[client.id] = nil
 		end
-		-- clear batch queue timer
 		if batch_queues[client.id] then
 			if batch_queues[client.id].timer then
 				batch_queues[client.id].timer:stop()
@@ -165,50 +159,52 @@ M.start = function(client)
 			end
 			batch_queues[client.id] = nil
 		end
-		-- remove autocmd if present
 		if autocmds[client.id] then
 			pcall(vim.api.nvim_del_autocmd, autocmds[client.id])
 			autocmds[client.id] = nil
+		end
+		if autocmds[client.id .. "_earlycheck"] then
+			pcall(vim.api.nvim_del_autocmd, autocmds[client.id .. "_earlycheck"])
+			autocmds[client.id .. "_earlycheck"] = nil
 		end
 	end
 
 	local function restart_watcher()
 		if restart_scheduled[client.id] then
-			return -- debounce
+			return
 		end
 		restart_scheduled[client.id] = true
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
 
-			-- preserve old snapshot for diffing after restart
-			local old_snapshot = snapshots[client.id]
+			local old_snapshot = snapshots[client.id] or {}
 
 			cleanup()
 			if not client.is_stopped() then
 				notify("Restarting watcher for client " .. client.name, vim.log.levels.DEBUG)
 				M.start(client)
 
-				-- after restart, do immediate rescan + diff so we don’t lose deletes
-				if old_snapshot then
-					local new_map = {}
-					scan_tree(client.config.root_dir, new_map)
+				-- backfill deletes
+				local new_map = {}
+				scan_tree(client.config.root_dir, new_map)
 
-					local evs = {}
-					for path, _ in pairs(old_snapshot) do
-						if new_map[path] == nil then
-							table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 }) -- Deleted
-						end
-					end
-					if #evs > 0 then
-						notify("Backfilled " .. #evs .. " lost deletes after restart", vim.log.levels.DEBUG)
-						queue_events(client.id, evs)
+				local evs = {}
+				for path, _ in pairs(old_snapshot) do
+					if new_map[path] == nil then
+						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 					end
 				end
+				if #evs > 0 then
+					notify("Backfilled " .. #evs .. " deletes after restart", vim.log.levels.DEBUG)
+					queue_events(client.id, evs)
+				end
+
+				snapshots[client.id] = new_map
 			end
-		end, 300) -- debounce
+		end, 300)
 	end
 
-	-- -------- fs_event (fine-grained events) --------
+	-- -------- fs_event --------
 	local handle, err = uv.new_fs_event()
 	if not handle then
 		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
@@ -219,7 +215,6 @@ M.start = function(client)
 		handle:start(root, { recursive = true }, function(err2, filename, events)
 			if err2 then
 				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				-- try to restart fast on error
 				restart_watcher()
 				return
 			end
@@ -241,21 +236,17 @@ M.start = function(client)
 
 			if events.change then
 				if st then
-					-- Changed
 					snapshots[client.id][fullpath] = mtime_ns(st)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 				else
-					-- Deleted: update snapshot and send delete
 					snapshots[client.id][fullpath] = nil
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 				end
 			elseif events.rename then
 				if st then
-					-- Created (or moved in)
 					snapshots[client.id][fullpath] = mtime_ns(st)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
 				else
-					-- Deleted (or moved out)
 					snapshots[client.id][fullpath] = nil
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 				end
@@ -275,11 +266,13 @@ M.start = function(client)
 	watchers[client.id] = handle
 	last_events[client.id] = os.time()
 
-	-- Initialize snapshot for poller
-	snapshots[client.id] = {}
-	scan_tree(root, snapshots[client.id])
+	-- Initialize snapshot only if missing
+	if not snapshots[client.id] then
+		snapshots[client.id] = {}
+		scan_tree(root, snapshots[client.id])
+	end
 
-	-- -------- fs_poll (snapshot diff / resync) --------
+	-- -------- fs_poll --------
 	local poller = uv.new_fs_poll()
 	poller:start(root, POLL_INTERVAL, function(errp, prev, curr)
 		if errp then
@@ -287,99 +280,93 @@ M.start = function(client)
 			return
 		end
 
-		-- If the root directory's identity changed, do a restart
 		if
 			prev
 			and curr
-			and (prev.mtime ~= curr.mtime)
 			and (prev.mtime and curr.mtime)
 			and (prev.mtime.sec ~= curr.mtime.sec or prev.mtime.nsec ~= curr.mtime.nsec)
 		then
-			notify("Poller detected directory metadata change; restarting watcher", vim.log.levels.DEBUG)
+			notify("Poller detected root metadata change; restarting watcher", vim.log.levels.DEBUG)
 			restart_watcher()
 			return
 		end
 
-		-- Build new snapshot and diff with previous
 		local new_map = {}
 		scan_tree(root, new_map)
 
 		local old_map = snapshots[client.id] or {}
 		local evs = {}
 
-		-- Detect Created / Changed
 		for path, mt in pairs(new_map) do
 			local old_mt = old_map[path]
 			if not old_mt then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 }) -- Created
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
 			elseif old_mt ~= mt then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 }) -- Changed
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
 		end
 
-		-- Detect Deleted
 		for path, _ in pairs(old_map) do
 			if new_map[path] == nil then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 }) -- Deleted
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
 		end
 
 		if #evs > 0 then
-			-- deliver events immediately so LSP sees them even if fs_event is dead
 			snapshots[client.id] = new_map
 			queue_events(client.id, evs)
 			last_events[client.id] = os.time()
 
-			-- If fs_event hasn't reported anything recently, force a restart quickly so it can pick up future events
 			local last = last_events[client.id] or 0
 			if os.time() - last > POLLER_RESTART_THRESHOLD then
 				notify("Poller detected diffs while fs_event quiet; restarting watcher", vim.log.levels.DEBUG)
 				restart_watcher()
 			end
 		else
-			-- keep snapshot fresh even if no diffs
 			snapshots[client.id] = new_map
 		end
 	end)
 	pollers[client.id] = poller
 
-	-- -------- watchdog timer (safety) --------
+	-- -------- watchdog --------
 	local watchdog = uv.new_timer()
 	watchdog:start(15000, 15000, function()
 		if watchers[client.id] and not client.is_stopped() then
 			local last = last_events[client.id] or 0
 			if os.time() - last > WATCHDOG_IDLE then
-				notify("No fs activity for " .. WATCHDOG_IDLE .. "s, recycling watcher (safety)", vim.log.levels.DEBUG)
+				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
 				restart_watcher()
 			end
 		end
 	end)
 	watchdogs[client.id] = watchdog
 
-	-- -------- autocmd to detect buffer-close-of-deleted-file (Unity case) --------
-	-- When a buffer is closed for a file that was already deleted externally,
-	-- Neovim's internal handling can cause the fs_event handle to become invalid.
-	-- Restart that client's watcher when that happens.
+	-- -------- autocmds --------
 	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
 		callback = function(args)
-			-- args.buf is the buffer number being removed
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if not bufpath or bufpath == "" then
-				return
-			end
-			-- only consider files under this project's root
-			-- use plain find to avoid pattern magic
-			if bufpath:sub(1, #root) ~= root then
-				return
-			end
-			-- if file doesn't exist on disk, it was deleted externally earlier
-			if not uv.fs_stat(bufpath) then
-				notify("Buffer closed for deleted file: " .. bufpath .. " -> restarting watcher", vim.log.levels.DEBUG)
-				restart_watcher()
+			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+				if not uv.fs_stat(bufpath) then
+					notify("Buffer closed for deleted file: " .. bufpath .. " -> restart", vim.log.levels.DEBUG)
+					restart_watcher()
+				end
 			end
 		end,
 	})
 	autocmds[client.id] = id
+
+	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
+		callback = function(args)
+			local bufpath = vim.api.nvim_buf_get_name(args.buf)
+			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+				if not uv.fs_stat(bufpath) then
+					notify("File vanished while buffer open: " .. bufpath .. " -> restart", vim.log.levels.DEBUG)
+					restart_watcher()
+				end
+			end
+		end,
+	})
+	autocmds[client.id .. "_earlycheck"] = id2
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
@@ -387,43 +374,13 @@ M.start = function(client)
 		once = true,
 		callback = function(args)
 			if args.data.client_id == client.id then
-				if snapshots[client.id] then
-					snapshots[client.id] = nil
-				end
-				if restart_scheduled[client.id] then
-					restart_scheduled[client.id] = nil
-				end
+				snapshots[client.id] = nil
+				restart_scheduled[client.id] = nil
 				cleanup()
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,
 	})
-
-	-- -------- proactive detection: file vanished while buffer still open --------
-	-- If Unity deletes a file but the buffer is still open, Neovim will later
-	-- close the handle when you close the buffer, invalidating fs_event.
-	-- Catch this early and restart the watcher before it breaks.
-	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if not bufpath or bufpath == "" then
-				return
-			end
-			-- only consider files under this project's root
-			if bufpath:sub(1, #root) ~= root then
-				return
-			end
-			-- check if file is missing on disk while buffer is still open
-			if not uv.fs_stat(bufpath) then
-				notify(
-					"File vanished on disk while buffer open: " .. bufpath .. " -> restarting watcher",
-					vim.log.levels.DEBUG
-				)
-				restart_watcher()
-			end
-		end,
-	})
-	autocmds[client.id .. "_earlycheck"] = id2
 end
 
 return M
