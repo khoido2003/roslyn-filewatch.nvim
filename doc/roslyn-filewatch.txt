@@ -1,0 +1,96 @@
+
+*roslyn-filewatch.txt*      A lightweight file-watcher for Roslyn LSP in Neovim
+
+==============================================================================
+INTRODUCTION                                                *roslyn-filewatch*
+
+`roslyn-filewatch.nvim` is a Neovim plugin that adds a proper file system
+watcher for Roslyn LSP (C#).  
+Without this, you often need to `:edit!` or restart the LSP when adding or
+removing files.  
+This plugin keeps Roslyn in sync automatically.
+
+Project page: https://github.com/khoido2003/roslyn-filewatch.nvim
+
+==============================================================================
+FEATURES                                                    *roslyn-filewatch-features*
+
+- Watches your project root recursively using |vim.uv|
+- Sends `workspace/didChangeWatchedFiles` notifications to Roslyn
+- Configurable:
+  - Ignored directories (`bin`, `obj`, `.git`, etc.)
+  - File extensions to watch (`.cs`, `.csproj`, `.sln`, …)
+  - Batched notifications (to avoid spamming the LSP)
+- Cleans up automatically on |LspDetach|
+
+==============================================================================
+INSTALLATION                                                *roslyn-filewatch-install*
+
+With lazy.nvim:
+
+>lua
+    {
+      "khoido2003/roslyn-filewatch.nvim",
+      config = function()
+        require("roslyn_filewatch").setup()
+      end,
+    }
+
+With packer.nvim:
+
+>lua
+    use {
+      "khoido2003/roslyn-filewatch.nvim",
+      config = function()
+        require("roslyn_filewatch").setup()
+      end,
+    }
+
+==============================================================================
+CONFIGURATION                                               *roslyn-filewatch-config*
+
+Default setup:
+
+>lua
+    require("roslyn_filewatch").setup({
+      client_names = { "roslyn", "roslyn_ls" }, -- which LSP clients to target
+      ignore_dirs = { "bin", "obj", ".git", ".idea", ".vs" },
+      watch_extensions = { ".cs", ".csproj", ".sln" },
+      batching = {
+        enabled = true,
+        interval = 100, -- ms
+      },
+    })
+
+Options:
+- `client_names`   (table) LSP client names to watch (default: {"roslyn","roslyn_ls"})
+- `ignore_dirs`    (table) Directories to ignore
+- `watch_extensions` (table) File extensions to watch
+- `batching`       (table) Controls event batching:
+    - `enabled`    (bool)  Enable/disable batching
+    - `interval`   (int)   Delay in ms before sending batched changes
+
+==============================================================================
+COMMANDS                                                    *roslyn-filewatch-commands*
+
+There are no user-facing commands.  
+The plugin runs automatically when Roslyn LSP attaches.
+
+==============================================================================
+TROUBLESHOOTING                                             *roslyn-filewatch-troubleshooting*
+
+Q: I don’t see file changes reflected in Roslyn.
+A: Ensure your client name matches one in |roslyn-filewatch-config|.  
+   Run `:LspInfo` to check your client name.
+
+Q: File watcher crashes on Linux after many deletes.
+A: This is a limitation of some file systems. The plugin will restart the
+watcher automatically if invalidated.
+
+==============================================================================
+LICENSE                                                     *roslyn-filewatch-license*
+
+MIT License. See LICENSE file in repo.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
