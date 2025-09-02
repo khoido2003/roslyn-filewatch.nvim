@@ -26,21 +26,30 @@ This plugin adds a proper **file system watcher** so Roslyn always stays updated
 ### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
-{
-  "khoido2003/roslyn-filewatch.nvim",
-  config = function()
-    require("roslyn_filewatch").setup({
-      -- optional overrides
-      client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
-      ignore_dirs = { "bin", "obj", ".git", ".idea" },
-      watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
-      batching = {
-        enabled = true,
-        interval = 100, -- ms
-      },
-    })
-  end,
-}
+	{
+		"khoido2003/roslyn-filewatch.nvim",
+		config = function()
+			require("roslyn_filewatch").setup({
+				-- optional overrides
+				client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
+				ignore_dirs = {
+					"Library",
+					"Temp",
+					"Logs",
+					"Obj",
+					"Bin",
+					".git",
+					".idea",
+					".vs",
+				},
+				watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
+				batching = {
+					enabled = true,
+					interval = 100, -- ms
+				},
+			})
+		end,
+	},
 ```
 
 ### Using [packer.nvim](https://github.com/wbthomason/packer.nvim?utm_source=chatgpt.com)
@@ -58,16 +67,26 @@ use {
 
 ```lua 
 require("roslyn_filewatch").setup({
-  client_names = { "roslyn_ls" },     -- LSP clients to target
-  ignore_dirs = { "bin", "obj", ".git" },
-  watch_extensions = { ".cs", ".csproj", ".sln" },
-  batching = {
-    enabled = true,
-    interval = 100,                   -- milliseconds
-  },
-})
-```
+				-- optional overrides
+				client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
+				ignore_dirs = {
+					"Library",
+					"Temp",
+					"Logs",
+					"Obj",
+					"Bin",
+					".git",
+					".idea",
+					".vs",
+				},
+				watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
+				batching = {
+					enabled = true,
+					interval = 100, -- ms
+				},
+			})
 
+```
 
 ---
 
