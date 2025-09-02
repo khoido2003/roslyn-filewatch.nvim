@@ -11,7 +11,6 @@ local batch_queues = {}
 -- ///////////////////////////////////////////////////////////
 
 local function notify(msg, level)
-	-- use nvim-notify if available
 	vim.schedule(function()
 		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
 	end)
@@ -20,15 +19,10 @@ end
 --- Send file changes to Roslyn
 local function notify_roslyn(changes)
 	local clients = vim.lsp.get_clients()
-	local sent = false
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
 			client.notify("workspace/didChangeWatchedFiles", { changes = changes })
-			sent = true
 		end
-	end
-	if not sent then
-		notify("No matching LSP client to notify", vim.log.levels.WARN)
 	end
 end
 
@@ -53,8 +47,7 @@ end
 
 M.start = function(client)
 	if watchers[client.id] then
-		notify("Watcher already running for client " .. client.name)
-		return
+		return -- already running, no spam
 	end
 
 	local root = client.config.root_dir
@@ -122,15 +115,13 @@ M.start = function(client)
 						queue.timer = nil
 						if #changes > 0 then
 							vim.schedule(function()
-								notify("Sending " .. #changes .. " file changes to Roslyn")
-								notify_roslyn(changes)
+								notify_roslyn(changes) -- silent in normal use
 							end)
 						end
 					end)
 				end
 			else
-				notify("Sending " .. #evs .. " file change(s) to Roslyn")
-				notify_roslyn(evs)
+				notify_roslyn(evs) -- silent
 			end
 		end)
 	end)
