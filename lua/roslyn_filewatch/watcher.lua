@@ -208,7 +208,11 @@ M.start = function(client)
 		local new_map = {}
 		scan_tree(root, new_map)
 
-		local old_map = snapshots[client.id] or {}
+		if not snapshots[client.id] then
+			snapshots[client.id] = {}
+		end
+
+		local old_map = vim.deepcopy(snapshots[client.id])
 		local evs = {}
 
 		-- detect deletes
@@ -234,11 +238,12 @@ M.start = function(client)
 		for path, mt in pairs(new_map) do
 			snapshots[client.id][path] = mt
 		end
-		for path, _ in pairs(snapshots[client.id]) do
+		for path, _ in pairs(vim.deepcopy(snapshots[client.id])) do
 			if new_map[path] == nil then
 				snapshots[client.id][path] = nil
 			end
 		end
+
 		last_events[client.id] = os.time()
 	end
 
