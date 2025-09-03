@@ -54,14 +54,37 @@ local function mtime_ns(stat)
 end
 
 -- ================================================================
--- Helper: close buffers for deleted files
+-- Path normalization (help comparing Windows/Unix slashes & drive case)
 -- ================================================================
+local function normalize_path(p)
+	if not p or p == "" then
+		return p
+	end
+	-- unify separators
+	p = p:gsub("\\", "/")
+	-- remove trailing slashes
+	p = p:gsub("/+$", "")
+	-- lowercase drive letter on Windows-style "C:/..."
+	local drive = p:match("^([A-Za-z]):/")
+	if drive then
+		p = drive:lower() .. p:sub(2)
+	end
+	return p
+end
 
+-- ================================================================
+-- Helper: close buffers for deleted files (safe: runs in scheduled context)
+-- ================================================================
 local function close_deleted_buffers(path)
+	-- schedule so we are not in a fast-callback context
 	vim.schedule(function()
+		local target = normalize_path(path)
 		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+			-- only consider loaded buffers
 			if vim.api.nvim_buf_is_loaded(bufnr) then
-				if vim.api.nvim_buf_get_name(bufnr) == path then
+				local name = vim.api.nvim_buf_get_name(bufnr)
+				if name and name ~= "" and normalize_path(name) == target then
+					-- forcibly delete the buffer (equivalent to :bwipeout!)
 					pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
 					notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
 				end
@@ -78,7 +101,7 @@ local function queue_events(client_id, evs)
 		if not batch_queues[client_id] then
 			batch_queues[client_id] = { events = {}, timer = nil }
 		end
-		local queue = batch_queues[client_id]
+		local queue = batch_queues[client.id or client_id] or batch_queues[client_id]
 		vim.list_extend(queue.events, evs)
 
 		if not queue.timer then
@@ -154,39 +177,49 @@ M.start = function(client)
 		return
 	end
 
+	-- safe cleanup that removes any autocmds that start with client.id
 	local function cleanup()
 		if watchers[client.id] then
-			watchers[client.id]:stop()
+			pcall(function()
+				watchers[client.id]:stop()
+			end)
 			watchers[client.id] = nil
 		end
 		if pollers[client.id] then
-			pollers[client.id]:stop()
-			pollers[client.id]:close()
+			pcall(function()
+				pollers[client.id]:stop()
+				pollers[client.id]:close()
+			end)
 			pollers[client.id] = nil
 		end
 		if watchdogs[client.id] then
-			watchdogs[client.id]:stop()
-			watchdogs[client.id]:close()
+			pcall(function()
+				watchdogs[client.id]:stop()
+				watchdogs[client.id]:close()
+			end)
 			watchdogs[client.id] = nil
 		end
 		if batch_queues[client.id] then
 			if batch_queues[client.id].timer then
-				batch_queues[client.id].timer:stop()
-				batch_queues[client.id].timer:close()
+				pcall(function()
+					batch_queues[client.id].timer:stop()
+					batch_queues[client.id].timer:close()
+				end)
 			end
 			batch_queues[client.id] = nil
 		end
-		if autocmds[client.id] then
-			pcall(vim.api.nvim_del_autocmd, autocmds[client.id])
-			autocmds[client.id] = nil
+
+		-- remove any autocmd entries that belong to this client
+		local to_del = {}
+		for key, _ in pairs(autocmds) do
+			local ks = tostring(key)
+			if ks:find("^" .. client.id) then
+				table.insert(to_del, key)
+			end
 		end
-		if autocmds[client.id .. "_earlycheck"] then
-			pcall(vim.api.nvim_del_autocmd, autocmds[client.id .. "_earlycheck"])
-			autocmds[client.id .. "_earlycheck"] = nil
-		end
-		if autocmds[client.id .. "_extra"] then
-			pcall(vim.api.nvim_del_autocmd, autocmds[client.id .. "_extra"])
-			autocmds[client.id .. "_extra"] = nil
+		for _, key in ipairs(to_del) do
+			local ok, _ = pcall(vim.api.nvim_del_autocmd, autocmds[key])
+			autocmds[key] = nil
 		end
 	end
 
@@ -236,10 +269,12 @@ M.start = function(client)
 
 		local old_map = vim.deepcopy(snapshots[client.id])
 		local evs = {}
+		local saw_delete = false
 
 		-- detect deletes
 		for path, _ in pairs(old_map) do
 			if new_map[path] == nil then
+				saw_delete = true
 				close_deleted_buffers(path)
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
@@ -255,6 +290,10 @@ M.start = function(client)
 		if #evs > 0 then
 			notify("Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
 			queue_events(client.id, evs)
+			-- if deletes were found, restart to ensure fs_event isn't left in a bad state
+			if saw_delete then
+				restart_watcher()
+			end
 		end
 
 		-- replace snapshot
@@ -273,6 +312,7 @@ M.start = function(client)
 		handle:start(root, { recursive = true }, function(err2, filename, events)
 			if err2 then
 				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
+				resync_snapshot()
 				restart_watcher()
 				return
 			end
@@ -299,8 +339,11 @@ M.start = function(client)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 				else
 					snapshots[client.id][fullpath] = nil
+					-- close buffers and notify delete
 					close_deleted_buffers(fullpath)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
+					-- restart to be safe if a delete happened in fast-path
+					restart_watcher()
 				end
 			elseif events.rename then
 				if st then
@@ -310,6 +353,7 @@ M.start = function(client)
 					snapshots[client.id][fullpath] = nil
 					close_deleted_buffers(fullpath)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
+					restart_watcher()
 				end
 			end
 
@@ -357,6 +401,7 @@ M.start = function(client)
 
 		local old_map = snapshots[client.id] or {}
 		local evs = {}
+		local saw_delete = false
 
 		for path, mt in pairs(new_map) do
 			local old_mt = old_map[path]
@@ -369,6 +414,7 @@ M.start = function(client)
 
 		for path, _ in pairs(old_map) do
 			if new_map[path] == nil then
+				saw_delete = true
 				close_deleted_buffers(path)
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
@@ -382,6 +428,11 @@ M.start = function(client)
 			local last = last_events[client.id] or 0
 			if os.time() - last > POLLER_RESTART_THRESHOLD then
 				notify("Poller detected diffs while fs_event quiet; restarting watcher", vim.log.levels.DEBUG)
+				restart_watcher()
+			end
+
+			if saw_delete then
+				-- extra safety restart if deletes found by poller
 				restart_watcher()
 			end
 		else
@@ -410,8 +461,9 @@ M.start = function(client)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and bufpath:sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
-					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync snapshot", vim.log.levels.DEBUG)
+					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
 					resync_snapshot()
+					restart_watcher()
 				end
 			end
 		end,
@@ -423,11 +475,9 @@ M.start = function(client)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and bufpath:sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
-					notify(
-						"File vanished while buffer open: " .. bufpath .. " -> resync snapshot",
-						vim.log.levels.DEBUG
-					)
+					notify("File vanished while buffer open: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
 					resync_snapshot()
+					restart_watcher()
 				end
 			end
 		end,
@@ -441,10 +491,11 @@ M.start = function(client)
 			if bufpath ~= "" and bufpath:sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify(
-						"File missing but buffer still open: " .. bufpath .. " -> resync snapshot",
+						"File missing but buffer still open: " .. bufpath .. " -> resync+restart",
 						vim.log.levels.DEBUG
 					)
 					resync_snapshot()
+					restart_watcher()
 				end
 			end
 		end,
