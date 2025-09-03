@@ -54,6 +54,19 @@ local function mtime_ns(stat)
 end
 
 -- ================================================================
+-- Helper: close buffers for deleted files
+-- ================================================================
+local function close_deleted_buffers(path)
+	local bufnr = vim.fn.bufnr(path, false)
+	if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
+		vim.schedule(function()
+			pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+			notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
+		end)
+	end
+end
+
+-- ================================================================
 -- Helper: queue + batch flush
 -- ================================================================
 local function queue_events(client_id, evs)
@@ -195,6 +208,7 @@ M.start = function(client)
 				local evs = {}
 				for path, _ in pairs(old_snapshot) do
 					if new_map[path] == nil then
+						close_deleted_buffers(path)
 						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 					end
 				end
@@ -222,6 +236,7 @@ M.start = function(client)
 		-- detect deletes
 		for path, _ in pairs(old_map) do
 			if new_map[path] == nil then
+				close_deleted_buffers(path)
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
 		end
@@ -280,6 +295,7 @@ M.start = function(client)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 				else
 					snapshots[client.id][fullpath] = nil
+					close_deleted_buffers(fullpath)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 				end
 			elseif events.rename then
@@ -288,6 +304,7 @@ M.start = function(client)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
 				else
 					snapshots[client.id][fullpath] = nil
+					close_deleted_buffers(fullpath)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 				end
 			end
@@ -348,6 +365,7 @@ M.start = function(client)
 
 		for path, _ in pairs(old_map) do
 			if new_map[path] == nil then
+				close_deleted_buffers(path)
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
 		end
@@ -412,7 +430,7 @@ M.start = function(client)
 	})
 	autocmds[client.id .. "_earlycheck"] = id2
 
-	-- NEW: extra check for open-but-deleted files
+	-- extra check for open-but-deleted files
 	local id3 = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
