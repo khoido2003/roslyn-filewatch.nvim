@@ -204,6 +204,44 @@ M.start = function(client)
 		end, 300)
 	end
 
+	local function resync_snapshot()
+		local new_map = {}
+		scan_tree(root, new_map)
+
+		local old_map = snapshots[client.id] or {}
+		local evs = {}
+
+		-- detect deletes
+		for path, _ in pairs(old_map) do
+			if new_map[path] == nil then
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+			end
+		end
+
+		-- detect creates
+		for path, mt in pairs(new_map) do
+			if old_map[path] == nil then
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+			end
+		end
+
+		if #evs > 0 then
+			notify("Resynced " .. #evs .. " changes from buffer autocmd", vim.log.levels.DEBUG)
+			queue_events(client.id, evs)
+		end
+
+		-- merge snapshot
+		for path, mt in pairs(new_map) do
+			snapshots[client.id][path] = mt
+		end
+		for path, _ in pairs(snapshots[client.id]) do
+			if new_map[path] == nil then
+				snapshots[client.id][path] = nil
+			end
+		end
+		last_events[client.id] = os.time()
+	end
+
 	-- -------- fs_event --------
 	local handle, err = uv.new_fs_event()
 	if not handle then
@@ -219,8 +257,8 @@ M.start = function(client)
 				return
 			end
 			if not filename then
-				notify("Watcher invalidated (filename=nil), restarting...", vim.log.levels.DEBUG)
-				restart_watcher()
+				notify("fs_event filename=nil -> resync snapshot", vim.log.levels.DEBUG)
+				resync_snapshot()
 				return
 			end
 
@@ -313,7 +351,16 @@ M.start = function(client)
 		end
 
 		if #evs > 0 then
-			snapshots[client.id] = new_map
+			-- merge snapshot
+			for path, mt in pairs(new_map) do
+				snapshots[client.id][path] = mt
+			end
+			for path, _ in pairs(snapshots[client.id]) do
+				if new_map[path] == nil then
+					snapshots[client.id][path] = nil
+				end
+			end
+
 			queue_events(client.id, evs)
 			last_events[client.id] = os.time()
 
@@ -323,7 +370,15 @@ M.start = function(client)
 				restart_watcher()
 			end
 		else
-			snapshots[client.id] = new_map
+			-- still update snapshot by merging
+			for path, mt in pairs(new_map) do
+				snapshots[client.id][path] = mt
+			end
+			for path, _ in pairs(snapshots[client.id]) do
+				if new_map[path] == nil then
+					snapshots[client.id][path] = nil
+				end
+			end
 		end
 	end)
 	pollers[client.id] = poller
@@ -342,27 +397,6 @@ M.start = function(client)
 	watchdogs[client.id] = watchdog
 
 	-- -------- autocmds --------
-	local function resync_snapshot()
-		local new_map = {}
-		scan_tree(root, new_map)
-
-		local old_map = snapshots[client.id] or {}
-		local evs = {}
-
-		for path, _ in pairs(old_map) do
-			if new_map[path] == nil then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-			end
-		end
-
-		if #evs > 0 then
-			notify("Resynced " .. #evs .. " deletes from buffer autocmd", vim.log.levels.DEBUG)
-			queue_events(client.id, evs)
-		end
-
-		snapshots[client.id] = new_map
-	end
-
 	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
