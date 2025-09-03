@@ -78,18 +78,28 @@ end
 
 local function close_deleted_buffers(path)
 	local uri = vim.uri_from_fname(path)
-	vim.schedule(function()
-		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-			if vim.api.nvim_buf_is_loaded(bufnr) then
-				local bufuri = vim.uri_from_fname(vim.api.nvim_buf_get_name(bufnr))
-				if bufuri == uri then
-					pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-					notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
-					break -- stop after closing the correct one
+
+	-- double-check after short delay to avoid race conditions
+	vim.defer_fn(function()
+		local st = uv.fs_stat(path)
+		if st then
+			-- file still exists -> skip closing
+			return
+		end
+
+		vim.schedule(function()
+			for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+				if vim.api.nvim_buf_is_loaded(bufnr) then
+					local bufuri = vim.uri_from_fname(vim.api.nvim_buf_get_name(bufnr))
+					if bufuri == uri then
+						pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+						notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
+						break
+					end
 				end
 			end
-		end
-	end)
+		end)
+	end, 200) -- wait 200ms before confirming deletion
 end
 
 -- ================================================================
