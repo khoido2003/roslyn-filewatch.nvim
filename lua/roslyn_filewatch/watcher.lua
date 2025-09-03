@@ -167,6 +167,10 @@ M.start = function(client)
 			pcall(vim.api.nvim_del_autocmd, autocmds[client.id .. "_earlycheck"])
 			autocmds[client.id .. "_earlycheck"] = nil
 		end
+		if autocmds[client.id .. "_extra"] then
+			pcall(vim.api.nvim_del_autocmd, autocmds[client.id .. "_extra"])
+			autocmds[client.id .. "_extra"] = nil
+		end
 	end
 
 	local function restart_watcher()
@@ -230,25 +234,12 @@ M.start = function(client)
 		end
 
 		if #evs > 0 then
-			notify("Resynced " .. #evs .. " changes from buffer autocmd", vim.log.levels.DEBUG)
+			notify("Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
 			queue_events(client.id, evs)
 		end
 
-		-- merge snapshot safely
-		for path, mt in pairs(new_map) do
-			snapshots[client.id][path] = mt
-		end
-
-		local to_delete = {}
-		for path, _ in pairs(snapshots[client.id]) do
-			if new_map[path] == nil then
-				table.insert(to_delete, path)
-			end
-		end
-		for _, path in ipairs(to_delete) do
-			snapshots[client.id][path] = nil
-		end
-
+		-- replace snapshot
+		snapshots[client.id] = new_map
 		last_events[client.id] = os.time()
 	end
 
@@ -267,8 +258,9 @@ M.start = function(client)
 				return
 			end
 			if not filename then
-				notify("fs_event filename=nil -> resync snapshot", vim.log.levels.DEBUG)
+				notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
 				resync_snapshot()
+				restart_watcher()
 				return
 			end
 
@@ -361,16 +353,7 @@ M.start = function(client)
 		end
 
 		if #evs > 0 then
-			-- merge snapshot
-			for path, mt in pairs(new_map) do
-				snapshots[client.id][path] = mt
-			end
-			for path, _ in pairs(snapshots[client.id]) do
-				if new_map[path] == nil then
-					snapshots[client.id][path] = nil
-				end
-			end
-
+			snapshots[client.id] = new_map
 			queue_events(client.id, evs)
 			last_events[client.id] = os.time()
 
@@ -380,15 +363,7 @@ M.start = function(client)
 				restart_watcher()
 			end
 		else
-			-- still update snapshot by merging
-			for path, mt in pairs(new_map) do
-				snapshots[client.id][path] = mt
-			end
-			for path, _ in pairs(snapshots[client.id]) do
-				if new_map[path] == nil then
-					snapshots[client.id][path] = nil
-				end
-			end
+			snapshots[client.id] = new_map
 		end
 	end)
 	pollers[client.id] = poller
@@ -400,6 +375,7 @@ M.start = function(client)
 			local last = last_events[client.id] or 0
 			if os.time() - last > WATCHDOG_IDLE then
 				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
+				resync_snapshot()
 				restart_watcher()
 			end
 		end
@@ -435,6 +411,23 @@ M.start = function(client)
 		end,
 	})
 	autocmds[client.id .. "_earlycheck"] = id2
+
+	-- NEW: extra check for open-but-deleted files
+	local id3 = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
+		callback = function(args)
+			local bufpath = vim.api.nvim_buf_get_name(args.buf)
+			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+				if not uv.fs_stat(bufpath) then
+					notify(
+						"File missing but buffer still open: " .. bufpath .. " -> resync snapshot",
+						vim.log.levels.DEBUG
+					)
+					resync_snapshot()
+				end
+			end
+		end,
+	})
+	autocmds[client.id .. "_extra"] = id3
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
