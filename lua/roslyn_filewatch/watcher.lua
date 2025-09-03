@@ -75,18 +75,17 @@ end
 -- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
 -- ================================================================
+
 local function close_deleted_buffers(path)
-	-- schedule so we are not in a fast-callback context
+	local uri = vim.uri_from_fname(path)
 	vim.schedule(function()
-		local target = normalize_path(path)
 		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-			-- only consider loaded buffers
 			if vim.api.nvim_buf_is_loaded(bufnr) then
-				local name = vim.api.nvim_buf_get_name(bufnr)
-				if name and name ~= "" and normalize_path(name) == target then
-					-- forcibly delete the buffer (equivalent to :bwipeout!)
+				local bufuri = vim.uri_from_fname(vim.api.nvim_buf_get_name(bufnr))
+				if bufuri == uri then
 					pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
 					notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
+					break -- stop after closing the correct one
 				end
 			end
 		end
