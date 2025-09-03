@@ -96,12 +96,13 @@ end
 -- ================================================================
 -- Helper: queue + batch flush
 -- ================================================================
+
 local function queue_events(client_id, evs)
 	if config.options.batching.enabled then
 		if not batch_queues[client_id] then
 			batch_queues[client_id] = { events = {}, timer = nil }
 		end
-		local queue = batch_queues[client.id or client_id] or batch_queues[client_id]
+		local queue = batch_queues[client_id]
 		vim.list_extend(queue.events, evs)
 
 		if not queue.timer then
@@ -120,7 +121,9 @@ local function queue_events(client_id, evs)
 			end)
 		end
 	else
-		notify_roslyn(evs)
+		vim.schedule(function()
+			notify_roslyn(evs)
+		end)
 	end
 end
 
