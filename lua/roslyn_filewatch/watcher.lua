@@ -234,14 +234,19 @@ M.start = function(client)
 			queue_events(client.id, evs)
 		end
 
-		-- merge snapshot
+		-- merge snapshot safely
 		for path, mt in pairs(new_map) do
 			snapshots[client.id][path] = mt
 		end
-		for path, _ in pairs(vim.deepcopy(snapshots[client.id])) do
+
+		local to_delete = {}
+		for path, _ in pairs(snapshots[client.id]) do
 			if new_map[path] == nil then
-				snapshots[client.id][path] = nil
+				table.insert(to_delete, path)
 			end
+		end
+		for _, path in ipairs(to_delete) do
+			snapshots[client.id][path] = nil
 		end
 
 		last_events[client.id] = os.time()
