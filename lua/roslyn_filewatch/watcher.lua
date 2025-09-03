@@ -250,19 +250,29 @@ M.start = function(client)
 				notify("Restarting watcher for client " .. client.name, vim.log.levels.DEBUG)
 				M.start(client)
 
-				-- backfill deletes
+				-- rescan for diff
 				local new_map = {}
 				scan_tree(client.config.root_dir, new_map)
 
 				local evs = {}
+
+				-- backfill deletes
 				for path, _ in pairs(old_snapshot) do
 					if new_map[path] == nil then
 						close_deleted_buffers(path)
-						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 }) -- Deleted
 					end
 				end
+
+				-- backfill creates
+				for path, _ in pairs(new_map) do
+					if old_snapshot[path] == nil then
+						table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 }) -- Created
+					end
+				end
+
 				if #evs > 0 then
-					notify("Backfilled " .. #evs .. " deletes after restart", vim.log.levels.DEBUG)
+					notify("Backfilled " .. #evs .. " events after restart", vim.log.levels.DEBUG)
 					queue_events(client.id, evs)
 				end
 
@@ -456,10 +466,21 @@ M.start = function(client)
 	-- -------- watchdog --------
 	local watchdog = uv.new_timer()
 	watchdog:start(15000, 15000, function()
-		if watchers[client.id] and not client.is_stopped() then
+		if not client.is_stopped() then
 			local last = last_events[client.id] or 0
+
+			-- detect idle (no events in too long)
 			if os.time() - last > WATCHDOG_IDLE then
 				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
+				resync_snapshot()
+				restart_watcher()
+				return
+			end
+
+			-- detect dead handle
+			local h = watchers[client.id]
+			if not h or h:is_closing() then
+				notify("Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
 				resync_snapshot()
 				restart_watcher()
 			end
