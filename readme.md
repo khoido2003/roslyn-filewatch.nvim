@@ -116,6 +116,25 @@ require("roslyn_filewatch").setup({
 
 ---
 
+---
+
+## ⚠️ Known Limitations
+
+- On very large repositories (tens of thousands of files):  
+  - Initial snapshot scans can cause **short CPU spikes** (UI may freeze briefly).  
+  - Memory usage scales with project size (released when projects close).  
+
+- During heavy operations (e.g. `git checkout`, Unity regenerating solution files):  
+  - Expect a burst of events. With batching enabled, these are grouped safely,  
+    but you may notice **slight delays** before Roslyn sees all updates.  
+
+- These spikes **will not crash Neovim**, but may temporarily impact responsiveness.  
+
+For most Unity/.NET projects, this plugin is **good enough** and keeps Roslyn in sync without manual restarts.
+
+
+---
+
 ## 📜 License
 
 This project is licensed under the [MIT License](LICENSE).
