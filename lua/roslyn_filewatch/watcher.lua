@@ -56,14 +56,18 @@ end
 -- ================================================================
 -- Helper: close buffers for deleted files
 -- ================================================================
+
 local function close_deleted_buffers(path)
-	local bufnr = vim.fn.bufnr(path, false)
-	if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-		vim.schedule(function()
-			pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-			notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
-		end)
-	end
+	vim.schedule(function()
+		for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_loaded(bufnr) then
+				if vim.api.nvim_buf_get_name(bufnr) == path then
+					pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+					notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
+				end
+			end
+		end
+	end)
 end
 
 -- ================================================================
