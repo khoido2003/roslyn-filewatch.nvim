@@ -1,3 +1,4 @@
+-- roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 
@@ -10,12 +11,15 @@ local watchdogs = {}
 local snapshots = {} -- client_id -> { [path]=mtime_ns }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
-local autocmds = {} -- client_id -> autocmd id
+local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
 
--- Tunables
-local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
-local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
-local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
+-- helper: compute mtime in nanoseconds
+local function mtime_ns(stat)
+	if not stat or not stat.mtime then
+		return 0
+	end
+	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
+end
 
 local function notify(msg, level)
 	vim.schedule(function()
@@ -30,27 +34,6 @@ local function notify_roslyn(changes)
 			client.notify("workspace/didChangeWatchedFiles", { changes = changes })
 		end
 	end
-end
-
-local function should_watch(path)
-	for _, dir in ipairs(config.options.ignore_dirs) do
-		if path:find("[/\\]" .. dir .. "[/\\]") then
-			return false
-		end
-	end
-	for _, ext in ipairs(config.options.watch_extensions) do
-		if path:sub(-#ext) == ext then
-			return true
-		end
-	end
-	return false
-end
-
-local function mtime_ns(stat)
-	if not stat or not stat.mtime then
-		return 0
-	end
-	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
 end
 
 -- ================================================================
@@ -75,8 +58,8 @@ end
 -- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
 -- ================================================================
-
 local function close_deleted_buffers(path)
+	path = normalize_path(path)
 	local uri = vim.uri_from_fname(path)
 
 	-- double-check after short delay to avoid race conditions
@@ -90,11 +73,14 @@ local function close_deleted_buffers(path)
 		vim.schedule(function()
 			for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
 				if vim.api.nvim_buf_is_loaded(bufnr) then
-					local bufuri = vim.uri_from_fname(vim.api.nvim_buf_get_name(bufnr))
-					if bufuri == uri then
-						pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-						notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
-						break
+					local bname = vim.api.nvim_buf_get_name(bufnr)
+					if bname ~= "" then
+						local bufuri = vim.uri_from_fname(normalize_path(bname))
+						if bufuri == uri then
+							pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+							notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
+							break
+						end
 					end
 				end
 			end
@@ -105,7 +91,6 @@ end
 -- ================================================================
 -- Helper: queue + batch flush
 -- ================================================================
-
 local function queue_events(client_id, evs)
 	if config.options.batching.enabled then
 		if not batch_queues[client_id] then
@@ -119,8 +104,11 @@ local function queue_events(client_id, evs)
 			queue.timer:start(config.options.batching.interval, 0, function()
 				local changes = queue.events
 				queue.events = {}
-				queue.timer:stop()
-				queue.timer:close()
+				-- stop & close safely
+				pcall(function()
+					queue.timer:stop()
+					queue.timer:close()
+				end)
 				queue.timer = nil
 				if #changes > 0 then
 					vim.schedule(function()
@@ -137,9 +125,10 @@ local function queue_events(client_id, evs)
 end
 
 -- ================================================================
--- Directory scan (for poller snapshot)
+-- Directory scan (for poller snapshot) — writes normalized paths into out_map
 -- ================================================================
 local function scan_tree(root, out_map)
+	root = normalize_path(root)
 	local function scan_dir(path)
 		local fd = uv.fs_scandir(path)
 		if not fd then
@@ -150,11 +139,12 @@ local function scan_tree(root, out_map)
 			if not name then
 				break
 			end
-			local fullpath = path .. "/" .. name
+			local fullpath = normalize_path(path .. "/" .. name)
 			if typ == "directory" then
 				local skip = false
 				for _, dir in ipairs(config.options.ignore_dirs) do
-					if fullpath:find("[/\\]" .. dir .. "$") then
+					-- match "/dir/" or "/dir$" in normalized path
+					if fullpath:find("/" .. dir .. "/") or fullpath:find("/" .. dir .. "$") then
 						skip = true
 						break
 					end
@@ -163,7 +153,22 @@ local function scan_tree(root, out_map)
 					scan_dir(fullpath)
 				end
 			elseif typ == "file" then
-				if should_watch(fullpath) then
+				if
+					(function(p)
+						-- reuse should_watch-like logic but on normalized path
+						for _, dir in ipairs(config.options.ignore_dirs) do
+							if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
+								return false
+							end
+						end
+						for _, ext in ipairs(config.options.watch_extensions) do
+							if p:sub(-#ext) == ext then
+								return true
+							end
+						end
+						return false
+					end)(fullpath)
+				then
 					local st = uv.fs_stat(fullpath)
 					if st then
 						out_map[fullpath] = mtime_ns(st)
@@ -183,34 +188,61 @@ M.start = function(client)
 		return -- already running
 	end
 
+	-- read tunables at start-time (so config.setup can be called before M.start)
+	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
+	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
+	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
+
 	local root = client.config.root_dir
 	if not root then
 		notify("No root_dir for client " .. client.name, vim.log.levels.ERROR)
 		return
 	end
+	root = normalize_path(root)
 
-	-- safe cleanup that removes any autocmds that start with client.id
+	-- safe cleanup
 	local function cleanup()
+		-- fs_event handle
 		if watchers[client.id] then
 			pcall(function()
-				watchers[client.id]:stop()
+				local h = watchers[client.id]
+				-- stop and close if possible
+				pcall(function()
+					if h and not h:is_closing() then
+						if h.stop then
+							h:stop()
+						end
+						if h.close then
+							h:close()
+						end
+					end
+				end)
 			end)
 			watchers[client.id] = nil
 		end
+
 		if pollers[client.id] then
 			pcall(function()
-				pollers[client.id]:stop()
-				pollers[client.id]:close()
+				local p = pollers[client.id]
+				if p and not p:is_closing() then
+					p:stop()
+					p:close()
+				end
 			end)
 			pollers[client.id] = nil
 		end
+
 		if watchdogs[client.id] then
 			pcall(function()
-				watchdogs[client.id]:stop()
-				watchdogs[client.id]:close()
+				local w = watchdogs[client.id]
+				if w and not w:is_closing() then
+					w:stop()
+					w:close()
+				end
 			end)
 			watchdogs[client.id] = nil
 		end
+
 		if batch_queues[client.id] then
 			if batch_queues[client.id].timer then
 				pcall(function()
@@ -221,17 +253,12 @@ M.start = function(client)
 			batch_queues[client.id] = nil
 		end
 
-		-- remove any autocmd entries that belong to this client
-		local to_del = {}
-		for key, _ in pairs(autocmds) do
-			local ks = tostring(key)
-			if ks:find("^" .. client.id) then
-				table.insert(to_del, key)
+		-- remove autocmds for this exact client id (avoid accidental prefix matches)
+		if autocmds[client.id] then
+			for _, id in pairs(autocmds[client.id]) do
+				pcall(vim.api.nvim_del_autocmd, id)
 			end
-		end
-		for _, key in ipairs(to_del) do
-			local ok, _ = pcall(vim.api.nvim_del_autocmd, autocmds[key])
-			autocmds[key] = nil
+			autocmds[client.id] = nil
 		end
 	end
 
@@ -302,10 +329,12 @@ M.start = function(client)
 			end
 		end
 
-		-- detect creates
+		-- detect creates / changes
 		for path, mt in pairs(new_map) do
 			if old_map[path] == nil then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+			elseif old_map[path] ~= mt then
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
 		end
 
@@ -345,8 +374,22 @@ M.start = function(client)
 				return
 			end
 
-			local fullpath = root .. "/" .. filename
-			if not should_watch(fullpath) then
+			local fullpath = normalize_path(root .. "/" .. filename)
+			-- check ignore list and watched extensions
+			local function should_watch_path(p)
+				for _, dir in ipairs(config.options.ignore_dirs) do
+					if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
+						return false
+					end
+				end
+				for _, ext in ipairs(config.options.watch_extensions) do
+					if p:sub(-#ext) == ext then
+						return true
+					end
+				end
+				return false
+			end
+			if not should_watch_path(fullpath) then
 				return
 			end
 
@@ -355,26 +398,22 @@ M.start = function(client)
 			local st = uv.fs_stat(fullpath)
 			local evs = {}
 
-			if events.change then
-				if st then
-					snapshots[client.id][fullpath] = mtime_ns(st)
+			-- determine created / changed / deleted by comparing snapshot
+			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
+			if st then
+				local mt = mtime_ns(st)
+				snapshots[client.id][fullpath] = mt
+				if not prev_mt then
+					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
+				elseif prev_mt ~= mt then
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
-				else
+				end
+			else
+				if prev_mt then
 					snapshots[client.id][fullpath] = nil
-					-- close buffers and notify delete
 					close_deleted_buffers(fullpath)
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 					-- restart to be safe if a delete happened in fast-path
-					restart_watcher()
-				end
-			elseif events.rename then
-				if st then
-					snapshots[client.id][fullpath] = mtime_ns(st)
-					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-				else
-					snapshots[client.id][fullpath] = nil
-					close_deleted_buffers(fullpath)
-					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 					restart_watcher()
 				end
 			end
@@ -387,6 +426,12 @@ M.start = function(client)
 
 	if not ok then
 		notify("Failed to start watcher: " .. tostring(start_err), vim.log.levels.ERROR)
+		-- ensure handle closed
+		pcall(function()
+			if handle and handle.close then
+				handle:close()
+			end
+		end)
 		return
 	end
 
@@ -479,7 +524,7 @@ M.start = function(client)
 
 			-- detect dead handle
 			local h = watchers[client.id]
-			if not h or h:is_closing() then
+			if not h or (h.is_closing and h:is_closing()) then
 				notify("Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
 				resync_snapshot()
 				restart_watcher()
@@ -492,7 +537,7 @@ M.start = function(client)
 	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
 					resync_snapshot()
@@ -501,12 +546,11 @@ M.start = function(client)
 			end
 		end,
 	})
-	autocmds[client.id] = id
 
 	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify("File vanished while buffer open: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
 					resync_snapshot()
@@ -515,13 +559,11 @@ M.start = function(client)
 			end
 		end,
 	})
-	autocmds[client.id .. "_earlycheck"] = id2
 
-	-- extra check for open-but-deleted files
 	local id3 = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
 		callback = function(args)
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and bufpath:sub(1, #root) == root then
+			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify(
 						"File missing but buffer still open: " .. bufpath .. " -> resync+restart",
@@ -533,7 +575,8 @@ M.start = function(client)
 			end
 		end,
 	})
-	autocmds[client.id .. "_extra"] = id3
+
+	autocmds[client.id] = { id, id2, id3 }
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
