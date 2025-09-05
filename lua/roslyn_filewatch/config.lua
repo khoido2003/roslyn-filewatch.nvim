@@ -5,6 +5,7 @@ M.options = {
 		enabled = true,
 		interval = 100,
 	},
+
 	ignore_dirs = {
 		"Library",
 		"Temp",
@@ -14,8 +15,24 @@ M.options = {
 		".git",
 		".idea",
 		".vs",
+		"Build",
+		"Builds",
+		"UserSettings",
+		"MemoryCaptures",
+		"CrashReports",
 	},
-	watch_extensions = { ".cs", ".csproj", ".sln" },
+
+	watch_extensions = {
+		".cs",
+		".csproj",
+		".sln",
+		".props",
+		".targets",
+		".editorconfig",
+		".razor",
+		".config",
+		".json",
+	},
 
 	--- Which LSP client names should trigger watching
 	client_names = { "roslyn", "roslyn_ls" },
