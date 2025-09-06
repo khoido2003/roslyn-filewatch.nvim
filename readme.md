@@ -45,7 +45,7 @@ This plugin adds a proper **file system watcher** so Roslyn always stays updated
 				watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
 				batching = {
 					enabled = true,
-					interval = 100, -- ms
+					interval = 300, -- ms
 				},
 			})
 		end,
@@ -82,7 +82,7 @@ require("roslyn_filewatch").setup({
 				watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
 				batching = {
 					enabled = true,
-					interval = 100, -- ms
+					interval = 300, -- ms
 				},
 			})
 
