@@ -21,6 +21,13 @@ local function mtime_ns(stat)
 	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
 end
 
+local function same_file_info(a, b)
+	if not a or not b then
+		return false
+	end
+	return a.mtime == b.mtime and a.size == b.size
+end
+
 local function notify(msg, level)
 	vim.schedule(function()
 		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
@@ -171,7 +178,7 @@ local function scan_tree(root, out_map)
 				then
 					local st = uv.fs_stat(fullpath)
 					if st then
-						out_map[fullpath] = mtime_ns(st)
+						out_map[fullpath] = { mtime = mtime_ns(st), size = st.size }
 					end
 				end
 			end
@@ -333,7 +340,7 @@ M.start = function(client)
 		for path, mt in pairs(new_map) do
 			if old_map[path] == nil then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-			elseif old_map[path] ~= mt then
+			elseif not same_file_info(old_map[path], new_map[path]) then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
 		end
@@ -402,10 +409,10 @@ M.start = function(client)
 			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
 			if st then
 				local mt = mtime_ns(st)
-				snapshots[client.id][fullpath] = mt
+				snapshots[client.id][fullpath] = { mtime = mt, size = st.size }
 				if not prev_mt then
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-				elseif prev_mt ~= mt then
+				elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
 					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 				end
 			else
@@ -474,7 +481,7 @@ M.start = function(client)
 			local old_mt = old_map[path]
 			if not old_mt then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-			elseif old_mt ~= mt then
+			elseif not same_file_info(old_map[path], new_map[path]) then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
 		end

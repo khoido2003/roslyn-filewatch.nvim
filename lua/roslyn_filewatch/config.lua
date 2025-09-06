@@ -3,7 +3,7 @@ local M = {}
 M.options = {
 	batching = {
 		enabled = true,
-		interval = 100,
+		interval = 300,
 	},
 
 	ignore_dirs = {
