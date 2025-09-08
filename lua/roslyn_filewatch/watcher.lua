@@ -8,10 +8,13 @@ local watchers = {}
 local pollers = {}
 local batch_queues = {}
 local watchdogs = {}
-local snapshots = {} -- client_id -> { [path]=mtime_ns }
+local snapshots = {} -- client_id -> { [path]= { mtime, size, ino, dev } }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
 local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
+
+-- pending_deletes[client_id] = { map = { identity -> { path, uri, ts, stat_entry } }, timer = uv_timer }
+local pending_deletes = {}
 
 -- helper: compute mtime in nanoseconds
 local function mtime_ns(stat)
@@ -19,6 +22,29 @@ local function mtime_ns(stat)
 		return 0
 	end
 	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
+end
+
+-- identity helpers: prefer dev:ino (when available), fallback to mtime:size
+local function identity_from_stat(st)
+	if not st then
+		return nil
+	end
+	-- st may be uv.fs_stat() or a snapshot entry (we try both shapes)
+	if st.dev and st.ino then
+		return tostring(st.dev) .. ":" .. tostring(st.ino)
+	end
+	-- If this is a uv fs_stat, compute mtime_ns
+	if st.mtime or (st.mtime and st.mtime.sec) then
+		local m = mtime_ns(st)
+		if m and st.size then
+			return tostring(m) .. ":" .. tostring(st.size)
+		end
+	end
+	-- it might be a snapshot entry already shaped { mtime = <ns>, size = <n>, ino = <>, dev = <> }
+	if st.mtime and st.size then
+		return tostring(st.mtime) .. ":" .. tostring(st.size)
+	end
+	return nil
 end
 
 local function same_file_info(a, b)
@@ -39,6 +65,29 @@ local function notify_roslyn(changes)
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
 			client.notify("workspace/didChangeWatchedFiles", { changes = changes })
+		end
+	end
+end
+
+-- helper to notify renames (uses direct LSP "didRenameFiles")
+local function notify_roslyn_renames(files)
+	-- files: { { old = oldPath, new = newPath }, ... } OR items with oldUri/newUri already
+	local clients = vim.lsp.get_clients()
+	for _, client in ipairs(clients) do
+		if vim.tbl_contains(config.options.client_names, client.name) then
+			local payload = { files = {} }
+			for _, p in ipairs(files) do
+				table.insert(payload.files, {
+					oldUri = p.oldUri or vim.uri_from_fname(p.old),
+					newUri = p.newUri or vim.uri_from_fname(p["new"]),
+				})
+			end
+			-- schedule notify to be safe with event loop context
+			vim.schedule(function()
+				pcall(function()
+					client.notify("workspace/didRenameFiles", payload)
+				end)
+			end)
 		end
 	end
 end
@@ -178,7 +227,13 @@ local function scan_tree(root, out_map)
 				then
 					local st = uv.fs_stat(fullpath)
 					if st then
-						out_map[fullpath] = { mtime = mtime_ns(st), size = st.size }
+						-- store additional fields for rename detection (ino/dev when available)
+						out_map[fullpath] = {
+							mtime = mtime_ns(st),
+							size = st.size,
+							ino = st.ino,
+							dev = st.dev,
+						}
 					end
 				end
 			end
@@ -199,6 +254,8 @@ M.start = function(client)
 	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
 	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
 	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
+	-- rename detection window (ms)
+	local RENAME_WINDOW_MS = (config.options and config.options.rename_detection_ms) or 300
 
 	local root = client.config.root_dir
 	if not root then
@@ -260,6 +317,18 @@ M.start = function(client)
 			batch_queues[client.id] = nil
 		end
 
+		-- stop & clear pending delete timers & maps
+		if pending_deletes[client.id] then
+			pcall(function()
+				local pd = pending_deletes[client.id]
+				if pd.timer and not pd.timer:is_closing() then
+					pd.timer:stop()
+					pd.timer:close()
+				end
+			end)
+			pending_deletes[client.id] = nil
+		end
+
 		-- remove autocmds for this exact client id (avoid accidental prefix matches)
 		if autocmds[client.id] then
 			for _, id in pairs(autocmds[client.id]) do
@@ -315,6 +384,7 @@ M.start = function(client)
 		end, 300)
 	end
 
+	-- Resync snapshot with rename detection
 	local function resync_snapshot()
 		local new_map = {}
 		scan_tree(root, new_map)
@@ -326,23 +396,48 @@ M.start = function(client)
 		local old_map = vim.deepcopy(snapshots[client.id])
 		local evs = {}
 		local saw_delete = false
+		local rename_pairs = {}
 
-		-- detect deletes
-		for path, _ in pairs(old_map) do
-			if new_map[path] == nil then
-				saw_delete = true
-				close_deleted_buffers(path)
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+		-- build old identity map for quick lookup
+		local old_id_map = {}
+		for path, entry in pairs(old_map) do
+			local id = identity_from_stat(entry)
+			if id then
+				old_id_map[id] = path
 			end
 		end
 
-		-- detect creates / changes
+		-- detect creates / renames / changes
 		for path, mt in pairs(new_map) do
 			if old_map[path] == nil then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+				-- possible create OR rename (match by identity)
+				local id = identity_from_stat(mt)
+				local oldpath = id and old_id_map[id]
+				if oldpath then
+					-- rename detected: remember it, and remove old_map entry so it won't be treated as delete
+					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
+					old_map[oldpath] = nil
+					old_id_map[id] = nil
+				else
+					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+				end
 			elseif not same_file_info(old_map[path], new_map[path]) then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
+		end
+
+		-- detect deletes (remaining entries in old_map)
+		for path, _ in pairs(old_map) do
+			saw_delete = true
+			close_deleted_buffers(path)
+			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+		end
+
+		-- send rename notifications first (if any)
+		if #rename_pairs > 0 then
+			notify("Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
+			-- send renames via LSP
+			notify_roslyn_renames(rename_pairs)
 		end
 
 		if #evs > 0 then
@@ -357,6 +452,57 @@ M.start = function(client)
 		-- replace snapshot
 		snapshots[client.id] = new_map
 		last_events[client.id] = os.time()
+	end
+
+	-- ********** helper to flush pending deletes (single-shot timer created per first pending delete) **********
+	local function schedule_pending_delete_flush()
+		if pending_deletes[client.id] and pending_deletes[client.id].timer then
+			return
+		end
+		local t = uv.new_timer()
+		-- one-shot after RENAME_WINDOW_MS
+		t:start(RENAME_WINDOW_MS, 0, function()
+			-- collect and flush all pending deletes for this client
+			local pd = pending_deletes[client.id]
+			if not pd or not pd.map then
+				pcall(function()
+					if t and not t:is_closing() then
+						t:stop()
+						t:close()
+					end
+				end)
+				pending_deletes[client.id] = nil
+				return
+			end
+
+			local evs = {}
+			for id, ent in pairs(pd.map) do
+				-- remove from snapshot and queue delete events
+				if snapshots[client.id] and snapshots[client.id][ent.path] then
+					snapshots[client.id][ent.path] = nil
+				end
+				close_deleted_buffers(ent.path)
+				table.insert(evs, { uri = ent.uri, type = 3 })
+			end
+
+			-- cleanup
+			pcall(function()
+				if t and not t:is_closing() then
+					t:stop()
+					t:close()
+				end
+			end)
+			pending_deletes[client.id] = nil
+
+			if #evs > 0 then
+				vim.schedule(function()
+					queue_events(client.id, evs)
+				end)
+			end
+		end)
+		pending_deletes[client.id] = pending_deletes[client.id] or {}
+		pending_deletes[client.id].timer = t
+		pending_deletes[client.id].map = pending_deletes[client.id].map or {}
 	end
 
 	-- -------- fs_event --------
@@ -408,20 +554,87 @@ M.start = function(client)
 			-- determine created / changed / deleted by comparing snapshot
 			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
 			if st then
+				-- created or changed
 				local mt = mtime_ns(st)
-				snapshots[client.id][fullpath] = { mtime = mt, size = st.size }
-				if not prev_mt then
-					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-				elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
-					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
+				-- prepare snapshot entry for new file
+				local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
+
+				-- rename-detection: try match against pending deletes (identity)
+				local id = identity_from_stat(st)
+				local matched = false
+				if
+					id
+					and pending_deletes[client.id]
+					and pending_deletes[client.id].map
+					and pending_deletes[client.id].map[id]
+				then
+					-- Treat as rename
+					local del_ent = pending_deletes[client.id].map[id]
+					-- remove pending delete
+					pending_deletes[client.id].map[id] = nil
+
+					-- cleanup timer if empty
+					if pending_deletes[client.id].map and next(pending_deletes[client.id].map) == nil then
+						if pending_deletes[client.id].timer and not pending_deletes[client.id].timer:is_closing() then
+							pcall(function()
+								pending_deletes[client.id].timer:stop()
+								pending_deletes[client.id].timer:close()
+							end)
+						end
+						pending_deletes[client.id] = nil
+					end
+
+					-- update snapshot: move old -> new
+					if snapshots[client.id] then
+						snapshots[client.id][del_ent.path] = nil
+					end
+					snapshots[client.id][fullpath] = new_entry
+
+					-- send rename notification
+					notify("Detected rename: " .. del_ent.path .. " -> " .. fullpath, vim.log.levels.DEBUG)
+					notify_roslyn_renames({ { old = del_ent.path, ["new"] = fullpath } })
+
+					matched = true
+					-- do not insert a create event
+				end
+
+				if not matched then
+					-- not a rename -> normal behavior
+					snapshots[client.id][fullpath] = new_entry
+					if not prev_mt then
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
+					elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
+					end
 				end
 			else
+				-- path gone -> buffer the delete so we can match a possible near-future create (rename)
 				if prev_mt then
-					snapshots[client.id][fullpath] = nil
-					close_deleted_buffers(fullpath)
-					table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-					-- restart to be safe if a delete happened in fast-path
-					restart_watcher()
+					-- compute identity from snapshot entry
+					local id = identity_from_stat(prev_mt)
+					if id then
+						-- add to pending deletes map
+						pending_deletes[client.id] = pending_deletes[client.id] or { map = {} }
+						pending_deletes[client.id].map = pending_deletes[client.id].map or {}
+						pending_deletes[client.id].map[id] = {
+							path = fullpath,
+							uri = vim.uri_from_fname(fullpath),
+							ts = uv.hrtime(),
+							stat = prev_mt,
+						}
+						-- schedule flush after the window
+						schedule_pending_delete_flush()
+						-- do not remove snapshot yet; flush will remove it if not matched
+					else
+						-- fallback: if we can't compute identity, behave as before (immediate delete)
+						if snapshots[client.id] then
+							snapshots[client.id][fullpath] = nil
+						end
+						close_deleted_buffers(fullpath)
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
+						-- restart to be safe if a delete happened in fast-path
+						restart_watcher()
+					end
 				end
 			end
 
@@ -476,22 +689,46 @@ M.start = function(client)
 		local old_map = snapshots[client.id] or {}
 		local evs = {}
 		local saw_delete = false
+		local rename_pairs = {}
 
+		-- build old identity map
+		local old_id_map = {}
+		for path, entry in pairs(old_map) do
+			local id = identity_from_stat(entry)
+			if id then
+				old_id_map[id] = path
+			end
+		end
+
+		-- detect creates / renames / changes
 		for path, mt in pairs(new_map) do
 			local old_mt = old_map[path]
 			if not old_mt then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+				local id = identity_from_stat(mt)
+				local oldpath = id and old_id_map[id]
+				if oldpath then
+					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
+					old_map[oldpath] = nil
+					old_id_map[id] = nil
+				else
+					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+				end
 			elseif not same_file_info(old_map[path], new_map[path]) then
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
 		end
 
+		-- remaining old_map entries are deletes
 		for path, _ in pairs(old_map) do
-			if new_map[path] == nil then
-				saw_delete = true
-				close_deleted_buffers(path)
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-			end
+			saw_delete = true
+			close_deleted_buffers(path)
+			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+		end
+
+		-- send renames
+		if #rename_pairs > 0 then
+			notify("Poller detected " .. #rename_pairs .. " rename(s)", vim.log.levels.DEBUG)
+			notify_roslyn_renames(rename_pairs)
 		end
 
 		if #evs > 0 then
