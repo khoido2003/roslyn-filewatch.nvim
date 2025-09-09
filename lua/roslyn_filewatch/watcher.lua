@@ -1,11 +1,19 @@
+-- roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
+local notify_mod = require("roslyn_filewatch.watcher.notify")
+local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
 local same_file_info = utils.same_file_info
 local normalize_path = utils.normalize_path
+local scan_tree = snapshot_mod.scan_tree
+
+local notify = notify_mod.user
+local notify_roslyn = notify_mod.roslyn_changes
+local notify_roslyn_renames = notify_mod.roslyn_renames
 
 local M = {}
 
@@ -20,44 +28,6 @@ local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = 
 
 -- pending_deletes[client_id] = { map = { identity -> { path, uri, ts, stat_entry } }, timer = uv_timer }
 local pending_deletes = {}
-
-local function notify(msg, level)
-	vim.schedule(function()
-		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
-	end)
-end
-
-local function notify_roslyn(changes)
-	local clients = vim.lsp.get_clients()
-	for _, client in ipairs(clients) do
-		if vim.tbl_contains(config.options.client_names, client.name) then
-			client.notify("workspace/didChangeWatchedFiles", { changes = changes })
-		end
-	end
-end
-
--- helper to notify renames (uses direct LSP "didRenameFiles")
-local function notify_roslyn_renames(files)
-	-- files: { { old = oldPath, new = newPath }, ... } OR items with oldUri/newUri already
-	local clients = vim.lsp.get_clients()
-	for _, client in ipairs(clients) do
-		if vim.tbl_contains(config.options.client_names, client.name) then
-			local payload = { files = {} }
-			for _, p in ipairs(files) do
-				table.insert(payload.files, {
-					oldUri = p.oldUri or vim.uri_from_fname(p.old),
-					newUri = p.newUri or vim.uri_from_fname(p["new"]),
-				})
-			end
-			-- schedule notify to be safe with event loop context
-			vim.schedule(function()
-				pcall(function()
-					client.notify("workspace/didRenameFiles", payload)
-				end)
-			end)
-		end
-	end
-end
 
 -- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
@@ -126,68 +96,6 @@ local function queue_events(client_id, evs)
 			notify_roslyn(evs)
 		end)
 	end
-end
-
--- ================================================================
--- Directory scan (for poller snapshot) — writes normalized paths into out_map
--- ================================================================
-local function scan_tree(root, out_map)
-	root = normalize_path(root)
-	local function scan_dir(path)
-		local fd = uv.fs_scandir(path)
-		if not fd then
-			return
-		end
-		while true do
-			local name, typ = uv.fs_scandir_next(fd)
-			if not name then
-				break
-			end
-			local fullpath = normalize_path(path .. "/" .. name)
-			if typ == "directory" then
-				local skip = false
-				for _, dir in ipairs(config.options.ignore_dirs) do
-					-- match "/dir/" or "/dir$" in normalized path
-					if fullpath:find("/" .. dir .. "/") or fullpath:find("/" .. dir .. "$") then
-						skip = true
-						break
-					end
-				end
-				if not skip then
-					scan_dir(fullpath)
-				end
-			elseif typ == "file" then
-				if
-					(function(p)
-						-- reuse should_watch-like logic but on normalized path
-						for _, dir in ipairs(config.options.ignore_dirs) do
-							if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
-								return false
-							end
-						end
-						for _, ext in ipairs(config.options.watch_extensions) do
-							if p:sub(-#ext) == ext then
-								return true
-							end
-						end
-						return false
-					end)(fullpath)
-				then
-					local st = uv.fs_stat(fullpath)
-					if st then
-						-- store additional fields for rename detection (ino/dev when available)
-						out_map[fullpath] = {
-							mtime = mtime_ns(st),
-							size = st.size,
-							ino = st.ino,
-							dev = st.dev,
-						}
-					end
-				end
-			end
-		end
-	end
-	scan_dir(root)
 end
 
 -- ================================================================
@@ -332,75 +240,18 @@ M.start = function(client)
 		end, 300)
 	end
 
-	-- Resync snapshot with rename detection
-	local function resync_snapshot()
-		local new_map = {}
-		scan_tree(root, new_map)
+	-- prepare helpers for snapshot module
+	local helpers = {
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		queue_events = queue_events,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		last_events = last_events,
+	}
 
-		if not snapshots[client.id] then
-			snapshots[client.id] = {}
-		end
-
-		local old_map = vim.deepcopy(snapshots[client.id])
-		local evs = {}
-		local saw_delete = false
-		local rename_pairs = {}
-
-		-- build old identity map for quick lookup
-		local old_id_map = {}
-		for path, entry in pairs(old_map) do
-			local id = identity_from_stat(entry)
-			if id then
-				old_id_map[id] = path
-			end
-		end
-
-		-- detect creates / renames / changes
-		for path, mt in pairs(new_map) do
-			if old_map[path] == nil then
-				-- possible create OR rename (match by identity)
-				local id = identity_from_stat(mt)
-				local oldpath = id and old_id_map[id]
-				if oldpath then
-					-- rename detected: remember it, and remove old_map entry so it won't be treated as delete
-					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
-					old_map[oldpath] = nil
-					old_id_map[id] = nil
-				else
-					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-				end
-			elseif not same_file_info(old_map[path], new_map[path]) then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
-			end
-		end
-
-		-- detect deletes (remaining entries in old_map)
-		for path, _ in pairs(old_map) do
-			saw_delete = true
-			close_deleted_buffers(path)
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-		end
-
-		-- send rename notifications first (if any)
-		if #rename_pairs > 0 then
-			notify("Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
-			-- send renames via LSP
-			notify_roslyn_renames(rename_pairs)
-		end
-
-		if #evs > 0 then
-			notify("Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
-			queue_events(client.id, evs)
-			-- if deletes were found, restart to ensure fs_event isn't left in a bad state
-			if saw_delete then
-				restart_watcher()
-			end
-		end
-
-		-- replace snapshot
-		snapshots[client.id] = new_map
-		last_events[client.id] = os.time()
-	end
+	-- Resync snapshot is now delegated to snapshot_mod.resync_snapshot_for
+	-- (calls below will use snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers))
 
 	-- ********** helper to flush pending deletes (single-shot timer created per first pending delete) **********
 	local function schedule_pending_delete_flush()
@@ -464,13 +315,13 @@ M.start = function(client)
 		handle:start(root, { recursive = true }, function(err2, filename, events)
 			if err2 then
 				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				resync_snapshot()
+				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 				restart_watcher()
 				return
 			end
 			if not filename then
 				notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
-				resync_snapshot()
+				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 				restart_watcher()
 				return
 			end
@@ -709,7 +560,7 @@ M.start = function(client)
 			-- detect idle (no events in too long)
 			if os.time() - last > WATCHDOG_IDLE then
 				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
-				resync_snapshot()
+				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 				restart_watcher()
 				return
 			end
@@ -718,7 +569,7 @@ M.start = function(client)
 			local h = watchers[client.id]
 			if not h or (h.is_closing and h:is_closing()) then
 				notify("Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
-				resync_snapshot()
+				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 				restart_watcher()
 			end
 		end
@@ -732,7 +583,7 @@ M.start = function(client)
 			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					resync_snapshot()
+					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 					restart_watcher()
 				end
 			end
@@ -745,7 +596,7 @@ M.start = function(client)
 			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
 					notify("File vanished while buffer open: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					resync_snapshot()
+					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 					restart_watcher()
 				end
 			end
@@ -761,7 +612,7 @@ M.start = function(client)
 						"File missing but buffer still open: " .. bufpath .. " -> resync+restart",
 						vim.log.levels.DEBUG
 					)
-					resync_snapshot()
+					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 					restart_watcher()
 				end
 			end
