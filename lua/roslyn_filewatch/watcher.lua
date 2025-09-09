@@ -1,6 +1,11 @@
--- roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
+local utils = require("roslyn_filewatch.watcher.utils")
+
+local mtime_ns = utils.mtime_ns
+local identity_from_stat = utils.identity_from_stat
+local same_file_info = utils.same_file_info
+local normalize_path = utils.normalize_path
 
 local M = {}
 
@@ -15,44 +20,6 @@ local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = 
 
 -- pending_deletes[client_id] = { map = { identity -> { path, uri, ts, stat_entry } }, timer = uv_timer }
 local pending_deletes = {}
-
--- helper: compute mtime in nanoseconds
-local function mtime_ns(stat)
-	if not stat or not stat.mtime then
-		return 0
-	end
-	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
-end
-
--- identity helpers: prefer dev:ino (when available), fallback to mtime:size
-local function identity_from_stat(st)
-	if not st then
-		return nil
-	end
-	-- st may be uv.fs_stat() or a snapshot entry (we try both shapes)
-	if st.dev and st.ino then
-		return tostring(st.dev) .. ":" .. tostring(st.ino)
-	end
-	-- If this is a uv fs_stat, compute mtime_ns
-	if st.mtime or (st.mtime and st.mtime.sec) then
-		local m = mtime_ns(st)
-		if m and st.size then
-			return tostring(m) .. ":" .. tostring(st.size)
-		end
-	end
-	-- it might be a snapshot entry already shaped { mtime = <ns>, size = <n>, ino = <>, dev = <> }
-	if st.mtime and st.size then
-		return tostring(st.mtime) .. ":" .. tostring(st.size)
-	end
-	return nil
-end
-
-local function same_file_info(a, b)
-	if not a or not b then
-		return false
-	end
-	return a.mtime == b.mtime and a.size == b.size
-end
 
 local function notify(msg, level)
 	vim.schedule(function()
@@ -90,25 +57,6 @@ local function notify_roslyn_renames(files)
 			end)
 		end
 	end
-end
-
--- ================================================================
--- Path normalization (help comparing Windows/Unix slashes & drive case)
--- ================================================================
-local function normalize_path(p)
-	if not p or p == "" then
-		return p
-	end
-	-- unify separators
-	p = p:gsub("\\", "/")
-	-- remove trailing slashes
-	p = p:gsub("/+$", "")
-	-- lowercase drive letter on Windows-style "C:/..."
-	local drive = p:match("^([A-Za-z]):/")
-	if drive then
-		p = drive:lower() .. p:sub(2)
-	end
-	return p
 end
 
 -- ================================================================
