@@ -1,9 +1,11 @@
+-- lua/roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 local notify_mod = require("roslyn_filewatch.watcher.notify")
 local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
 local rename_mod = require("roslyn_filewatch.watcher.rename")
+local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
@@ -230,7 +232,7 @@ M.start = function(client)
 		end, 300)
 	end
 
-	-- prepare helpers for snapshot module
+	-- prepare helpers for snapshot module (and fs_event/rename)
 	local helpers = {
 		notify = notify,
 		notify_roslyn_renames = notify_roslyn_renames,
@@ -240,113 +242,26 @@ M.start = function(client)
 		last_events = last_events,
 	}
 
-	-- ********** rename buffering helpers are in rename_mod (pending deletes + flush) **********
+	-- ********** fs_event is delegated to fs_event_mod.start **********
+	local handle, start_err = fs_event_mod.start(client, root, snapshots, {
+		config = config,
+		rename_mod = rename_mod,
+		snapshot_mod = snapshot_mod,
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		queue_events = queue_events,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		mtime_ns = mtime_ns,
+		identity_from_stat = identity_from_stat,
+		same_file_info = same_file_info,
+		normalize_path = normalize_path,
+		last_events = last_events,
+		rename_window_ms = RENAME_WINDOW_MS,
+	})
 
-	-- -------- fs_event --------
-	local handle, err = uv.new_fs_event()
 	if not handle then
-		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
-		return
-	end
-
-	local ok, start_err = pcall(function()
-		handle:start(root, { recursive = true }, function(err2, filename, events)
-			if err2 then
-				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-				restart_watcher()
-				return
-			end
-			if not filename then
-				notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
-				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-				restart_watcher()
-				return
-			end
-
-			local fullpath = normalize_path(root .. "/" .. filename)
-			-- check ignore list and watched extensions
-			local function should_watch_path(p)
-				for _, dir in ipairs(config.options.ignore_dirs) do
-					if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
-						return false
-					end
-				end
-				for _, ext in ipairs(config.options.watch_extensions) do
-					if p:sub(-#ext) == ext then
-						return true
-					end
-				end
-				return false
-			end
-			if not should_watch_path(fullpath) then
-				return
-			end
-
-			last_events[client.id] = os.time()
-
-			local st = uv.fs_stat(fullpath)
-			local evs = {}
-
-			-- determine created / changed / deleted by comparing snapshot
-			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
-			if st then
-				-- created or changed
-				local mt = mtime_ns(st)
-				-- prepare snapshot entry for new file
-				local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
-
-				-- rename-detection: try to match buffered deletes via rename_mod
-				local matched = rename_mod.on_create(client.id, fullpath, st, snapshots, {
-					notify = notify,
-					notify_roslyn_renames = notify_roslyn_renames,
-				})
-
-				if not matched then
-					-- not a rename -> normal behavior
-					snapshots[client.id][fullpath] = new_entry
-					if not prev_mt then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-					elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
-					end
-				end
-			else
-				-- path gone -> buffer the delete so we can match a possible near-future create (rename)
-				if prev_mt then
-					local buffered = rename_mod.on_delete(client.id, fullpath, prev_mt, snapshots, {
-						queue_events = queue_events,
-						close_deleted_buffers = close_deleted_buffers,
-						notify = notify,
-						rename_window_ms = RENAME_WINDOW_MS,
-					})
-					if not buffered then
-						-- fallback: if we can't compute identity, behave as before (immediate delete)
-						if snapshots[client.id] then
-							snapshots[client.id][fullpath] = nil
-						end
-						close_deleted_buffers(fullpath)
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-						-- restart to be safe if a delete happened in fast-path
-						restart_watcher()
-					end
-				end
-			end
-
-			if #evs > 0 then
-				queue_events(client.id, evs)
-			end
-		end)
-	end)
-
-	if not ok then
-		notify("Failed to start watcher: " .. tostring(start_err), vim.log.levels.ERROR)
-		-- ensure handle closed
-		pcall(function()
-			if handle and handle.close then
-				handle:close()
-			end
-		end)
+		notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.ERROR)
 		return
 	end
 
