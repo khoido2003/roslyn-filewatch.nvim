@@ -1,3 +1,4 @@
+-- lua/roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -6,6 +7,8 @@ local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
 local rename_mod = require("roslyn_filewatch.watcher.rename")
 local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
 local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
+local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
+local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
@@ -64,6 +67,7 @@ end
 -- ================================================================
 -- Helper: queue + batch flush
 -- ================================================================
+
 local function queue_events(client_id, evs)
 	if config.options.batching.enabled then
 		if not batch_queues[client_id] then
@@ -242,7 +246,7 @@ M.start = function(client)
 		last_events = last_events,
 	}
 
-	-- ********** fs_event is delegated to fs_event_mod.start **********
+	-- ********** fs_event **********
 	local handle, start_err = fs_event_mod.start(client, root, snapshots, {
 		config = config,
 		rename_mod = rename_mod,
@@ -274,7 +278,7 @@ M.start = function(client)
 		scan_tree(root, snapshots[client.id])
 	end
 
-	-- -------- fs_poll (delegated) --------
+	-- -------- fs_poll --------
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
 		identity_from_stat = identity_from_stat,
@@ -303,74 +307,46 @@ M.start = function(client)
 	pollers[client.id] = poller
 
 	-- -------- watchdog --------
-	local watchdog = uv.new_timer()
-	watchdog:start(15000, 15000, function()
-		if not client.is_stopped() then
-			local last = last_events[client.id] or 0
+	local resync_fn = function()
+		-- replicate previous behaviour: call snapshot_resync with helpers
+		pcall(function()
+			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+		end)
+	end
 
-			-- detect idle (no events in too long)
-			if os.time() - last > WATCHDOG_IDLE then
-				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
-				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-				restart_watcher()
-				return
+	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots, {
+		notify = notify,
+		resync_snapshot = resync_fn,
+		restart_watcher = restart_watcher,
+		get_handle = function()
+			return watchers[client.id]
+		end,
+		last_events = last_events,
+		watchdog_idle = WATCHDOG_IDLE,
+	})
+	if not watchdog then
+		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
+		-- cleanup poller + fs_event if needed
+		pcall(function()
+			if pollers[client.id] and pollers[client.id].close then
+				pollers[client.id]:close()
 			end
-
-			-- detect dead handle
-			local h = watchers[client.id]
-			if not h or (h.is_closing and h:is_closing()) then
-				notify("Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
-				snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-				restart_watcher()
+			if watchers[client.id] and watchers[client.id].close then
+				watchers[client.id]:close()
 			end
-		end
-	end)
+		end)
+		return
+	end
 	watchdogs[client.id] = watchdog
 
 	-- -------- autocmds --------
-	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-					restart_watcher()
-				end
-			end
-		end,
+	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
+		notify = notify,
+		resync_snapshot = resync_fn,
+		restart_watcher = restart_watcher,
+		normalize_path = normalize_path,
 	})
-
-	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify("File vanished while buffer open: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-					restart_watcher()
-				end
-			end
-		end,
-	})
-
-	local id3 = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify(
-						"File missing but buffer still open: " .. bufpath .. " -> resync+restart",
-						vim.log.levels.DEBUG
-					)
-					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-					restart_watcher()
-				end
-			end
-		end,
-	})
-
-	autocmds[client.id] = { id, id2, id3 }
+	autocmds[client.id] = autocmd_ids
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
