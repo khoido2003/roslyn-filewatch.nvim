@@ -1,9 +1,9 @@
--- roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 local notify_mod = require("roslyn_filewatch.watcher.notify")
 local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
+local rename_mod = require("roslyn_filewatch.watcher.rename")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
@@ -25,9 +25,6 @@ local snapshots = {} -- client_id -> { [path]= { mtime, size, ino, dev } }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
 local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
-
--- pending_deletes[client_id] = { map = { identity -> { path, uri, ts, stat_entry } }, timer = uv_timer }
-local pending_deletes = {}
 
 -- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
@@ -173,17 +170,10 @@ M.start = function(client)
 			batch_queues[client.id] = nil
 		end
 
-		-- stop & clear pending delete timers & maps
-		if pending_deletes[client.id] then
-			pcall(function()
-				local pd = pending_deletes[client.id]
-				if pd.timer and not pd.timer:is_closing() then
-					pd.timer:stop()
-					pd.timer:close()
-				end
-			end)
-			pending_deletes[client.id] = nil
-		end
+		-- stop & clear pending delete timers & maps (rename module)
+		pcall(function()
+			rename_mod.clear(client.id)
+		end)
 
 		-- remove autocmds for this exact client id (avoid accidental prefix matches)
 		if autocmds[client.id] then
@@ -250,59 +240,7 @@ M.start = function(client)
 		last_events = last_events,
 	}
 
-	-- Resync snapshot is now delegated to snapshot_mod.resync_snapshot_for
-	-- (calls below will use snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers))
-
-	-- ********** helper to flush pending deletes (single-shot timer created per first pending delete) **********
-	local function schedule_pending_delete_flush()
-		if pending_deletes[client.id] and pending_deletes[client.id].timer then
-			return
-		end
-		local t = uv.new_timer()
-		-- one-shot after RENAME_WINDOW_MS
-		t:start(RENAME_WINDOW_MS, 0, function()
-			-- collect and flush all pending deletes for this client
-			local pd = pending_deletes[client.id]
-			if not pd or not pd.map then
-				pcall(function()
-					if t and not t:is_closing() then
-						t:stop()
-						t:close()
-					end
-				end)
-				pending_deletes[client.id] = nil
-				return
-			end
-
-			local evs = {}
-			for id, ent in pairs(pd.map) do
-				-- remove from snapshot and queue delete events
-				if snapshots[client.id] and snapshots[client.id][ent.path] then
-					snapshots[client.id][ent.path] = nil
-				end
-				close_deleted_buffers(ent.path)
-				table.insert(evs, { uri = ent.uri, type = 3 })
-			end
-
-			-- cleanup
-			pcall(function()
-				if t and not t:is_closing() then
-					t:stop()
-					t:close()
-				end
-			end)
-			pending_deletes[client.id] = nil
-
-			if #evs > 0 then
-				vim.schedule(function()
-					queue_events(client.id, evs)
-				end)
-			end
-		end)
-		pending_deletes[client.id] = pending_deletes[client.id] or {}
-		pending_deletes[client.id].timer = t
-		pending_deletes[client.id].map = pending_deletes[client.id].map or {}
-	end
+	-- ********** rename buffering helpers are in rename_mod (pending deletes + flush) **********
 
 	-- -------- fs_event --------
 	local handle, err = uv.new_fs_event()
@@ -358,44 +296,11 @@ M.start = function(client)
 				-- prepare snapshot entry for new file
 				local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
 
-				-- rename-detection: try match against pending deletes (identity)
-				local id = identity_from_stat(st)
-				local matched = false
-				if
-					id
-					and pending_deletes[client.id]
-					and pending_deletes[client.id].map
-					and pending_deletes[client.id].map[id]
-				then
-					-- Treat as rename
-					local del_ent = pending_deletes[client.id].map[id]
-					-- remove pending delete
-					pending_deletes[client.id].map[id] = nil
-
-					-- cleanup timer if empty
-					if pending_deletes[client.id].map and next(pending_deletes[client.id].map) == nil then
-						if pending_deletes[client.id].timer and not pending_deletes[client.id].timer:is_closing() then
-							pcall(function()
-								pending_deletes[client.id].timer:stop()
-								pending_deletes[client.id].timer:close()
-							end)
-						end
-						pending_deletes[client.id] = nil
-					end
-
-					-- update snapshot: move old -> new
-					if snapshots[client.id] then
-						snapshots[client.id][del_ent.path] = nil
-					end
-					snapshots[client.id][fullpath] = new_entry
-
-					-- send rename notification
-					notify("Detected rename: " .. del_ent.path .. " -> " .. fullpath, vim.log.levels.DEBUG)
-					notify_roslyn_renames({ { old = del_ent.path, ["new"] = fullpath } })
-
-					matched = true
-					-- do not insert a create event
-				end
+				-- rename-detection: try to match buffered deletes via rename_mod
+				local matched = rename_mod.on_create(client.id, fullpath, st, snapshots, {
+					notify = notify,
+					notify_roslyn_renames = notify_roslyn_renames,
+				})
 
 				if not matched then
 					-- not a rename -> normal behavior
@@ -409,22 +314,13 @@ M.start = function(client)
 			else
 				-- path gone -> buffer the delete so we can match a possible near-future create (rename)
 				if prev_mt then
-					-- compute identity from snapshot entry
-					local id = identity_from_stat(prev_mt)
-					if id then
-						-- add to pending deletes map
-						pending_deletes[client.id] = pending_deletes[client.id] or { map = {} }
-						pending_deletes[client.id].map = pending_deletes[client.id].map or {}
-						pending_deletes[client.id].map[id] = {
-							path = fullpath,
-							uri = vim.uri_from_fname(fullpath),
-							ts = uv.hrtime(),
-							stat = prev_mt,
-						}
-						-- schedule flush after the window
-						schedule_pending_delete_flush()
-						-- do not remove snapshot yet; flush will remove it if not matched
-					else
+					local buffered = rename_mod.on_delete(client.id, fullpath, prev_mt, snapshots, {
+						queue_events = queue_events,
+						close_deleted_buffers = close_deleted_buffers,
+						notify = notify,
+						rename_window_ms = RENAME_WINDOW_MS,
+					})
+					if not buffered then
 						-- fallback: if we can't compute identity, behave as before (immediate delete)
 						if snapshots[client.id] then
 							snapshots[client.id][fullpath] = nil
