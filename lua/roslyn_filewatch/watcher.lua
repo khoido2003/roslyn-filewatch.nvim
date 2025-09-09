@@ -1,6 +1,24 @@
--- roslyn_filewatch/watcher.lua
+-- lua/roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
+local utils = require("roslyn_filewatch.watcher.utils")
+local notify_mod = require("roslyn_filewatch.watcher.notify")
+local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
+local rename_mod = require("roslyn_filewatch.watcher.rename")
+local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
+local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
+local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
+local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
+
+local mtime_ns = utils.mtime_ns
+local identity_from_stat = utils.identity_from_stat
+local same_file_info = utils.same_file_info
+local normalize_path = utils.normalize_path
+local scan_tree = snapshot_mod.scan_tree
+
+local notify = notify_mod.user
+local notify_roslyn = notify_mod.roslyn_changes
+local notify_roslyn_renames = notify_mod.roslyn_renames
 
 local M = {}
 
@@ -12,104 +30,6 @@ local snapshots = {} -- client_id -> { [path]= { mtime, size, ino, dev } }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
 local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
-
--- pending_deletes[client_id] = { map = { identity -> { path, uri, ts, stat_entry } }, timer = uv_timer }
-local pending_deletes = {}
-
--- helper: compute mtime in nanoseconds
-local function mtime_ns(stat)
-	if not stat or not stat.mtime then
-		return 0
-	end
-	return (stat.mtime.sec or 0) * 1e9 + (stat.mtime.nsec or 0)
-end
-
--- identity helpers: prefer dev:ino (when available), fallback to mtime:size
-local function identity_from_stat(st)
-	if not st then
-		return nil
-	end
-	-- st may be uv.fs_stat() or a snapshot entry (we try both shapes)
-	if st.dev and st.ino then
-		return tostring(st.dev) .. ":" .. tostring(st.ino)
-	end
-	-- If this is a uv fs_stat, compute mtime_ns
-	if st.mtime or (st.mtime and st.mtime.sec) then
-		local m = mtime_ns(st)
-		if m and st.size then
-			return tostring(m) .. ":" .. tostring(st.size)
-		end
-	end
-	-- it might be a snapshot entry already shaped { mtime = <ns>, size = <n>, ino = <>, dev = <> }
-	if st.mtime and st.size then
-		return tostring(st.mtime) .. ":" .. tostring(st.size)
-	end
-	return nil
-end
-
-local function same_file_info(a, b)
-	if not a or not b then
-		return false
-	end
-	return a.mtime == b.mtime and a.size == b.size
-end
-
-local function notify(msg, level)
-	vim.schedule(function()
-		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
-	end)
-end
-
-local function notify_roslyn(changes)
-	local clients = vim.lsp.get_clients()
-	for _, client in ipairs(clients) do
-		if vim.tbl_contains(config.options.client_names, client.name) then
-			client.notify("workspace/didChangeWatchedFiles", { changes = changes })
-		end
-	end
-end
-
--- helper to notify renames (uses direct LSP "didRenameFiles")
-local function notify_roslyn_renames(files)
-	-- files: { { old = oldPath, new = newPath }, ... } OR items with oldUri/newUri already
-	local clients = vim.lsp.get_clients()
-	for _, client in ipairs(clients) do
-		if vim.tbl_contains(config.options.client_names, client.name) then
-			local payload = { files = {} }
-			for _, p in ipairs(files) do
-				table.insert(payload.files, {
-					oldUri = p.oldUri or vim.uri_from_fname(p.old),
-					newUri = p.newUri or vim.uri_from_fname(p["new"]),
-				})
-			end
-			-- schedule notify to be safe with event loop context
-			vim.schedule(function()
-				pcall(function()
-					client.notify("workspace/didRenameFiles", payload)
-				end)
-			end)
-		end
-	end
-end
-
--- ================================================================
--- Path normalization (help comparing Windows/Unix slashes & drive case)
--- ================================================================
-local function normalize_path(p)
-	if not p or p == "" then
-		return p
-	end
-	-- unify separators
-	p = p:gsub("\\", "/")
-	-- remove trailing slashes
-	p = p:gsub("/+$", "")
-	-- lowercase drive letter on Windows-style "C:/..."
-	local drive = p:match("^([A-Za-z]):/")
-	if drive then
-		p = drive:lower() .. p:sub(2)
-	end
-	return p
-end
 
 -- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
@@ -147,6 +67,7 @@ end
 -- ================================================================
 -- Helper: queue + batch flush
 -- ================================================================
+
 local function queue_events(client_id, evs)
 	if config.options.batching.enabled then
 		if not batch_queues[client_id] then
@@ -178,68 +99,6 @@ local function queue_events(client_id, evs)
 			notify_roslyn(evs)
 		end)
 	end
-end
-
--- ================================================================
--- Directory scan (for poller snapshot) — writes normalized paths into out_map
--- ================================================================
-local function scan_tree(root, out_map)
-	root = normalize_path(root)
-	local function scan_dir(path)
-		local fd = uv.fs_scandir(path)
-		if not fd then
-			return
-		end
-		while true do
-			local name, typ = uv.fs_scandir_next(fd)
-			if not name then
-				break
-			end
-			local fullpath = normalize_path(path .. "/" .. name)
-			if typ == "directory" then
-				local skip = false
-				for _, dir in ipairs(config.options.ignore_dirs) do
-					-- match "/dir/" or "/dir$" in normalized path
-					if fullpath:find("/" .. dir .. "/") or fullpath:find("/" .. dir .. "$") then
-						skip = true
-						break
-					end
-				end
-				if not skip then
-					scan_dir(fullpath)
-				end
-			elseif typ == "file" then
-				if
-					(function(p)
-						-- reuse should_watch-like logic but on normalized path
-						for _, dir in ipairs(config.options.ignore_dirs) do
-							if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
-								return false
-							end
-						end
-						for _, ext in ipairs(config.options.watch_extensions) do
-							if p:sub(-#ext) == ext then
-								return true
-							end
-						end
-						return false
-					end)(fullpath)
-				then
-					local st = uv.fs_stat(fullpath)
-					if st then
-						-- store additional fields for rename detection (ino/dev when available)
-						out_map[fullpath] = {
-							mtime = mtime_ns(st),
-							size = st.size,
-							ino = st.ino,
-							dev = st.dev,
-						}
-					end
-				end
-			end
-		end
-	end
-	scan_dir(root)
 end
 
 -- ================================================================
@@ -317,17 +176,10 @@ M.start = function(client)
 			batch_queues[client.id] = nil
 		end
 
-		-- stop & clear pending delete timers & maps
-		if pending_deletes[client.id] then
-			pcall(function()
-				local pd = pending_deletes[client.id]
-				if pd.timer and not pd.timer:is_closing() then
-					pd.timer:stop()
-					pd.timer:close()
-				end
-			end)
-			pending_deletes[client.id] = nil
-		end
+		-- stop & clear pending delete timers & maps (rename module)
+		pcall(function()
+			rename_mod.clear(client.id)
+		end)
 
 		-- remove autocmds for this exact client id (avoid accidental prefix matches)
 		if autocmds[client.id] then
@@ -384,274 +236,36 @@ M.start = function(client)
 		end, 300)
 	end
 
-	-- Resync snapshot with rename detection
-	local function resync_snapshot()
-		local new_map = {}
-		scan_tree(root, new_map)
+	-- prepare helpers for snapshot module (and fs_event/rename)
+	local helpers = {
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		queue_events = queue_events,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		last_events = last_events,
+	}
 
-		if not snapshots[client.id] then
-			snapshots[client.id] = {}
-		end
+	-- ********** fs_event **********
+	local handle, start_err = fs_event_mod.start(client, root, snapshots, {
+		config = config,
+		rename_mod = rename_mod,
+		snapshot_mod = snapshot_mod,
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		queue_events = queue_events,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		mtime_ns = mtime_ns,
+		identity_from_stat = identity_from_stat,
+		same_file_info = same_file_info,
+		normalize_path = normalize_path,
+		last_events = last_events,
+		rename_window_ms = RENAME_WINDOW_MS,
+	})
 
-		local old_map = vim.deepcopy(snapshots[client.id])
-		local evs = {}
-		local saw_delete = false
-		local rename_pairs = {}
-
-		-- build old identity map for quick lookup
-		local old_id_map = {}
-		for path, entry in pairs(old_map) do
-			local id = identity_from_stat(entry)
-			if id then
-				old_id_map[id] = path
-			end
-		end
-
-		-- detect creates / renames / changes
-		for path, mt in pairs(new_map) do
-			if old_map[path] == nil then
-				-- possible create OR rename (match by identity)
-				local id = identity_from_stat(mt)
-				local oldpath = id and old_id_map[id]
-				if oldpath then
-					-- rename detected: remember it, and remove old_map entry so it won't be treated as delete
-					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
-					old_map[oldpath] = nil
-					old_id_map[id] = nil
-				else
-					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-				end
-			elseif not same_file_info(old_map[path], new_map[path]) then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
-			end
-		end
-
-		-- detect deletes (remaining entries in old_map)
-		for path, _ in pairs(old_map) do
-			saw_delete = true
-			close_deleted_buffers(path)
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-		end
-
-		-- send rename notifications first (if any)
-		if #rename_pairs > 0 then
-			notify("Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
-			-- send renames via LSP
-			notify_roslyn_renames(rename_pairs)
-		end
-
-		if #evs > 0 then
-			notify("Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
-			queue_events(client.id, evs)
-			-- if deletes were found, restart to ensure fs_event isn't left in a bad state
-			if saw_delete then
-				restart_watcher()
-			end
-		end
-
-		-- replace snapshot
-		snapshots[client.id] = new_map
-		last_events[client.id] = os.time()
-	end
-
-	-- ********** helper to flush pending deletes (single-shot timer created per first pending delete) **********
-	local function schedule_pending_delete_flush()
-		if pending_deletes[client.id] and pending_deletes[client.id].timer then
-			return
-		end
-		local t = uv.new_timer()
-		-- one-shot after RENAME_WINDOW_MS
-		t:start(RENAME_WINDOW_MS, 0, function()
-			-- collect and flush all pending deletes for this client
-			local pd = pending_deletes[client.id]
-			if not pd or not pd.map then
-				pcall(function()
-					if t and not t:is_closing() then
-						t:stop()
-						t:close()
-					end
-				end)
-				pending_deletes[client.id] = nil
-				return
-			end
-
-			local evs = {}
-			for id, ent in pairs(pd.map) do
-				-- remove from snapshot and queue delete events
-				if snapshots[client.id] and snapshots[client.id][ent.path] then
-					snapshots[client.id][ent.path] = nil
-				end
-				close_deleted_buffers(ent.path)
-				table.insert(evs, { uri = ent.uri, type = 3 })
-			end
-
-			-- cleanup
-			pcall(function()
-				if t and not t:is_closing() then
-					t:stop()
-					t:close()
-				end
-			end)
-			pending_deletes[client.id] = nil
-
-			if #evs > 0 then
-				vim.schedule(function()
-					queue_events(client.id, evs)
-				end)
-			end
-		end)
-		pending_deletes[client.id] = pending_deletes[client.id] or {}
-		pending_deletes[client.id].timer = t
-		pending_deletes[client.id].map = pending_deletes[client.id].map or {}
-	end
-
-	-- -------- fs_event --------
-	local handle, err = uv.new_fs_event()
 	if not handle then
-		notify("Failed to create fs_event: " .. tostring(err), vim.log.levels.ERROR)
-		return
-	end
-
-	local ok, start_err = pcall(function()
-		handle:start(root, { recursive = true }, function(err2, filename, events)
-			if err2 then
-				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				resync_snapshot()
-				restart_watcher()
-				return
-			end
-			if not filename then
-				notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
-				resync_snapshot()
-				restart_watcher()
-				return
-			end
-
-			local fullpath = normalize_path(root .. "/" .. filename)
-			-- check ignore list and watched extensions
-			local function should_watch_path(p)
-				for _, dir in ipairs(config.options.ignore_dirs) do
-					if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
-						return false
-					end
-				end
-				for _, ext in ipairs(config.options.watch_extensions) do
-					if p:sub(-#ext) == ext then
-						return true
-					end
-				end
-				return false
-			end
-			if not should_watch_path(fullpath) then
-				return
-			end
-
-			last_events[client.id] = os.time()
-
-			local st = uv.fs_stat(fullpath)
-			local evs = {}
-
-			-- determine created / changed / deleted by comparing snapshot
-			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
-			if st then
-				-- created or changed
-				local mt = mtime_ns(st)
-				-- prepare snapshot entry for new file
-				local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
-
-				-- rename-detection: try match against pending deletes (identity)
-				local id = identity_from_stat(st)
-				local matched = false
-				if
-					id
-					and pending_deletes[client.id]
-					and pending_deletes[client.id].map
-					and pending_deletes[client.id].map[id]
-				then
-					-- Treat as rename
-					local del_ent = pending_deletes[client.id].map[id]
-					-- remove pending delete
-					pending_deletes[client.id].map[id] = nil
-
-					-- cleanup timer if empty
-					if pending_deletes[client.id].map and next(pending_deletes[client.id].map) == nil then
-						if pending_deletes[client.id].timer and not pending_deletes[client.id].timer:is_closing() then
-							pcall(function()
-								pending_deletes[client.id].timer:stop()
-								pending_deletes[client.id].timer:close()
-							end)
-						end
-						pending_deletes[client.id] = nil
-					end
-
-					-- update snapshot: move old -> new
-					if snapshots[client.id] then
-						snapshots[client.id][del_ent.path] = nil
-					end
-					snapshots[client.id][fullpath] = new_entry
-
-					-- send rename notification
-					notify("Detected rename: " .. del_ent.path .. " -> " .. fullpath, vim.log.levels.DEBUG)
-					notify_roslyn_renames({ { old = del_ent.path, ["new"] = fullpath } })
-
-					matched = true
-					-- do not insert a create event
-				end
-
-				if not matched then
-					-- not a rename -> normal behavior
-					snapshots[client.id][fullpath] = new_entry
-					if not prev_mt then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-					elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
-					end
-				end
-			else
-				-- path gone -> buffer the delete so we can match a possible near-future create (rename)
-				if prev_mt then
-					-- compute identity from snapshot entry
-					local id = identity_from_stat(prev_mt)
-					if id then
-						-- add to pending deletes map
-						pending_deletes[client.id] = pending_deletes[client.id] or { map = {} }
-						pending_deletes[client.id].map = pending_deletes[client.id].map or {}
-						pending_deletes[client.id].map[id] = {
-							path = fullpath,
-							uri = vim.uri_from_fname(fullpath),
-							ts = uv.hrtime(),
-							stat = prev_mt,
-						}
-						-- schedule flush after the window
-						schedule_pending_delete_flush()
-						-- do not remove snapshot yet; flush will remove it if not matched
-					else
-						-- fallback: if we can't compute identity, behave as before (immediate delete)
-						if snapshots[client.id] then
-							snapshots[client.id][fullpath] = nil
-						end
-						close_deleted_buffers(fullpath)
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-						-- restart to be safe if a delete happened in fast-path
-						restart_watcher()
-					end
-				end
-			end
-
-			if #evs > 0 then
-				queue_events(client.id, evs)
-			end
-		end)
-	end)
-
-	if not ok then
-		notify("Failed to start watcher: " .. tostring(start_err), vim.log.levels.ERROR)
-		-- ensure handle closed
-		pcall(function()
-			if handle and handle.close then
-				handle:close()
-			end
-		end)
+		notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.ERROR)
 		return
 	end
 
@@ -665,162 +279,74 @@ M.start = function(client)
 	end
 
 	-- -------- fs_poll --------
-	local poller = uv.new_fs_poll()
-	poller:start(root, POLL_INTERVAL, function(errp, prev, curr)
-		if errp then
-			notify("Poller error: " .. tostring(errp), vim.log.levels.ERROR)
-			return
-		end
+	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
+		scan_tree = scan_tree,
+		identity_from_stat = identity_from_stat,
+		same_file_info = same_file_info,
+		queue_events = queue_events,
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		last_events = last_events,
+		poll_interval = POLL_INTERVAL,
+		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
+	})
 
-		if
-			prev
-			and curr
-			and (prev.mtime and curr.mtime)
-			and (prev.mtime.sec ~= curr.mtime.sec or prev.mtime.nsec ~= curr.mtime.nsec)
-		then
-			notify("Poller detected root metadata change; restarting watcher", vim.log.levels.DEBUG)
-			restart_watcher()
-			return
-		end
-
-		local new_map = {}
-		scan_tree(root, new_map)
-
-		local old_map = snapshots[client.id] or {}
-		local evs = {}
-		local saw_delete = false
-		local rename_pairs = {}
-
-		-- build old identity map
-		local old_id_map = {}
-		for path, entry in pairs(old_map) do
-			local id = identity_from_stat(entry)
-			if id then
-				old_id_map[id] = path
+	if not poller then
+		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
+		-- close the fs_event handle we started earlier to avoid leaking
+		pcall(function()
+			if handle and handle.close then
+				handle:close()
 			end
-		end
+		end)
+		return
+	end
 
-		-- detect creates / renames / changes
-		for path, mt in pairs(new_map) do
-			local old_mt = old_map[path]
-			if not old_mt then
-				local id = identity_from_stat(mt)
-				local oldpath = id and old_id_map[id]
-				if oldpath then
-					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
-					old_map[oldpath] = nil
-					old_id_map[id] = nil
-				else
-					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-				end
-			elseif not same_file_info(old_map[path], new_map[path]) then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
-			end
-		end
-
-		-- remaining old_map entries are deletes
-		for path, _ in pairs(old_map) do
-			saw_delete = true
-			close_deleted_buffers(path)
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-		end
-
-		-- send renames
-		if #rename_pairs > 0 then
-			notify("Poller detected " .. #rename_pairs .. " rename(s)", vim.log.levels.DEBUG)
-			notify_roslyn_renames(rename_pairs)
-		end
-
-		if #evs > 0 then
-			snapshots[client.id] = new_map
-			queue_events(client.id, evs)
-			last_events[client.id] = os.time()
-
-			local last = last_events[client.id] or 0
-			if os.time() - last > POLLER_RESTART_THRESHOLD then
-				notify("Poller detected diffs while fs_event quiet; restarting watcher", vim.log.levels.DEBUG)
-				restart_watcher()
-			end
-
-			if saw_delete then
-				-- extra safety restart if deletes found by poller
-				restart_watcher()
-			end
-		else
-			snapshots[client.id] = new_map
-		end
-	end)
 	pollers[client.id] = poller
 
 	-- -------- watchdog --------
-	local watchdog = uv.new_timer()
-	watchdog:start(15000, 15000, function()
-		if not client.is_stopped() then
-			local last = last_events[client.id] or 0
+	local resync_fn = function()
+		-- replicate previous behaviour: call snapshot_resync with helpers
+		pcall(function()
+			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+		end)
+	end
 
-			-- detect idle (no events in too long)
-			if os.time() - last > WATCHDOG_IDLE then
-				notify("Idle " .. WATCHDOG_IDLE .. "s, recycling watcher", vim.log.levels.DEBUG)
-				resync_snapshot()
-				restart_watcher()
-				return
+	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots, {
+		notify = notify,
+		resync_snapshot = resync_fn,
+		restart_watcher = restart_watcher,
+		get_handle = function()
+			return watchers[client.id]
+		end,
+		last_events = last_events,
+		watchdog_idle = WATCHDOG_IDLE,
+	})
+	if not watchdog then
+		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
+		-- cleanup poller + fs_event if needed
+		pcall(function()
+			if pollers[client.id] and pollers[client.id].close then
+				pollers[client.id]:close()
 			end
-
-			-- detect dead handle
-			local h = watchers[client.id]
-			if not h or (h.is_closing and h:is_closing()) then
-				notify("Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
-				resync_snapshot()
-				restart_watcher()
+			if watchers[client.id] and watchers[client.id].close then
+				watchers[client.id]:close()
 			end
-		end
-	end)
+		end)
+		return
+	end
 	watchdogs[client.id] = watchdog
 
 	-- -------- autocmds --------
-	local id = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify("Buffer closed for deleted file: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					resync_snapshot()
-					restart_watcher()
-				end
-			end
-		end,
+	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
+		notify = notify,
+		resync_snapshot = resync_fn,
+		restart_watcher = restart_watcher,
+		normalize_path = normalize_path,
 	})
-
-	local id2 = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify("File vanished while buffer open: " .. bufpath .. " -> resync+restart", vim.log.levels.DEBUG)
-					resync_snapshot()
-					restart_watcher()
-				end
-			end
-		end,
-	})
-
-	local id3 = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
-		callback = function(args)
-			local bufpath = vim.api.nvim_buf_get_name(args.buf)
-			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
-				if not uv.fs_stat(bufpath) then
-					notify(
-						"File missing but buffer still open: " .. bufpath .. " -> resync+restart",
-						vim.log.levels.DEBUG
-					)
-					resync_snapshot()
-					restart_watcher()
-				end
-			end
-		end,
-	})
-
-	autocmds[client.id] = { id, id2, id3 }
+	autocmds[client.id] = autocmd_ids
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
