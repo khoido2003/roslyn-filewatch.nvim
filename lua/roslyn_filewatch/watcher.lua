@@ -1,4 +1,3 @@
--- lua/roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -6,6 +5,7 @@ local notify_mod = require("roslyn_filewatch.watcher.notify")
 local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
 local rename_mod = require("roslyn_filewatch.watcher.rename")
 local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
+local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
@@ -274,92 +274,32 @@ M.start = function(client)
 		scan_tree(root, snapshots[client.id])
 	end
 
-	-- -------- fs_poll --------
-	local poller = uv.new_fs_poll()
-	poller:start(root, POLL_INTERVAL, function(errp, prev, curr)
-		if errp then
-			notify("Poller error: " .. tostring(errp), vim.log.levels.ERROR)
-			return
-		end
+	-- -------- fs_poll (delegated) --------
+	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
+		scan_tree = scan_tree,
+		identity_from_stat = identity_from_stat,
+		same_file_info = same_file_info,
+		queue_events = queue_events,
+		notify = notify,
+		notify_roslyn_renames = notify_roslyn_renames,
+		close_deleted_buffers = close_deleted_buffers,
+		restart_watcher = restart_watcher,
+		last_events = last_events,
+		poll_interval = POLL_INTERVAL,
+		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
+	})
 
-		if
-			prev
-			and curr
-			and (prev.mtime and curr.mtime)
-			and (prev.mtime.sec ~= curr.mtime.sec or prev.mtime.nsec ~= curr.mtime.nsec)
-		then
-			notify("Poller detected root metadata change; restarting watcher", vim.log.levels.DEBUG)
-			restart_watcher()
-			return
-		end
-
-		local new_map = {}
-		scan_tree(root, new_map)
-
-		local old_map = snapshots[client.id] or {}
-		local evs = {}
-		local saw_delete = false
-		local rename_pairs = {}
-
-		-- build old identity map
-		local old_id_map = {}
-		for path, entry in pairs(old_map) do
-			local id = identity_from_stat(entry)
-			if id then
-				old_id_map[id] = path
+	if not poller then
+		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
+		-- close the fs_event handle we started earlier to avoid leaking
+		pcall(function()
+			if handle and handle.close then
+				handle:close()
 			end
-		end
+		end)
+		return
+	end
 
-		-- detect creates / renames / changes
-		for path, mt in pairs(new_map) do
-			local old_mt = old_map[path]
-			if not old_mt then
-				local id = identity_from_stat(mt)
-				local oldpath = id and old_id_map[id]
-				if oldpath then
-					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
-					old_map[oldpath] = nil
-					old_id_map[id] = nil
-				else
-					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-				end
-			elseif not same_file_info(old_map[path], new_map[path]) then
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
-			end
-		end
-
-		-- remaining old_map entries are deletes
-		for path, _ in pairs(old_map) do
-			saw_delete = true
-			close_deleted_buffers(path)
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-		end
-
-		-- send renames
-		if #rename_pairs > 0 then
-			notify("Poller detected " .. #rename_pairs .. " rename(s)", vim.log.levels.DEBUG)
-			notify_roslyn_renames(rename_pairs)
-		end
-
-		if #evs > 0 then
-			snapshots[client.id] = new_map
-			queue_events(client.id, evs)
-			last_events[client.id] = os.time()
-
-			local last = last_events[client.id] or 0
-			if os.time() - last > POLLER_RESTART_THRESHOLD then
-				notify("Poller detected diffs while fs_event quiet; restarting watcher", vim.log.levels.DEBUG)
-				restart_watcher()
-			end
-
-			if saw_delete then
-				-- extra safety restart if deletes found by poller
-				restart_watcher()
-			end
-		else
-			snapshots[client.id] = new_map
-		end
-	end)
 	pollers[client.id] = poller
 
 	-- -------- watchdog --------
