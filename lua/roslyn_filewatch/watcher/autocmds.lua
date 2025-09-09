@@ -2,8 +2,6 @@ local uv = vim.uv or vim.loop
 
 local M = {}
 
--- deps:
---   notify(fn), resync_snapshot(fn), restart_watcher(fn), normalize_path(fn)
 -- returns { id_main, id_early, id_extra }
 function M.start(client, root, snapshots, deps)
 	deps = deps or {}

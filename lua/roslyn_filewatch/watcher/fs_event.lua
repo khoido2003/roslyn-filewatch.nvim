@@ -1,14 +1,9 @@
--- lua/roslyn_filewatch/watcher/fs_event.lua
--- fs_event wrapper: starts uv.new_fs_event() and handles file/dir events.
--- Also detects directory-deletes (folder removed) and closes buffers
--- for any snapshot entries under the removed directory.
-
 local uv = vim.uv or vim.loop
 
 local M = {}
 
 -- start(client, root, snapshots, opts) -> (handle, err)
--- opts (table) expected keys:
+-- opts (table):
 --   config
 --   rename_mod
 --   snapshot_mod
@@ -55,7 +50,6 @@ function M.start(client, root, snapshots, opts)
 		handle:start(root, { recursive = true }, function(err2, filename, events)
 			if err2 then
 				notify("Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				-- delegate a full resync like previous behavior
 				if snapshot_mod and snapshot_mod.resync_snapshot_for then
 					pcall(snapshot_mod.resync_snapshot_for, client.id, root, snapshots, {
 						notify = notify,
@@ -70,7 +64,6 @@ function M.start(client, root, snapshots, opts)
 				return
 			end
 
-			-- if filename is nil, same as before: resync+restart
 			if not filename then
 				notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
 				if snapshot_mod and snapshot_mod.resync_snapshot_for then
@@ -89,7 +82,6 @@ function M.start(client, root, snapshots, opts)
 
 			-- normalize incoming path
 			local fullpath = normalize_path(root .. "/" .. filename)
-			-- helper: should we watch this path as a file?
 			local function should_watch_path(p)
 				for _, dir in ipairs(config.options.ignore_dirs) do
 					if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
@@ -117,7 +109,6 @@ function M.start(client, root, snapshots, opts)
 				local found = false
 
 				for path, _ in pairs(snap) do
-					-- path and prefix are normalized already
 					if path == fullpath or path:sub(1, #prefix) == prefix then
 						found = true
 						-- remove from snapshot
@@ -139,15 +130,13 @@ function M.start(client, root, snapshots, opts)
 							queue_events(client.id, evs)
 						end)
 					end
-					-- For safety, restart watcher like single-file deletes did previously
 					restart_watcher()
 				end
 
-				-- whether or not we found anything relevant, skip further per-file logic
 				return
 			end
 
-			-- If we reach here, the path is a watched file path (extension matches).
+			-- the path is a watched file path (extension matches).
 			local st = uv.fs_stat(fullpath)
 			local evs = {}
 
@@ -183,7 +172,7 @@ function M.start(client, root, snapshots, opts)
 				end
 			else
 				-- file no longer exists: buffer the delete via rename_mod if possible,
-				-- otherwise act as immediate delete (old behavior)
+				-- otherwise act as immediate delete
 				if prev_mt then
 					local buffered = false
 					if rename_mod and rename_mod.on_delete and identity_from_stat then
@@ -203,11 +192,9 @@ function M.start(client, root, snapshots, opts)
 					end
 
 					if not buffered then
-						-- immediate delete fallback
 						snapshots[client.id][fullpath] = nil
 						pcall(close_deleted_buffers, fullpath)
 						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-						-- restart to be safe, consistent with prior behavior
 						restart_watcher()
 					end
 				end
