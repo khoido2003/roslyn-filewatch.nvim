@@ -46,6 +46,12 @@ M.options = {
 
 	--- If absolutely no fs activity for this many seconds, restart watcher (safety).
 	watchdog_idle = 60,
+
+	--- Window (ms) used to detect renames by buffering deletes and matching by identity.
+	rename_detection_ms = 300,
+
+	--- Debounce (ms) used to aggregate high-frequency fs events before processing.
+	processing_debounce_ms = 80,
 }
 
 M.setup = function(opts)

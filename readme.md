@@ -48,30 +48,30 @@ and will forward file system events (`workspace/didChangeWatchedFiles`, `workspa
 ### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
 
 ```lua
-	{
-		"khoido2003/roslyn-filewatch.nvim",
-		config = function()
-			require("roslyn_filewatch").setup({
-				-- optional overrides
-				client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
-				ignore_dirs = {
-					"Library",
-					"Temp",
-					"Logs",
-					"Obj",
-					"Bin",
-					".git",
-					".idea",
-					".vs",
-				},
-				watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
-				batching = {
-					enabled = true,
-					interval = 300, -- ms
-				},
-			})
-		end,
-	},
+{
+    "khoido2003/roslyn-filewatch.nvim",
+    config = function()
+      require("roslyn_filewatch").setup({
+        -- optional overrides
+        client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
+        ignore_dirs = {
+          "Library",
+          "Temp",
+          "Logs",
+		  "Obj",
+		  "Bin",
+		  ".git",
+		  ".idea",
+		  ".vs",
+		},
+		watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
+		batching = {
+		  enabled = true,
+		  interval = 300, -- ms
+		},
+	 })
+   end,
+},
 ```
 
 ### Using [packer.nvim](https://github.com/wbthomason/packer.nvim?utm_source=chatgpt.com)
@@ -111,6 +111,12 @@ require("roslyn_filewatch").setup({
   poller_restart_threshold = 2,    -- restart poller if idle for N seconds
   watchdog_idle = 60,              -- restart watcher if idle for N seconds
   rename_detection_ms = 300,       -- window to detect delete+create → rename
+
+  --- Window (ms) used to detect renames by buffering deletes and matching by identity.
+  rename_detection_ms = 300,
+
+  --- Debounce (ms) used to aggregate high-frequency fs events before processing.
+  processing_debounce_ms = 80,
 })
 
 ```
