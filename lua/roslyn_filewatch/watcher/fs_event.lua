@@ -21,6 +21,14 @@ end
 -- default debounce for processing fs_event bursts (ms)
 local DEFAULT_PROCESSING_DEBOUNCE_MS = 80
 
+-- error/resync throttle knobs
+local ERROR_WINDOW_SEC = 2
+local ERROR_THRESHOLD = 2
+local RESYNC_MIN_INTERVAL_SEC = 2
+
+local error_counters = {} -- client_id -> { count = n, since = ts }
+local last_resync_ts = {} -- client_id -> ts
+
 local function should_watch_path(p, cfg)
 	for _, dir in ipairs((cfg.options and cfg.options.ignore_dirs) or {}) do
 		if p:find("/" .. dir .. "/") or p:find("/" .. dir .. "$") then
@@ -35,7 +43,83 @@ local function should_watch_path(p, cfg)
 	return false
 end
 
--- start returns (handle, nil) on success or (nil, err) on failure
+local function record_error_and_maybe_escalate(client_id, msg, notify, resync_fn, restart_fn)
+	local now = os.time()
+	local ec = error_counters[client_id] or { count = 0, since = now }
+	if now - (ec.since or 0) > ERROR_WINDOW_SEC then
+		ec.count = 0
+		ec.since = now
+	end
+	ec.count = ec.count + 1
+	ec.since = ec.since or now
+	error_counters[client_id] = ec
+
+	local looks_like_perm = (msg and (msg:match("EPERM") or msg:lower():match("permission"))) and true or false
+
+	if looks_like_perm then
+		if ec.count >= ERROR_THRESHOLD then
+			pcall(function()
+				notify(
+					"Persistent permission/EPERM errors from fs_event; resyncing and restarting watcher",
+					vim.log.levels.ERROR
+				)
+			end)
+			error_counters[client_id] = nil
+			-- escalate (do resync+restart with fs_event disabled)
+			vim.defer_fn(function()
+				if resync_fn then
+					pcall(resync_fn)
+				end
+				if restart_fn then
+					pcall(function()
+						restart_fn("EPERM_escalated", 1200, true)
+					end)
+				end
+			end, 50)
+			return true
+		else
+			pcall(function()
+				notify(
+					"fs_event permission error (will escalate on repeated occurrences): " .. tostring(msg),
+					vim.log.levels.WARN
+				)
+			end)
+			return false
+		end
+	else
+		pcall(function()
+			notify("fs_event callback error (non-EPERM): " .. tostring(msg), vim.log.levels.ERROR)
+		end)
+		return false
+	end
+end
+
+local function may_resync_due_to_nil_filename(client_id, notify, resync_fn, restart_fn)
+	local now = os.time()
+	local last = last_resync_ts[client_id] or 0
+	if now - last < RESYNC_MIN_INTERVAL_SEC then
+		pcall(function()
+			notify("Skipping frequent resync (recently resynced)", vim.log.levels.DEBUG)
+		end)
+		return false
+	end
+	last_resync_ts[client_id] = now
+	vim.defer_fn(function()
+		pcall(function()
+			notify("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
+		end)
+		if resync_fn then
+			pcall(resync_fn)
+		end
+		if restart_fn then
+			pcall(function()
+				restart_fn("filename_nil", 800)
+			end)
+		end
+	end, 50)
+	return true
+end
+
 function M.start(client, root, snapshots, deps)
 	if not client then
 		return nil, "missing client"
@@ -90,7 +174,6 @@ function M.start(client, root, snapshots, deps)
 		for p, _ in pairs(buf.map) do
 			table.insert(paths, p)
 		end
-		-- clear buffer map immediately to accept new events while processing
 		buf.map = {}
 
 		if buf.timer then
@@ -98,15 +181,13 @@ function M.start(client, root, snapshots, deps)
 			buf.timer = nil
 		end
 
-		-- process each path in batch
 		local evs = {}
-
 		for _, fullpath in ipairs(paths) do
 			if not should_watch_path(fullpath, config) then
 				goto continue_path
 			end
 
-			local prev_mt = snapshots[client_id] and snapshots[client_id][fullpath]
+			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
 			local ok_st, st = pcall(function()
 				return uv.fs_stat(fullpath)
 			end)
@@ -117,7 +198,7 @@ function M.start(client, root, snapshots, deps)
 
 				local matched = false
 				if rename_mod and rename_mod.on_create then
-					local ok, res = pcall(rename_mod.on_create, client_id, fullpath, st, snapshots, {
+					local ok, res = pcall(rename_mod.on_create, client.id, fullpath, st, snapshots, {
 						notify = notify,
 						notify_roslyn_renames = notify_roslyn_renames,
 					})
@@ -131,22 +212,20 @@ function M.start(client, root, snapshots, deps)
 				end
 
 				if not matched then
-					-- normal create/change handling
-					snapshots[client_id] = snapshots[client_id] or {}
-					snapshots[client_id][fullpath] = new_entry
+					snapshots[client.id] = snapshots[client.id] or {}
+					snapshots[client.id][fullpath] = new_entry
 					if not prev_mt then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 }) -- Created
-					elseif not same_file_info(prev_mt, snapshots[client_id][fullpath]) then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 }) -- Changed
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
+					elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
 					end
 				end
 			else
-				-- file missing: possible delete (or transient)
+				-- missing -> possible delete
 				if prev_mt then
-					-- try rename buffering via rename_mod (if available)
 					local buffered = false
 					if rename_mod and rename_mod.on_delete then
-						local ok, res = pcall(rename_mod.on_delete, client_id, fullpath, prev_mt, snapshots, {
+						local ok, res = pcall(rename_mod.on_delete, client.id, fullpath, prev_mt, snapshots, {
 							queue_events = queue_events,
 							close_deleted_buffers = close_deleted_buffers,
 							notify = notify,
@@ -160,15 +239,11 @@ function M.start(client, root, snapshots, deps)
 					end
 
 					if not buffered then
-						-- immediate delete fallback
-						if snapshots[client_id] then
-							snapshots[client_id][fullpath] = nil
+						if snapshots[client.id] then
+							snapshots[client.id][fullpath] = nil
 						end
-						-- schedule buffer closing safely
 						pcall(close_deleted_buffers, fullpath)
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 }) -- Deleted
-						-- for safety, restart watcher if a delete happened on fast-path
-						pcall(restart_watcher)
+						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 					end
 				end
 			end
@@ -177,7 +252,7 @@ function M.start(client, root, snapshots, deps)
 		end
 
 		if #evs > 0 then
-			pcall(queue_events, client_id, evs)
+			pcall(queue_events, client.id, evs)
 		end
 	end
 
@@ -199,48 +274,99 @@ function M.start(client, root, snapshots, deps)
 		end
 	end
 
-	--  buffer path + schedule flush
+	-- start the fs_event watch with a fully protected callback
 	local ok_start, start_err = pcall(function()
 		handle:start(root, { recursive = true }, function(err2, filename, events)
-			if err2 then
-				pcall(notify, "Watcher error: " .. tostring(err2), vim.log.levels.ERROR)
-				pcall(function()
-					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+			-- wrap entire callback to ensure nothing bubbles
+			local ok_cb, cb_err = pcall(function()
+				if err2 then
+					-- handle libuv-level error (often EPERM on windows dir delete race)
+					local msg = tostring(err2)
+					-- escalate only after repeated occurrences; on first occurrence log and schedule cleanup/resync
+					local escalated = record_error_and_maybe_escalate(client.id, msg, notify, function()
+						pcall(function()
+							snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+						end)
+					end, function()
+						-- restart_watcher accepts (reason, delay_ms, disable_fs_event)
+						if restart_watcher then
+							pcall(function()
+								restart_watcher("EPERM", 1200, true)
+							end)
+						end
+					end)
+
+					-- schedule a deferred stop+restart if not escalated (prevents calling stop from inside uv callback directly)
+					if not escalated then
+						vim.defer_fn(function()
+							pcall(function()
+								-- stop/close the handle safely
+								if handle and handle.stop and not handle:is_closing() then
+									pcall(handle.stop, handle)
+								end
+								if handle and handle.close and not handle:is_closing() then
+									pcall(handle.close, handle)
+								end
+							end)
+							-- schedule restart with a small delay and request fs_event disabled for a bit
+							if restart_watcher then
+								pcall(function()
+									restart_watcher("EPERM", 800, true)
+								end)
+							end
+						end, 50)
+					end
+					return
+				end
+
+				-- filename missing: rate-limit resyncs
+				if not filename then
+					may_resync_due_to_nil_filename(client.id, notify, function()
+						pcall(function()
+							snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+						end)
+					end, function()
+						if restart_watcher then
+							pcall(function()
+								restart_watcher("filename_nil", 800)
+							end)
+						end
+					end)
+					return
+				end
+
+				local fullpath = normalize_path(root .. "/" .. filename)
+				if not should_watch_path(fullpath, config) then
+					return
+				end
+
+				if last_events then
+					last_events[client.id] = os.time()
+				end
+
+				event_buffers[client.id] = event_buffers[client.id] or { map = {}, timer = nil }
+				event_buffers[client.id].map[fullpath] = true
+				schedule_flush(client.id)
+			end)
+
+			if not ok_cb then
+				local msg = tostring(cb_err)
+				record_error_and_maybe_escalate(client.id, msg, notify, function()
+					pcall(function()
+						snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
+					end)
+				end, function()
+					if restart_watcher then
+						pcall(function()
+							restart_watcher("callback_error", 800, true)
+						end)
+					end
 				end)
-				pcall(restart_watcher)
-				return
 			end
-
-			if not filename then
-				pcall(notify, "fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
-				pcall(function()
-					snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-				end)
-				pcall(restart_watcher)
-				return
-			end
-
-			local fullpath = normalize_path(root .. "/" .. filename)
-
-			if not should_watch_path(fullpath, config) then
-				return
-			end
-
-			-- record activity
-			if last_events then
-				last_events[client.id] = os.time()
-			end
-
-			-- add to per-client map and schedule flush
-			event_buffers[client.id] = event_buffers[client.id] or { map = {}, timer = nil }
-			event_buffers[client.id].map[fullpath] = true
-			-- schedule a short debounce flush
-			schedule_flush(client.id)
 		end)
 	end)
 
 	if not ok_start then
-		-- start failed: close handle & return error
 		if handle and handle.close then
 			pcall(function()
 				handle:close()

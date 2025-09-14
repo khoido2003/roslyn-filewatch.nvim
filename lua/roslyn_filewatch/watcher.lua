@@ -28,20 +28,21 @@ local watchdogs = {}
 local snapshots = {} -- client_id -> { [path]= { mtime, size, ino, dev } }
 local last_events = {} -- client_id -> os.time()
 local restart_scheduled = {} -- client_id -> true
+local restart_backoff_until = {} -- client_id -> timestamp (seconds)
 local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
+local fs_event_disabled_until = {} -- client_id -> timestamp (seconds)
 
--- ================================================================
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
--- ================================================================
 local function close_deleted_buffers(path)
 	path = normalize_path(path)
 	local uri = vim.uri_from_fname(path)
 
-	-- double-check after short delay to avoid race conditions
 	vim.defer_fn(function()
-		local st = uv.fs_stat(path)
-		if st then
-			-- file still exists -> skip closing
+		local ok, st = pcall(function()
+			return uv.fs_stat(path)
+		end)
+		if ok and st then
+			-- file exists -> nothing to do
 			return
 		end
 
@@ -60,15 +61,16 @@ local function close_deleted_buffers(path)
 				end
 			end
 		end)
-	end, 200) -- wait 200ms before confirming deletion
+	end, 200)
 end
 
--- ================================================================
 -- Helper: queue + batch flush
--- ================================================================
-
 local function queue_events(client_id, evs)
-	if config.options.batching.enabled then
+	if not evs or #evs == 0 then
+		return
+	end
+
+	if config.options.batching and config.options.batching.enabled then
 		if not batch_queues[client_id] then
 			batch_queues[client_id] = { events = {}, timer = nil }
 		end
@@ -76,66 +78,77 @@ local function queue_events(client_id, evs)
 		vim.list_extend(queue.events, evs)
 
 		if not queue.timer then
-			queue.timer = uv.new_timer()
-			queue.timer:start(config.options.batching.interval, 0, function()
+			local t = uv.new_timer()
+			queue.timer = t
+			t:start((config.options.batching.interval or 300), 0, function()
 				local changes = queue.events
 				queue.events = {}
-				-- stop & close safely
 				pcall(function()
-					queue.timer:stop()
-					queue.timer:close()
+					if queue.timer and not queue.timer:is_closing() then
+						queue.timer:stop()
+						queue.timer:close()
+					end
 				end)
 				queue.timer = nil
 				if #changes > 0 then
 					vim.schedule(function()
-						notify_roslyn(changes)
+						pcall(notify_roslyn, changes)
 					end)
 				end
 			end)
 		end
 	else
 		vim.schedule(function()
-			notify_roslyn(evs)
+			pcall(notify_roslyn, evs)
 		end)
 	end
 end
 
--- ================================================================
--- Core Watch Logic
--- ================================================================
+-- Detect window platform
+local function is_windows()
+	local ok, uname = pcall(function()
+		return uv.os_uname()
+	end)
+	if ok and uname and uname.sysname then
+		return uname.sysname:match("Windows")
+	end
+	return package.config:sub(1, 1) == "\\"
+end
+
+-- Core start
 M.start = function(client)
+	if not client then
+		return
+	end
 	if watchers[client.id] then
 		return -- already running
 	end
 
-	-- read tunables at start-time (so config.setup can be called before M.start)
-	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000 -- ms
-	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2 -- seconds
-	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60 -- seconds
-	-- rename detection window (ms)
+	-- tunables
+	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000
+	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2
+	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60
 	local RENAME_WINDOW_MS = (config.options and config.options.rename_detection_ms) or 300
 
-	local root = client.config.root_dir
+	local root = client.config and client.config.root_dir
 	if not root then
-		notify("No root_dir for client " .. client.name, vim.log.levels.ERROR)
+		notify("No root_dir for client " .. (client.name or "<unknown>"), vim.log.levels.ERROR)
 		return
 	end
 	root = normalize_path(root)
 
-	-- safe cleanup
+	-- cleanup (close handles, timers, autocmds, rename buffers)
 	local function cleanup()
-		-- fs_event handle
 		if watchers[client.id] then
 			pcall(function()
 				local h = watchers[client.id]
-				-- stop and close if possible
 				pcall(function()
 					if h and not h:is_closing() then
 						if h.stop then
-							h:stop()
+							pcall(h.stop, h)
 						end
 						if h.close then
-							h:close()
+							pcall(h.close, h)
 						end
 					end
 				end)
@@ -168,19 +181,19 @@ M.start = function(client)
 		if batch_queues[client.id] then
 			if batch_queues[client.id].timer then
 				pcall(function()
-					batch_queues[client.id].timer:stop()
-					batch_queues[client.id].timer:close()
+					if not batch_queues[client.id].timer:is_closing() then
+						batch_queues[client.id].timer:stop()
+						batch_queues[client.id].timer:close()
+					end
 				end)
 			end
 			batch_queues[client.id] = nil
 		end
 
-		-- stop & clear pending delete timers & maps
 		pcall(function()
 			rename_mod.clear(client.id)
 		end)
 
-		-- remove autocmds for this exact client id (avoid accidental prefix matches)
 		if autocmds[client.id] then
 			for _, id in pairs(autocmds[client.id]) do
 				pcall(vim.api.nvim_del_autocmd, id)
@@ -189,39 +202,58 @@ M.start = function(client)
 		end
 	end
 
-	local function restart_watcher()
+	-- restart watcher with backoff and optional fs_event disable flag
+	local function restart_watcher(reason, delay_ms, disable_fs_event)
+		delay_ms = delay_ms or 300
 		if restart_scheduled[client.id] then
 			return
 		end
+		local now = os.time()
+		local until_ts = restart_backoff_until[client.id] or 0
+		if now < until_ts then
+			notify("Restart suppressed due to backoff for client " .. client.name, vim.log.levels.DEBUG)
+			return
+		end
+
+		if disable_fs_event then
+			-- disable fs_event attempts for a short window (avoid re-creating broken handle)
+			fs_event_disabled_until[client.id] = now + 5 -- 5 seconds
+		end
+
 		restart_scheduled[client.id] = true
+		restart_backoff_until[client.id] = now + math.ceil(delay_ms / 1000)
+
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
-
 			local old_snapshot = snapshots[client.id] or {}
-
 			cleanup()
 			if not client.is_stopped() then
-				notify("Restarting watcher for client " .. client.name, vim.log.levels.DEBUG)
+				notify(
+					"Restarting watcher for client "
+						.. client.name
+						.. " (reason: "
+						.. tostring(reason or "unspecified")
+						.. ")",
+					vim.log.levels.DEBUG
+				)
 				M.start(client)
 
-				-- rescan for diff
+				-- rescan and backfill events after restart
 				local new_map = {}
-				scan_tree(client.config.root_dir, new_map)
+				pcall(function()
+					scan_tree(client.config.root_dir, new_map)
+				end)
 
 				local evs = {}
-
-				-- backfill deletes
 				for path, _ in pairs(old_snapshot) do
 					if new_map[path] == nil then
 						close_deleted_buffers(path)
-						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 }) -- Deleted
+						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 					end
 				end
-
-				-- backfill creates
 				for path, _ in pairs(new_map) do
 					if old_snapshot[path] == nil then
-						table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 }) -- Created
+						table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
 					end
 				end
 
@@ -232,7 +264,7 @@ M.start = function(client)
 
 				snapshots[client.id] = new_map
 			end
-		end, 300)
+		end, delay_ms)
 	end
 
 	local helpers = {
@@ -244,39 +276,53 @@ M.start = function(client)
 		last_events = last_events,
 	}
 
-	-- ********** fs_event **********
-	local handle, start_err = fs_event_mod.start(client, root, snapshots, {
-		config = config,
-		rename_mod = rename_mod,
-		snapshot_mod = snapshot_mod,
-		notify = notify,
-		notify_roslyn_renames = notify_roslyn_renames,
-		queue_events = queue_events,
-		close_deleted_buffers = close_deleted_buffers,
-		restart_watcher = restart_watcher,
-		mtime_ns = mtime_ns,
-		identity_from_stat = identity_from_stat,
-		same_file_info = same_file_info,
-		normalize_path = normalize_path,
-		last_events = last_events,
-		rename_window_ms = RENAME_WINDOW_MS,
-	})
+	-- choose whether to attempt native fs_event
+	local os_win = is_windows()
+	local force_polling = (config.options and config.options.force_polling) or false
+	local disabled_until = fs_event_disabled_until[client.id] or 0
+	local now = os.time()
+	local use_fs_event = (not os_win) and not force_polling and now >= disabled_until
 
-	if not handle then
-		notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.ERROR)
-		return
+	if use_fs_event then
+		local handle, start_err = fs_event_mod.start(client, root, snapshots, {
+			config = config,
+			rename_mod = rename_mod,
+			snapshot_mod = snapshot_mod,
+			notify = notify,
+			notify_roslyn_renames = notify_roslyn_renames,
+			queue_events = queue_events,
+			close_deleted_buffers = close_deleted_buffers,
+			restart_watcher = restart_watcher,
+			mtime_ns = mtime_ns,
+			identity_from_stat = identity_from_stat,
+			same_file_info = same_file_info,
+			normalize_path = normalize_path,
+			last_events = last_events,
+			rename_window_ms = RENAME_WINDOW_MS,
+		})
+
+		if not handle then
+			-- if native start failed, temporarily disable attempts and continue with poller
+			notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
+			fs_event_disabled_until[client.id] = os.time() + 5
+		else
+			watchers[client.id] = handle
+			last_events[client.id] = os.time()
+		end
+	else
+		notify(
+			"Using poller-only mode for client "
+				.. client.name
+				.. " (windows="
+				.. tostring(os_win)
+				.. ", force_polling="
+				.. tostring(force_polling)
+				.. ")",
+			vim.log.levels.DEBUG
+		)
 	end
 
-	watchers[client.id] = handle
-	last_events[client.id] = os.time()
-
-	-- Initialize snapshot only if missing
-	if not snapshots[client.id] then
-		snapshots[client.id] = {}
-		scan_tree(root, snapshots[client.id])
-	end
-
-	-- -------- fs_poll --------
+	-- always create poller fallback (keeps snapshot reliable)
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
 		identity_from_stat = identity_from_stat,
@@ -293,18 +339,17 @@ M.start = function(client)
 
 	if not poller then
 		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
-		-- close the fs_event handle started earlier to avoid leaking
+		-- close any fs_event to avoid leaking
 		pcall(function()
-			if handle and handle.close then
-				handle:close()
+			if watchers[client.id] and watchers[client.id].close then
+				watchers[client.id]:close()
 			end
 		end)
 		return
 	end
-
 	pollers[client.id] = poller
 
-	-- -------- watchdog --------
+	-- watchdog
 	local resync_fn = function()
 		pcall(function()
 			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
@@ -323,7 +368,6 @@ M.start = function(client)
 	})
 	if not watchdog then
 		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
-		-- cleanup poller + fs_event if needed
 		pcall(function()
 			if pollers[client.id] and pollers[client.id].close then
 				pollers[client.id]:close()
@@ -336,7 +380,7 @@ M.start = function(client)
 	end
 	watchdogs[client.id] = watchdog
 
-	-- -------- autocmds --------
+	-- autocmds to keep editor <-> fs state coherent
 	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
 		notify = notify,
 		resync_snapshot = resync_fn,
@@ -353,6 +397,8 @@ M.start = function(client)
 			if args.data.client_id == client.id then
 				snapshots[client.id] = nil
 				restart_scheduled[client.id] = nil
+				restart_backoff_until[client.id] = nil
+				fs_event_disabled_until[client.id] = nil
 				cleanup()
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
