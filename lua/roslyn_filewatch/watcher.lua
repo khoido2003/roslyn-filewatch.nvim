@@ -1,4 +1,3 @@
--- lua/roslyn_filewatch/watcher.lua
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -176,7 +175,7 @@ M.start = function(client)
 			batch_queues[client.id] = nil
 		end
 
-		-- stop & clear pending delete timers & maps (rename module)
+		-- stop & clear pending delete timers & maps
 		pcall(function()
 			rename_mod.clear(client.id)
 		end)
@@ -236,7 +235,6 @@ M.start = function(client)
 		end, 300)
 	end
 
-	-- prepare helpers for snapshot module (and fs_event/rename)
 	local helpers = {
 		notify = notify,
 		notify_roslyn_renames = notify_roslyn_renames,
@@ -295,7 +293,7 @@ M.start = function(client)
 
 	if not poller then
 		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
-		-- close the fs_event handle we started earlier to avoid leaking
+		-- close the fs_event handle started earlier to avoid leaking
 		pcall(function()
 			if handle and handle.close then
 				handle:close()
@@ -308,7 +306,6 @@ M.start = function(client)
 
 	-- -------- watchdog --------
 	local resync_fn = function()
-		-- replicate previous behaviour: call snapshot_resync with helpers
 		pcall(function()
 			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
 		end)

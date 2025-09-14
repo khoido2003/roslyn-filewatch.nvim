@@ -29,7 +29,7 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- detect root metadata changes (same as before)
+			-- detect root metadata changes
 			if
 				prev
 				and curr

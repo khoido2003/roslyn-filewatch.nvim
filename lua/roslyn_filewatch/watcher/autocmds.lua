@@ -2,8 +2,6 @@ local uv = vim.uv or vim.loop
 
 local M = {}
 
--- deps:
---   notify(fn), resync_snapshot(fn), restart_watcher(fn), normalize_path(fn)
 -- returns { id_main, id_early, id_extra }
 function M.start(client, root, snapshots, deps)
 	deps = deps or {}
@@ -15,6 +13,12 @@ function M.start(client, root, snapshots, deps)
 	-- BufDelete / BufWipeout
 	local id_main = vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
 		callback = function(args)
+			-- ignore special buftypes
+			local bt = vim.bo[args.buf].buftype
+			if bt ~= "" then
+				return
+			end
+
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
@@ -39,6 +43,12 @@ function M.start(client, root, snapshots, deps)
 	-- BufEnter, BufWritePost, FileChangedRO
 	local id_early = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
 		callback = function(args)
+			-- ignore special buftypes
+			local bt = vim.bo[args.buf].buftype
+			if bt ~= "" then
+				return
+			end
+
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
@@ -63,6 +73,12 @@ function M.start(client, root, snapshots, deps)
 	-- BufReadPost, BufWritePost
 	local id_extra = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
 		callback = function(args)
+			-- ignore special buftypes
+			local bt = vim.bo[args.buf].buftype
+			if bt ~= "" then
+				return
+			end
+
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath ~= "" and normalize_path(bufpath):sub(1, #root) == root then
 				if not uv.fs_stat(bufpath) then
