@@ -88,37 +88,35 @@ use {
 ## Configuration
 
 ```lua 
-
 require("roslyn_filewatch").setup({
-
-   client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
-   ignore_dirs = {
-	 "Library",
-	 "Temp",
-	 "Logs",
-	 "Obj",
-	 "Bin",
-	 ".git",
-	 ".idea",
-	 ".vs",
+  client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
+  ignore_dirs = {
+    "Library",
+    "Temp",
+    "Logs",
+    "Obj",
+    "Bin",
+    ".git",
+    ".idea",
+    ".vs",
   },
   watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
   batching = {
     enabled = true,
     interval = 150,
   },
+
   poll_interval = 3000,            -- fs_poll interval (ms)
   poller_restart_threshold = 2,    -- restart poller if idle for N seconds
   watchdog_idle = 60,              -- restart watcher if idle for N seconds
   rename_detection_ms = 300,       -- window to detect delete+create → rename
+  processing_debounce_ms = 80,     -- debounce high-frequency events
 
-  --- Window (ms) used to detect renames by buffering deletes and matching by identity.
-  rename_detection_ms = 300,
-
-  --- Debounce (ms) used to aggregate high-frequency fs events before processing.
-  processing_debounce_ms = 80,
+  -- Control verbosity of plugin notifications:
+  --   TRACE < DEBUG < INFO < WARN < ERROR
+  -- Default: WARN (only warnings & errors are shown)
+  log_level = vim.log.levels.WARN,
 })
-
 ```
 
 ---

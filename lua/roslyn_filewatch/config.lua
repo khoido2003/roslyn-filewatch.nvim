@@ -1,3 +1,4 @@
+-- lua/roslyn_filewatch/config.lua
 local M = {}
 
 M.options = {
@@ -52,6 +53,16 @@ M.options = {
 
 	--- Debounce (ms) used to aggregate high-frequency fs events before processing.
 	processing_debounce_ms = 80,
+
+	--- Logging level for plugin notifications (controls what gets passed to vim.notify).
+	--- Default: WARN (show only warnings and errors). Set to vim.log.levels.INFO or DEBUG
+	--- to get more verbose notifications.
+	--
+	--- Valid values: vim.log.levels.TRACE, DEBUG, INFO, WARN, ERROR
+	-- Example:
+	--   require("roslyn_filewatch").setup({ log_level = vim.log.levels.ERROR })
+	--
+	log_level = vim.log and vim.log.levels and vim.log.levels.WARN or 3,
 }
 
 M.setup = function(opts)
