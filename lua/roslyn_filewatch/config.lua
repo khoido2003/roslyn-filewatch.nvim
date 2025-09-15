@@ -1,4 +1,3 @@
--- lua/roslyn_filewatch/config.lua
 local M = {}
 
 M.options = {
@@ -61,7 +60,6 @@ M.options = {
 	--- Valid values: vim.log.levels.TRACE, DEBUG, INFO, WARN, ERROR
 	-- Example:
 	--   require("roslyn_filewatch").setup({ log_level = vim.log.levels.ERROR })
-	--
 	log_level = vim.log and vim.log.levels and vim.log.levels.WARN or 3,
 }
 
