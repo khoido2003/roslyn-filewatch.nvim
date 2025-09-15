@@ -1,4 +1,9 @@
 local uv = vim.uv or vim.loop
+local config = require("roslyn_filewatch.config")
+local rename_mod = require("roslyn_filewatch.watcher.rename")
+local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
+local notify_mod = require("roslyn_filewatch.watcher.notify")
+local notify = notify_mod and notify_mod.user or function() end
 
 local M = {}
 
@@ -16,6 +21,24 @@ local local_stop_close = function(t)
 		end
 		t:close()
 	end)
+end
+
+function M.clear(client_id)
+	local buf = event_buffers[client_id]
+	if not buf then
+		return
+	end
+	if buf.timer then
+		pcall(function()
+			if not buf.timer:is_closing() then
+				buf.timer:stop()
+				buf.timer:close()
+			end
+		end)
+		buf.timer = nil
+	end
+	buf.map = nil
+	event_buffers[client_id] = nil
 end
 
 -- default debounce for processing fs_event bursts (ms)

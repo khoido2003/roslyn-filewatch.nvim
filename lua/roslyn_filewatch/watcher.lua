@@ -104,7 +104,7 @@ local function queue_events(client_id, evs)
 	end
 end
 
--- Detect window platform
+-- Detect Windows platform
 local function is_windows()
 	local ok, uname = pcall(function()
 		return uv.os_uname()
@@ -120,7 +120,9 @@ M.start = function(client)
 	if not client then
 		return
 	end
-	if watchers[client.id] then
+
+	-- Prevent duplicate starts. Check all handles so poller-only case doesn't start duplicates.
+	if watchers[client.id] or pollers[client.id] or watchdogs[client.id] then
 		return -- already running
 	end
 
@@ -139,6 +141,13 @@ M.start = function(client)
 
 	-- cleanup (close handles, timers, autocmds, rename buffers)
 	local function cleanup()
+		-- clear fs_event internal timers for this client (if any)
+		pcall(function()
+			if fs_event_mod and fs_event_mod.clear then
+				pcall(fs_event_mod.clear, client.id)
+			end
+		end)
+
 		if watchers[client.id] then
 			pcall(function()
 				local h = watchers[client.id]
@@ -159,8 +168,10 @@ M.start = function(client)
 		if pollers[client.id] then
 			pcall(function()
 				local p = pollers[client.id]
-				if p and not p:is_closing() then
+				if p and not p:is_closing() and p.stop then
 					p:stop()
+				end
+				if p and p.close then
 					p:close()
 				end
 			end)
@@ -321,7 +332,7 @@ M.start = function(client)
 			vim.log.levels.DEBUG
 		)
 
-		-- check last_events so the watchdog does not immediately treat this as idle
+		-- Prime last_events so the watchdog does not immediately treat this as idle
 		last_events[client.id] = os.time()
 	end
 
