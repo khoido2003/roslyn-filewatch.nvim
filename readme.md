@@ -28,7 +28,7 @@ This plugin adds a proper **file system watcher** so Roslyn always stays updated
 
 ---
 
-## 📦 Requirements
+## 🔌 Requirements
 
 This plugin does **not** provide a Roslyn language server on its own.  
 You must already have an **LSP client for Roslyn** installed and configured.
