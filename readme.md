@@ -51,25 +51,7 @@ and will forward file system events (`workspace/didChangeWatchedFiles`, `workspa
 {
     "khoido2003/roslyn-filewatch.nvim",
     config = function()
-      require("roslyn_filewatch").setup({
-        -- optional overrides
-        client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
-        ignore_dirs = {
-          "Library",
-          "Temp",
-          "Logs",
-		  "Obj",
-		  "Bin",
-		  ".git",
-		  ".idea",
-		  ".vs",
-		},
-		watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
-		batching = {
-		  enabled = true,
-		  interval = 300, -- ms
-		},
-	 })
+      require("roslyn_filewatch").setup({})
    end,
 },
 ```
@@ -103,7 +85,7 @@ require("roslyn_filewatch").setup({
   watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
   batching = {
     enabled = true,
-    interval = 150,
+    interval = 300,
   },
 
   poll_interval = 3000,            -- fs_poll interval (ms)
