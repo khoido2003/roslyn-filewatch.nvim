@@ -32,6 +32,8 @@ local restart_backoff_until = {} -- client_id -> timestamp (seconds)
 local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
 local fs_event_disabled_until = {} -- client_id -> timestamp (seconds)
 
+------------------------------------------------------
+
 -- Helper: close buffers for deleted files (safe: runs in scheduled context)
 local function close_deleted_buffers(path)
 	path = normalize_path(path)
@@ -63,6 +65,8 @@ local function close_deleted_buffers(path)
 		end)
 	end, 200)
 end
+
+------------------------------------------------------
 
 -- Helper: queue + batch flush
 local function queue_events(client_id, evs)
@@ -104,6 +108,8 @@ local function queue_events(client_id, evs)
 	end
 end
 
+-------------------------------------------------
+
 -- Detect Windows platform
 local function is_windows()
 	local ok, uname = pcall(function()
@@ -115,9 +121,120 @@ local function is_windows()
 	return package.config:sub(1, 1) == "\\"
 end
 
+-------------------------------------------------
+
+local function cleanup_client(client_id)
+	-- clear fs_event internal timers for this client (if any)
+	pcall(function()
+		if fs_event_mod and fs_event_mod.clear then
+			pcall(fs_event_mod.clear, client_id)
+		end
+	end)
+
+	if watchers[client_id] then
+		pcall(function()
+			local h = watchers[client_id]
+			pcall(function()
+				-- some handles may not implement is_closing; guard with pcall
+				if h and not (h.is_closing and h:is_closing()) then
+					if h.stop then
+						pcall(h.stop, h)
+					end
+					if h.close then
+						pcall(h.close, h)
+					end
+				end
+			end)
+		end)
+		watchers[client_id] = nil
+	end
+
+	if pollers[client_id] then
+		pcall(function()
+			local p = pollers[client_id]
+			-- uv.fs_poll has :stop / :close; guard with pcall
+			if p then
+				if p.stop then
+					pcall(p.stop, p)
+				end
+				if p.close then
+					pcall(p.close, p)
+				end
+			end
+		end)
+		pollers[client_id] = nil
+	end
+
+	if watchdogs[client_id] then
+		pcall(function()
+			local w = watchdogs[client_id]
+			if w and not (w.is_closing and w:is_closing()) then
+				pcall(function()
+					w:stop()
+					w:close()
+				end)
+			end
+		end)
+		watchdogs[client_id] = nil
+	end
+
+	if batch_queues[client_id] then
+		if batch_queues[client_id].timer then
+			pcall(function()
+				if not batch_queues[client_id].timer:is_closing() then
+					batch_queues[client_id].timer:stop()
+					batch_queues[client_id].timer:close()
+				end
+			end)
+		end
+		batch_queues[client_id] = nil
+	end
+
+	-- clear rename buffers
+	pcall(function()
+		rename_mod.clear(client_id)
+	end)
+
+	-- clear autocmds
+	if autocmds[client_id] then
+		for _, id in pairs(autocmds[client_id]) do
+			pcall(vim.api.nvim_del_autocmd, id)
+		end
+		autocmds[client_id] = nil
+	end
+end
+
+-- //////////////////////////////////////////////////
+-- /////////////////////////////////////////////////
+
+M.stop = function(client)
+	if not client then
+		return
+	end
+	local cid = client.id
+	-- clear snapshot & restart state
+	snapshots[cid] = nil
+	restart_scheduled[cid] = nil
+	restart_backoff_until[cid] = nil
+	fs_event_disabled_until[cid] = nil
+	-- clear last_events since watcher is intentionally stopped
+	last_events[cid] = nil
+	-- cleanup handles/timers
+	cleanup_client(cid)
+	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
+end
+
+-- /////////////////////////////////////////////////
+-- /////////////////////////////////////////////////
+
 -- Core start
 M.start = function(client)
 	if not client then
+		return
+	end
+
+	-- if client already stopped, nothing to do
+	if client.is_stopped and client.is_stopped() then
 		return
 	end
 
@@ -138,80 +255,6 @@ M.start = function(client)
 		return
 	end
 	root = normalize_path(root)
-
-	-- cleanup (close handles, timers, autocmds, rename buffers)
-	local function cleanup()
-		-- clear fs_event internal timers for this client (if any)
-		pcall(function()
-			if fs_event_mod and fs_event_mod.clear then
-				pcall(fs_event_mod.clear, client.id)
-			end
-		end)
-
-		if watchers[client.id] then
-			pcall(function()
-				local h = watchers[client.id]
-				pcall(function()
-					if h and not h:is_closing() then
-						if h.stop then
-							pcall(h.stop, h)
-						end
-						if h.close then
-							pcall(h.close, h)
-						end
-					end
-				end)
-			end)
-			watchers[client.id] = nil
-		end
-
-		if pollers[client.id] then
-			pcall(function()
-				local p = pollers[client.id]
-				if p and not p:is_closing() and p.stop then
-					p:stop()
-				end
-				if p and p.close then
-					p:close()
-				end
-			end)
-			pollers[client.id] = nil
-		end
-
-		if watchdogs[client.id] then
-			pcall(function()
-				local w = watchdogs[client.id]
-				if w and not w:is_closing() then
-					w:stop()
-					w:close()
-				end
-			end)
-			watchdogs[client.id] = nil
-		end
-
-		if batch_queues[client.id] then
-			if batch_queues[client.id].timer then
-				pcall(function()
-					if not batch_queues[client.id].timer:is_closing() then
-						batch_queues[client.id].timer:stop()
-						batch_queues[client.id].timer:close()
-					end
-				end)
-			end
-			batch_queues[client.id] = nil
-		end
-
-		pcall(function()
-			rename_mod.clear(client.id)
-		end)
-
-		if autocmds[client.id] then
-			for _, id in pairs(autocmds[client.id]) do
-				pcall(vim.api.nvim_del_autocmd, id)
-			end
-			autocmds[client.id] = nil
-		end
-	end
 
 	-- restart watcher with backoff and optional fs_event disable flag
 	local function restart_watcher(reason, delay_ms, disable_fs_event)
@@ -237,7 +280,8 @@ M.start = function(client)
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
 			local old_snapshot = snapshots[client.id] or {}
-			cleanup()
+			-- use centralized cleanup
+			cleanup_client(client.id)
 			if not client.is_stopped() then
 				notify(
 					"Restarting watcher for client "
@@ -410,11 +454,15 @@ M.start = function(client)
 		once = true,
 		callback = function(args)
 			if args.data.client_id == client.id then
+				-- clear snapshot + state
 				snapshots[client.id] = nil
 				restart_scheduled[client.id] = nil
 				restart_backoff_until[client.id] = nil
 				fs_event_disabled_until[client.id] = nil
-				cleanup()
+				-- clear last_events
+				last_events[client.id] = nil
+				-- cleanup handles & timers
+				cleanup_client(client.id)
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
 		end,

@@ -1,6 +1,5 @@
 local M = {}
 
--- user-facing notify wrapper (keeps the same prefix and scheduling behavior)
 function M.user(msg, level)
 	vim.schedule(function()
 		vim.notify("[roslyn-filewatch] " .. msg, level or vim.log.levels.INFO)
@@ -33,7 +32,6 @@ function M.roslyn_renames(files)
 					newUri = p.newUri or vim.uri_from_fname(p["new"]),
 				})
 			end
-			-- schedule notify to be safe with event loop context
 			vim.schedule(function()
 				pcall(function()
 					client.notify("workspace/didRenameFiles", payload)
