@@ -7,7 +7,7 @@ function M.user(msg, level)
 	end)
 end
 
--- send workspace/didChangeWatchedFiles (synchronous; callers may schedule as needed)
+-- send workspace/didChangeWatchedFiles
 function M.roslyn_changes(changes)
 	local config = require("roslyn_filewatch.config")
 	local clients = vim.lsp.get_clients()
@@ -20,7 +20,7 @@ function M.roslyn_changes(changes)
 	end
 end
 
--- send workspace/didRenameFiles (scheduled to keep behavior safe in event loop)
+-- send workspace/didRenameFiles
 function M.roslyn_renames(files)
 	local config = require("roslyn_filewatch.config")
 	local clients = vim.lsp.get_clients()

@@ -14,6 +14,13 @@ function M.start(client, root, snapshots, deps)
 	local last_events = deps.last_events
 	local watchdog_idle = deps.watchdog_idle or 60 -- seconds
 
+	-- If the caller explicitly passes use_fs_event = false (poller-only),
+	-- NOT treat a missing fs_event handle as an error. Default is true if nil.
+	local use_fs_event = true
+	if deps.use_fs_event ~= nil then
+		use_fs_event = deps.use_fs_event
+	end
+
 	local t = uv.new_timer()
 	local ok, err = pcall(function()
 		-- fire every 15s
@@ -37,8 +44,9 @@ function M.start(client, root, snapshots, deps)
 				end
 
 				-- detect dead / closed handle
+				-- Only consider missing/closed handle an error when expected a fs_event handle.
 				local h = get_handle and get_handle()
-				if not h or (h.is_closing and h:is_closing()) then
+				if use_fs_event and (not h or (h.is_closing and h:is_closing())) then
 					if notify then
 						pcall(notify, "Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
 					end

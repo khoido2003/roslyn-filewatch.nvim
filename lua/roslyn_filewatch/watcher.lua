@@ -320,6 +320,9 @@ M.start = function(client)
 				.. ")",
 			vim.log.levels.DEBUG
 		)
+
+		-- check last_events so the watchdog does not immediately treat this as idle
+		last_events[client.id] = os.time()
 	end
 
 	-- always create poller fallback (keeps snapshot reliable)
@@ -365,6 +368,7 @@ M.start = function(client)
 		end,
 		last_events = last_events,
 		watchdog_idle = WATCHDOG_IDLE,
+		use_fs_event = use_fs_event, -- explicit flag so watchdog only treats missing handle as error when fs_event expected
 	})
 	if not watchdog then
 		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
