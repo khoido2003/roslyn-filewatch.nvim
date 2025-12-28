@@ -46,6 +46,20 @@ local autocmds = {}
 ---@type table<number, number>
 local fs_event_disabled_until = {}
 
+-- Register state references with status module for RoslynFilewatchStatus command
+pcall(function()
+	local status_mod = require("roslyn_filewatch.status")
+	if status_mod and status_mod.register_refs then
+		status_mod.register_refs({
+			watchers = watchers,
+			pollers = pollers,
+			watchdogs = watchdogs,
+			snapshots = snapshots,
+			last_events = last_events,
+		})
+	end
+end)
+
 ------------------------------------------------------
 
 --- Close buffers for deleted files (safe: runs in scheduled context)

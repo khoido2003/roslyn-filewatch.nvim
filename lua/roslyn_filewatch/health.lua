@@ -138,6 +138,13 @@ local function check_config()
 		info("Solution-aware watching disabled (scanning entire root)")
 	end
 
+	-- Gitignore support status
+	if opts.respect_gitignore ~= false then
+		ok("Gitignore support enabled (respects .gitignore patterns)")
+	else
+		info("Gitignore support disabled")
+	end
+
 	info("Ignored directories: " .. #(opts.ignore_dirs or {}) .. " configured")
 	info("Watch extensions: " .. #(opts.watch_extensions or {}) .. " configured")
 

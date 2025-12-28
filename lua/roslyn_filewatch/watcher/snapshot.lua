@@ -43,6 +43,15 @@ function M.scan_tree(root, out_map)
 		end
 	end
 
+	-- Load gitignore if enabled
+	local gitignore_matcher = nil
+	if config.options.respect_gitignore ~= false then
+		local ok, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and gitignore_mod then
+			gitignore_matcher = gitignore_mod.load(root)
+		end
+	end
+
 	---@param path string
 	local function scan_dir(path)
 		local fd = uv.fs_scandir(path)
@@ -57,6 +66,14 @@ function M.scan_tree(root, out_map)
 			end
 
 			local fullpath = normalize_path(path .. "/" .. name)
+
+			-- Check gitignore first (applies to both files and dirs)
+			if gitignore_matcher then
+				local ok_gi, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+				if ok_gi and gitignore_mod and gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+					goto continue
+				end
+			end
 
 			if typ == "directory" then
 				-- Check if this directory should be skipped using exact segment match
@@ -96,6 +113,8 @@ function M.scan_tree(root, out_map)
 					end
 				end
 			end
+
+			::continue::
 		end
 	end
 

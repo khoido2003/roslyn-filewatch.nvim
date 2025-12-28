@@ -99,6 +99,10 @@ require("roslyn_filewatch").setup({
   -- Reduces I/O significantly on large repositories. Set to false to scan entire root.
   solution_aware = true,           -- (default: true)
 
+  -- Respect .gitignore patterns when scanning files.
+  -- Automatically skips files matching .gitignore rules.
+  respect_gitignore = true,        -- (default: true)
+
   -- Control verbosity of plugin notifications:
   --   TRACE < DEBUG < INFO < WARN < ERROR
   -- Default: WARN (only warnings & errors are shown)
@@ -121,6 +125,7 @@ lua/roslyn_filewatch/
 │   ├── rename.lua     # Rename detection (Deleted+Created → didRenameFiles)
 │   ├── snapshot.lua   # Snapshot tracking of file tree state
 │   ├── sln_parser.lua # Solution file parser for solution-aware watching
+│   ├── gitignore.lua  # Gitignore pattern parser and matcher
 │   ├── notify.lua     # Thin wrapper for LSP + user notifications
 │   └── utils.lua      # Path normalization, stat helpers, etc.
 ```
@@ -162,6 +167,16 @@ This plugin keeps Roslyn aware of **file system changes** that Neovim or Unity t
    - Translates events into Roslyn-compatible LSP notifications:  
      - `workspace/didChangeWatchedFiles`  
      - `workspace/didRenameFiles`
+
+---
+
+## 🔧 Commands
+
+| Command | Description |
+|---------|-------------|
+| `:RoslynFilewatchStatus` | Show current watcher status including clients, watch mode, file count, and solution info |
+
+You can also call `require("roslyn_filewatch").status()` programmatically.
 
 ---
 

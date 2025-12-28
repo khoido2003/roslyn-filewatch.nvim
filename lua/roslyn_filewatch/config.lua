@@ -15,6 +15,7 @@
 ---@field log_level? number vim.log.levels value
 ---@field force_polling? boolean Force polling mode (disable fs_event)
 ---@field solution_aware? boolean Parse .sln to limit watch scope (default: true)
+---@field respect_gitignore? boolean Respect .gitignore patterns (default: true)
 
 ---@class roslyn_filewatch.BatchingOptions
 ---@field enabled? boolean Enable event batching
@@ -95,6 +96,10 @@ M.options = {
 	--- to project directories only. Reduces I/O on large repositories.
 	--- Set to false to always scan the entire root directory.
 	solution_aware = true,
+
+	--- Respect .gitignore patterns when scanning files.
+	--- Automatically skips files matching .gitignore rules.
+	respect_gitignore = true,
 }
 
 --- Setup the configuration with user options
