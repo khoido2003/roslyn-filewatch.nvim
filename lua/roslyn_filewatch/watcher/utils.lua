@@ -179,25 +179,31 @@ end
 
 --- Check if a path segment matches an ignore directory name exactly
 --- This prevents false positives like "MyLibrary" matching "Library"
+--- Case-insensitive matching on Windows for cross-platform compatibility
 ---@param path string Normalized path with forward slashes
 ---@param ignore_dir string Directory name to check
 ---@return boolean
 local function matches_ignore_dir(path, ignore_dir)
+	-- Case-insensitive matching on Windows
+	local is_win = M.is_windows()
+	local cmp_path = is_win and path:lower() or path
+	local cmp_dir = is_win and ignore_dir:lower() or ignore_dir
+
 	-- Pattern: /dir/ or /dir at end
 	-- Use pattern anchoring to match exact segment
-	local pattern_mid = "/" .. ignore_dir .. "/"
-	local pattern_end = "/" .. ignore_dir .. "$"
+	local pattern_mid = "/" .. cmp_dir .. "/"
+	local pattern_end = "/" .. cmp_dir .. "$"
 
-	if path:find(pattern_mid, 1, true) then
+	if cmp_path:find(pattern_mid, 1, true) then
 		return true
 	end
-	if path:match(pattern_end) then
+	if cmp_path:match(pattern_end) then
 		return true
 	end
 
 	-- Also check if path starts with the ignore dir (e.g., root level)
-	local pattern_start = "^" .. ignore_dir .. "/"
-	if path:match(pattern_start) then
+	local pattern_start = "^" .. cmp_dir .. "/"
+	if cmp_path:match(pattern_start) then
 		return true
 	end
 

@@ -56,6 +56,9 @@ end
 function M.clear(client_id)
 	local buf = event_buffers[client_id]
 	if not buf then
+		-- Still clean up error tracking tables even if no buffer
+		error_counters[client_id] = nil
+		last_resync_ts[client_id] = nil
 		return
 	end
 	if buf.timer then
@@ -69,6 +72,10 @@ function M.clear(client_id)
 	end
 	buf.map = nil
 	event_buffers[client_id] = nil
+
+	-- Clean up error tracking tables to prevent memory leaks
+	error_counters[client_id] = nil
+	last_resync_ts[client_id] = nil
 end
 
 -- Default debounce for processing fs_event bursts (ms)

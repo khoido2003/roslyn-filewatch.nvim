@@ -66,15 +66,22 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- BUG FIX: Store last_event BEFORE updating it, so threshold comparison works
+			-- Store last_event BEFORE updating it, so threshold comparison works
 			local last_event_time = (deps.last_events and deps.last_events[client.id]) or 0
 
 			-- Rescan tree into new_map
 			---@type table<string, roslyn_filewatch.SnapshotEntry>
 			local new_map = {}
-			pcall(function()
+			local scan_ok, scan_err = pcall(function()
 				deps.scan_tree(root, new_map)
 			end)
+			if not scan_ok then
+				-- If scan failed, skip this poll cycle to avoid false delete events
+				if deps.notify then
+					pcall(deps.notify, "Poller scan_tree failed: " .. tostring(scan_err), vim.log.levels.WARN)
+				end
+				return
+			end
 
 			local old_map = snapshots[client.id] or {}
 

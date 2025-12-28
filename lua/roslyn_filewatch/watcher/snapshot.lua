@@ -48,15 +48,20 @@ function M.scan_tree(root, out_map)
 
 			if typ == "directory" then
 				-- Check if this directory should be skipped using exact segment match
+				-- Case-insensitive matching on Windows
 				local skip = false
+				local is_win = utils.is_windows()
 				for _, dir in ipairs(ignore_dirs) do
-					-- Check if the current directory name matches exactly
-					if name == dir then
+					-- Check if the current directory name matches exactly (case-insensitive on Windows)
+					local name_match = is_win and name:lower() == dir:lower() or name == dir
+					if name_match then
 						skip = true
 						break
 					end
 					-- Also check the full path for nested matches
-					if fullpath:find("/" .. dir .. "/", 1, true) or fullpath:match("/" .. dir .. "$") then
+					local cmp_fullpath = is_win and fullpath:lower() or fullpath
+					local cmp_dir = is_win and dir:lower() or dir
+					if cmp_fullpath:find("/" .. cmp_dir .. "/", 1, true) or cmp_fullpath:match("/" .. cmp_dir .. "$") then
 						skip = true
 						break
 					end
