@@ -1,23 +1,41 @@
+---@class roslyn_filewatch.notify
+---@field user fun(msg: string, level?: number)
+---@field roslyn_changes fun(changes: roslyn_filewatch.FileChange[])
+---@field roslyn_renames fun(files: roslyn_filewatch.RenameEntry[])
+
+---@class roslyn_filewatch.FileChange
+---@field uri string File URI
+---@field type number 1=Created, 2=Changed, 3=Deleted
+
+---@class roslyn_filewatch.RenameEntry
+---@field old string Old path
+---@field new string New path
+---@field oldUri? string Optional pre-computed old URI
+---@field newUri? string Optional pre-computed new URI
+
 local M = {}
 
 local config = require("roslyn_filewatch.config")
 
--- helper: read configured log level
+--- Get the configured log level
+---@return number
 local function configured_log_level()
 	local ok, lvl = pcall(function()
-		return (config and config.options and config.options.log_level)
+		return config and config.options and config.options.log_level
 	end)
 	if not ok or lvl == nil then
-		-- fallback to INFO if something unexpected happens
-		if vim.log and vim.log.levels and vim.log.levels.INFO then
-			return vim.log.levels.INFO
+		-- fallback to WARN if something unexpected happens
+		if vim.log and vim.log.levels and vim.log.levels.WARN then
+			return vim.log.levels.WARN
 		end
-		return 2
+		return 3
 	end
 	return lvl
 end
 
--- check whether a message at 'level' should be shown given configured threshold
+--- Check whether a message at 'level' should be shown given configured threshold
+---@param level? number
+---@return boolean
 local function should_emit(level)
 	level = level or (vim.log and vim.log.levels and vim.log.levels.INFO) or 2
 	local cfg_level = configured_log_level()
@@ -26,22 +44,29 @@ local function should_emit(level)
 	return level >= cfg_level
 end
 
+--- Send a notification to the user
+---@param msg string
+---@param level? number vim.log.levels value
 function M.user(msg, level)
 	level = level or (vim.log and vim.log.levels and vim.log.levels.INFO) or 2
 	if not should_emit(level) then
 		return
 	end
 	vim.schedule(function()
-		local notify = vim.notify or print
+		local notify_fn = vim.notify or print
 		pcall(function()
-			notify("[roslyn-filewatch] " .. tostring(msg), level)
+			notify_fn("[roslyn-filewatch] " .. tostring(msg), level)
 		end)
 	end)
 end
 
--- send workspace/didChangeWatchedFiles
+--- Send workspace/didChangeWatchedFiles to all matching Roslyn clients
+---@param changes roslyn_filewatch.FileChange[]
 function M.roslyn_changes(changes)
-	local config = require("roslyn_filewatch.config")
+	if not changes or #changes == 0 then
+		return
+	end
+
 	local clients = vim.lsp.get_clients()
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
@@ -52,12 +77,17 @@ function M.roslyn_changes(changes)
 	end
 end
 
--- send workspace/didRenameFiles
+--- Send workspace/didRenameFiles to all matching Roslyn clients
+---@param files roslyn_filewatch.RenameEntry[]
 function M.roslyn_renames(files)
-	local config = require("roslyn_filewatch.config")
+	if not files or #files == 0 then
+		return
+	end
+
 	local clients = vim.lsp.get_clients()
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
+			---@type { files: { oldUri: string, newUri: string }[] }
 			local payload = { files = {} }
 			for _, p in ipairs(files) do
 				table.insert(payload.files, {

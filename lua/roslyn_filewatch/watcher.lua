@@ -1,3 +1,7 @@
+---@class roslyn_filewatch.watcher
+---@field start fun(client: vim.lsp.Client)
+---@field stop fun(client: vim.lsp.Client)
+
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -21,30 +25,50 @@ local notify_roslyn_renames = notify_mod.roslyn_renames
 
 local M = {}
 
+---@type table<number, uv_fs_event_t>
 local watchers = {}
+---@type table<number, uv_fs_poll_t>
 local pollers = {}
+---@type table<number, { events: roslyn_filewatch.FileChange[], timer: uv_timer_t|nil }>
 local batch_queues = {}
+---@type table<number, uv_timer_t>
 local watchdogs = {}
-local snapshots = {} -- client_id -> { [path]= { mtime, size, ino, dev } }
-local last_events = {} -- client_id -> os.time()
-local restart_scheduled = {} -- client_id -> true
-local restart_backoff_until = {} -- client_id -> timestamp (seconds)
-local autocmds = {} -- client_id -> { id_main = ..., id_early = ..., id_extra = ... }
-local fs_event_disabled_until = {} -- client_id -> timestamp (seconds)
+---@type table<number, table<string, roslyn_filewatch.SnapshotEntry>>
+local snapshots = {}
+---@type table<number, number>
+local last_events = {}
+---@type table<number, boolean>
+local restart_scheduled = {}
+---@type table<number, number>
+local restart_backoff_until = {}
+---@type table<number, number[]>
+local autocmds = {}
+---@type table<number, number>
+local fs_event_disabled_until = {}
 
 ------------------------------------------------------
 
--- Helper: close buffers for deleted files (safe: runs in scheduled context)
+--- Close buffers for deleted files (safe: runs in scheduled context)
+---@param path string
 local function close_deleted_buffers(path)
+	-- BUG FIX: Guard against empty/nil path
+	if not path or path == "" then
+		return
+	end
+
 	path = normalize_path(path)
-	local uri = vim.uri_from_fname(path)
+
+	local ok_uri, uri = pcall(vim.uri_from_fname, path)
+	if not ok_uri or not uri then
+		return
+	end
 
 	vim.defer_fn(function()
 		local ok, st = pcall(function()
 			return uv.fs_stat(path)
 		end)
 		if ok and st then
-			-- file exists -> nothing to do
+			-- File exists -> nothing to do
 			return
 		end
 
@@ -53,8 +77,8 @@ local function close_deleted_buffers(path)
 				if vim.api.nvim_buf_is_loaded(bufnr) then
 					local bname = vim.api.nvim_buf_get_name(bufnr)
 					if bname ~= "" then
-						local bufuri = vim.uri_from_fname(normalize_path(bname))
-						if bufuri == uri then
+						local ok_bufuri, bufuri = pcall(vim.uri_from_fname, normalize_path(bname))
+						if ok_bufuri and bufuri == uri then
 							pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
 							notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
 							break
@@ -68,7 +92,9 @@ end
 
 ------------------------------------------------------
 
--- Helper: queue + batch flush
+--- Queue and batch flush events
+---@param client_id number
+---@param evs roslyn_filewatch.FileChange[]
 local function queue_events(client_id, evs)
 	if not evs or #evs == 0 then
 		return
@@ -110,21 +136,10 @@ end
 
 -------------------------------------------------
 
--- Detect Windows platform
-local function is_windows()
-	local ok, uname = pcall(function()
-		return uv.os_uname()
-	end)
-	if ok and uname and uname.sysname then
-		return uname.sysname:match("Windows")
-	end
-	return package.config:sub(1, 1) == "\\"
-end
-
--------------------------------------------------
-
+--- Cleanup all resources for a client
+---@param client_id number
 local function cleanup_client(client_id)
-	-- clear fs_event internal timers for this client (if any)
+	-- Clear fs_event internal timers for this client (if any)
 	pcall(function()
 		if fs_event_mod and fs_event_mod.clear then
 			pcall(fs_event_mod.clear, client_id)
@@ -135,7 +150,6 @@ local function cleanup_client(client_id)
 		pcall(function()
 			local h = watchers[client_id]
 			pcall(function()
-				-- some handles may not implement is_closing; guard with pcall
 				if h and not (h.is_closing and h:is_closing()) then
 					if h.stop then
 						pcall(h.stop, h)
@@ -152,7 +166,6 @@ local function cleanup_client(client_id)
 	if pollers[client_id] then
 		pcall(function()
 			local p = pollers[client_id]
-			-- uv.fs_poll has :stop / :close; guard with pcall
 			if p then
 				if p.stop then
 					pcall(p.stop, p)
@@ -190,16 +203,17 @@ local function cleanup_client(client_id)
 		batch_queues[client_id] = nil
 	end
 
-	-- clear rename buffers
+	-- Clear rename buffers
 	pcall(function()
 		rename_mod.clear(client_id)
 	end)
 
-	-- clear autocmds
+	-- Clear autocmds (the augroup will be auto-cleared when recreated)
 	if autocmds[client_id] then
-		for _, id in pairs(autocmds[client_id]) do
-			pcall(vim.api.nvim_del_autocmd, id)
-		end
+		-- Also try to delete the augroup
+		pcall(function()
+			vim.api.nvim_del_augroup_by_name("RoslynFilewatch_" .. client_id)
+		end)
 		autocmds[client_id] = nil
 	end
 end
@@ -207,19 +221,20 @@ end
 -- //////////////////////////////////////////////////
 -- /////////////////////////////////////////////////
 
-M.stop = function(client)
+--- Stop watcher for a client
+---@param client vim.lsp.Client
+function M.stop(client)
 	if not client then
 		return
 	end
 	local cid = client.id
-	-- clear snapshot & restart state
+	-- Clear snapshot & restart state
 	snapshots[cid] = nil
 	restart_scheduled[cid] = nil
 	restart_backoff_until[cid] = nil
 	fs_event_disabled_until[cid] = nil
-	-- clear last_events since watcher is intentionally stopped
 	last_events[cid] = nil
-	-- cleanup handles/timers
+	-- Cleanup handles/timers
 	cleanup_client(cid)
 	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
 end
@@ -227,13 +242,14 @@ end
 -- /////////////////////////////////////////////////
 -- /////////////////////////////////////////////////
 
--- Core start
-M.start = function(client)
+--- Start watcher for a client
+---@param client vim.lsp.Client
+function M.start(client)
 	if not client then
 		return
 	end
 
-	-- if client already stopped, nothing to do
+	-- If client already stopped, nothing to do
 	if client.is_stopped and client.is_stopped() then
 		return
 	end
@@ -243,7 +259,7 @@ M.start = function(client)
 		return -- already running
 	end
 
-	-- tunables
+	-- Tunables
 	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000
 	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2
 	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60
@@ -256,31 +272,38 @@ M.start = function(client)
 	end
 	root = normalize_path(root)
 
-	-- restart watcher with backoff and optional fs_event disable flag
+	--- Restart watcher with backoff and optional fs_event disable flag
+	---@param reason? string
+	---@param delay_ms? number
+	---@param disable_fs_event? boolean
 	local function restart_watcher(reason, delay_ms, disable_fs_event)
 		delay_ms = delay_ms or 300
+
+		-- BUG FIX: Set restart_scheduled IMMEDIATELY to prevent race condition
 		if restart_scheduled[client.id] then
 			return
 		end
+		restart_scheduled[client.id] = true
+
 		local now = os.time()
 		local until_ts = restart_backoff_until[client.id] or 0
 		if now < until_ts then
 			notify("Restart suppressed due to backoff for client " .. client.name, vim.log.levels.DEBUG)
+			restart_scheduled[client.id] = nil
 			return
 		end
 
 		if disable_fs_event then
-			-- disable fs_event attempts for a short window (avoid re-creating broken handle)
+			-- Disable fs_event attempts for a short window (avoid re-creating broken handle)
 			fs_event_disabled_until[client.id] = now + 5 -- 5 seconds
 		end
 
-		restart_scheduled[client.id] = true
 		restart_backoff_until[client.id] = now + math.ceil(delay_ms / 1000)
 
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
 			local old_snapshot = snapshots[client.id] or {}
-			-- use centralized cleanup
+			-- Use centralized cleanup
 			cleanup_client(client.id)
 			if not client.is_stopped() then
 				notify(
@@ -293,12 +316,14 @@ M.start = function(client)
 				)
 				M.start(client)
 
-				-- rescan and backfill events after restart
+				-- Rescan and backfill events after restart
+				---@type table<string, roslyn_filewatch.SnapshotEntry>
 				local new_map = {}
 				pcall(function()
 					scan_tree(client.config.root_dir, new_map)
 				end)
 
+				---@type roslyn_filewatch.FileChange[]
 				local evs = {}
 				for path, _ in pairs(old_snapshot) do
 					if new_map[path] == nil then
@@ -322,6 +347,7 @@ M.start = function(client)
 		end, delay_ms)
 	end
 
+	---@type roslyn_filewatch.Helpers
 	local helpers = {
 		notify = notify,
 		notify_roslyn_renames = notify_roslyn_renames,
@@ -331,12 +357,12 @@ M.start = function(client)
 		last_events = last_events,
 	}
 
-	-- choose whether to attempt native fs_event
-	local os_win = is_windows()
+	-- Choose whether to attempt native fs_event
+	-- IMPROVEMENT: Enable fs_event on Windows since error handling is robust
 	local force_polling = (config.options and config.options.force_polling) or false
 	local disabled_until = fs_event_disabled_until[client.id] or 0
 	local now = os.time()
-	local use_fs_event = (not os_win) and not force_polling and now >= disabled_until
+	local use_fs_event = not force_polling and now >= disabled_until
 
 	if use_fs_event then
 		local handle, start_err = fs_event_mod.start(client, root, snapshots, {
@@ -357,21 +383,23 @@ M.start = function(client)
 		})
 
 		if not handle then
-			-- if native start failed, temporarily disable attempts and continue with poller
+			-- If native start failed, temporarily disable attempts and continue with poller
 			notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
 			fs_event_disabled_until[client.id] = os.time() + 5
+			use_fs_event = false
 		else
 			watchers[client.id] = handle
 			last_events[client.id] = os.time()
 		end
 	else
+		local is_win = utils.is_windows()
 		notify(
 			"Using poller-only mode for client "
 				.. client.name
-				.. " (windows="
-				.. tostring(os_win)
-				.. ", force_polling="
+				.. " (force_polling="
 				.. tostring(force_polling)
+				.. ", disabled_until="
+				.. tostring(disabled_until > now)
 				.. ")",
 			vim.log.levels.DEBUG
 		)
@@ -380,7 +408,7 @@ M.start = function(client)
 		last_events[client.id] = os.time()
 	end
 
-	-- always create poller fallback (keeps snapshot reliable)
+	-- Always create poller fallback (keeps snapshot reliable)
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
 		identity_from_stat = identity_from_stat,
@@ -397,7 +425,7 @@ M.start = function(client)
 
 	if not poller then
 		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
-		-- close any fs_event to avoid leaking
+		-- Close any fs_event to avoid leaking
 		pcall(function()
 			if watchers[client.id] and watchers[client.id].close then
 				watchers[client.id]:close()
@@ -407,7 +435,7 @@ M.start = function(client)
 	end
 	pollers[client.id] = poller
 
-	-- watchdog
+	-- Watchdog
 	local resync_fn = function()
 		pcall(function()
 			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
@@ -423,7 +451,7 @@ M.start = function(client)
 		end,
 		last_events = last_events,
 		watchdog_idle = WATCHDOG_IDLE,
-		use_fs_event = use_fs_event, -- explicit flag so watchdog only treats missing handle as error when fs_event expected
+		use_fs_event = use_fs_event,
 	})
 	if not watchdog then
 		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
@@ -439,7 +467,7 @@ M.start = function(client)
 	end
 	watchdogs[client.id] = watchdog
 
-	-- autocmds to keep editor <-> fs state coherent
+	-- Autocmds to keep editor <-> fs state coherent
 	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
 		notify = notify,
 		resync_snapshot = resync_fn,
@@ -454,14 +482,13 @@ M.start = function(client)
 		once = true,
 		callback = function(args)
 			if args.data.client_id == client.id then
-				-- clear snapshot + state
+				-- Clear snapshot + state
 				snapshots[client.id] = nil
 				restart_scheduled[client.id] = nil
 				restart_backoff_until[client.id] = nil
 				fs_event_disabled_until[client.id] = nil
-				-- clear last_events
 				last_events[client.id] = nil
-				-- cleanup handles & timers
+				-- Cleanup handles & timers
 				cleanup_client(client.id)
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 			end
