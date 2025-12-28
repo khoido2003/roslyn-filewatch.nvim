@@ -15,6 +15,7 @@ This plugin adds a proper **file system watcher** so Roslyn always stays updated
 - Detects file **create / change / delete** using `uv.fs_event` and `uv.fs_poll`.
 - Detects **file renames** reliably (`didRenameFiles`).
 - Sends `workspace/didChangeWatchedFiles` notifications to Roslyn
+- **Solution-aware watching**: Parses `.sln` files to limit watch scope to project directories only
 
 - Configurable:
   - Ignore dirs (`bin`, `obj`, `.git`, etc.)
@@ -94,6 +95,10 @@ require("roslyn_filewatch").setup({
   rename_detection_ms = 300,       -- window to detect delete+create → rename
   processing_debounce_ms = 80,     -- debounce high-frequency events
 
+  -- Solution-aware watching: parse .sln to limit watch scope to project dirs only
+  -- Reduces I/O significantly on large repositories. Set to false to scan entire root.
+  solution_aware = true,           -- (default: true)
+
   -- Control verbosity of plugin notifications:
   --   TRACE < DEBUG < INFO < WARN < ERROR
   -- Default: WARN (only warnings & errors are shown)
@@ -115,6 +120,7 @@ lua/roslyn_filewatch/
 │   ├── autocmds.lua   # Neovim autocmd integration (BufWrite, BufDelete, etc.)
 │   ├── rename.lua     # Rename detection (Deleted+Created → didRenameFiles)
 │   ├── snapshot.lua   # Snapshot tracking of file tree state
+│   ├── sln_parser.lua # Solution file parser for solution-aware watching
 │   ├── notify.lua     # Thin wrapper for LSP + user notifications
 │   └── utils.lua      # Path normalization, stat helpers, etc.
 ```

@@ -14,6 +14,7 @@
 ---@field processing_debounce_ms? number Debounce for processing events
 ---@field log_level? number vim.log.levels value
 ---@field force_polling? boolean Force polling mode (disable fs_event)
+---@field solution_aware? boolean Parse .sln to limit watch scope (default: true)
 
 ---@class roslyn_filewatch.BatchingOptions
 ---@field enabled? boolean Enable event batching
@@ -89,6 +90,11 @@ M.options = {
 	--- Force polling mode (disable fs_event entirely)
 	--- Set to true if you experience issues with native file watching
 	force_polling = false,
+
+	--- Solution-aware watching: parse .sln files to limit watch scope
+	--- to project directories only. Reduces I/O on large repositories.
+	--- Set to false to always scan the entire root directory.
+	solution_aware = true,
 }
 
 --- Setup the configuration with user options

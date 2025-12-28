@@ -131,6 +131,13 @@ local function check_config()
 		ok("Native file watching enabled (with polling fallback)")
 	end
 
+	-- Solution-aware watching status
+	if opts.solution_aware ~= false then
+		ok("Solution-aware watching enabled (parses .sln for project scope)")
+	else
+		info("Solution-aware watching disabled (scanning entire root)")
+	end
+
 	info("Ignored directories: " .. #(opts.ignore_dirs or {}) .. " configured")
 	info("Watch extensions: " .. #(opts.watch_extensions or {}) .. " configured")
 

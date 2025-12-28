@@ -23,6 +23,7 @@ local should_watch_path = utils.should_watch_path
 local M = {}
 
 --- Directory scan (for poller snapshot) — writes normalized paths into out_map
+--- If solution_aware is enabled, only scans project directories from .sln
 ---@param root string
 ---@param out_map table<string, roslyn_filewatch.SnapshotEntry>
 function M.scan_tree(root, out_map)
@@ -98,6 +99,26 @@ function M.scan_tree(root, out_map)
 		end
 	end
 
+	-- Solution-aware watching: only scan project directories if enabled
+	if config.options.solution_aware then
+		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
+		if ok and sln_parser then
+			local project_dirs = sln_parser.get_watch_dirs(root)
+			if project_dirs and #project_dirs > 0 then
+				-- Scan each project directory
+				for _, project_dir in ipairs(project_dirs) do
+					-- Verify directory exists before scanning
+					local stat = uv.fs_stat(project_dir)
+					if stat and stat.type == "directory" then
+						scan_dir(project_dir)
+					end
+				end
+				return -- Done with solution-aware scan
+			end
+		end
+	end
+
+	-- Fallback: scan entire root
 	scan_dir(root)
 end
 
