@@ -95,6 +95,54 @@ M.options = {
 ---@param opts? roslyn_filewatch.Options
 function M.setup(opts)
 	M.options = vim.tbl_deep_extend("force", M.options, opts or {})
+
+	-- Build cached lookup sets for O(1) performance
+	M._rebuild_cache()
+end
+
+--- Rebuild internal caches (call after modifying options directly)
+function M._rebuild_cache()
+	-- Build extension lookup set (lowercase for case-insensitive matching)
+	local ext_set = {}
+	for _, ext in ipairs(M.options.watch_extensions or {}) do
+		ext_set[ext:lower()] = true
+	end
+	M._watch_ext_set = ext_set
+
+	-- Build ignore dirs lookup set (lowercase for case-insensitive matching)
+	local ignore_set = {}
+	for _, dir in ipairs(M.options.ignore_dirs or {}) do
+		ignore_set[dir:lower()] = true
+	end
+	M._ignore_dirs_set = ignore_set
+end
+
+--- Check if an extension should be watched (O(1) lookup)
+---@param ext string Extension with dot (e.g., ".cs")
+---@return boolean
+function M.is_watched_extension(ext)
+	if not ext then
+		return false
+	end
+	-- Lazy build cache if not built yet
+	if not M._watch_ext_set then
+		M._rebuild_cache()
+	end
+	return M._watch_ext_set[ext:lower()] == true
+end
+
+--- Check if a directory name should be ignored (O(1) lookup)
+---@param dir_name string Directory name
+---@return boolean
+function M.is_ignored_dir(dir_name)
+	if not dir_name then
+		return false
+	end
+	-- Lazy build cache if not built yet
+	if not M._ignore_dirs_set then
+		M._rebuild_cache()
+	end
+	return M._ignore_dirs_set[dir_name:lower()] == true
 end
 
 return M

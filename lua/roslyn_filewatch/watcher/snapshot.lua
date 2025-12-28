@@ -31,6 +31,17 @@ function M.scan_tree(root, out_map)
 	local ignore_dirs = config.options.ignore_dirs or {}
 	local watch_extensions = config.options.watch_extensions or {}
 
+	-- Cache platform check once before recursion
+	local is_win = utils.is_windows()
+
+	-- Pre-compute lowercase ignore dirs on Windows for faster comparisons
+	local ignore_dirs_lower = {}
+	if is_win then
+		for _, dir in ipairs(ignore_dirs) do
+			table.insert(ignore_dirs_lower, dir:lower())
+		end
+	end
+
 	---@param path string
 	local function scan_dir(path)
 		local fd = uv.fs_scandir(path)
@@ -48,20 +59,20 @@ function M.scan_tree(root, out_map)
 
 			if typ == "directory" then
 				-- Check if this directory should be skipped using exact segment match
-				-- Case-insensitive matching on Windows
+				-- Case-insensitive matching on Windows (using pre-computed lowercase)
 				local skip = false
-				local is_win = utils.is_windows()
-				for _, dir in ipairs(ignore_dirs) do
-					-- Check if the current directory name matches exactly (case-insensitive on Windows)
-					local name_match = is_win and name:lower() == dir:lower() or name == dir
-					if name_match then
+				local cmp_name = is_win and name:lower() or name
+				local cmp_fullpath = is_win and fullpath:lower() or fullpath
+				local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
+
+				for _, dir in ipairs(dirs_to_check) do
+					-- Check if the current directory name matches exactly
+					if cmp_name == dir then
 						skip = true
 						break
 					end
 					-- Also check the full path for nested matches
-					local cmp_fullpath = is_win and fullpath:lower() or fullpath
-					local cmp_dir = is_win and dir:lower() or dir
-					if cmp_fullpath:find("/" .. cmp_dir .. "/", 1, true) or cmp_fullpath:match("/" .. cmp_dir .. "$") then
+					if cmp_fullpath:find("/" .. dir .. "/", 1, true) or cmp_fullpath:match("/" .. dir .. "$") then
 						skip = true
 						break
 					end

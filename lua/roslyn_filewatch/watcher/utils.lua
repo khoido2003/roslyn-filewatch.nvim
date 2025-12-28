@@ -233,12 +233,16 @@ function M.should_watch_path(path, ignore_dirs, watch_extensions)
 		return false
 	end
 
-	-- Case-insensitive extension matching on Windows
-	local compare_ext = M.is_windows() and ext:lower() or ext
+	-- Try O(1) cached lookup first (from config module)
+	local config_ok, config = pcall(require, "roslyn_filewatch.config")
+	if config_ok and config and config.is_watched_extension then
+		return config.is_watched_extension(ext)
+	end
 
+	-- Fallback to O(n) array iteration for backward compatibility
+	local compare_ext = ext:lower()
 	for _, watch_ext in ipairs(watch_extensions or {}) do
-		local compare_watch = M.is_windows() and watch_ext:lower() or watch_ext
-		if compare_ext == compare_watch then
+		if compare_ext == watch_ext:lower() then
 			return true
 		end
 	end
