@@ -11,6 +11,7 @@
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
 ---@field close_deleted_buffers fun(path: string)
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
+---@field mark_dirty_dir fun(client_id: number, path: string)|nil
 ---@field mtime_ns fun(stat: any): number
 ---@field identity_from_stat fun(st: any): string|nil
 ---@field same_file_info fun(a: any, b: any): boolean
@@ -252,6 +253,7 @@ function M.start(client, root, snapshots, deps)
 	local rename_window_ms = deps.rename_window_ms or 300
 	local processing_debounce_ms = (cfg and cfg.options and cfg.options.processing_debounce_ms)
 		or DEFAULT_PROCESSING_DEBOUNCE_MS
+	local mark_dirty_dir = deps.mark_dirty_dir
 
 	---@type roslyn_filewatch.Helpers
 	local helpers = {
@@ -294,6 +296,11 @@ function M.start(client, root, snapshots, deps)
 		local evs = {}
 
 		for _, fullpath in ipairs(paths) do
+			-- Mark directory as dirty for incremental scanning
+			if mark_dirty_dir then
+				pcall(mark_dirty_dir, client_id, fullpath)
+			end
+
 			if not should_watch_path(fullpath, cfg) then
 				goto continue_path
 			end

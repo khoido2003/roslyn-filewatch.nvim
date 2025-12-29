@@ -141,6 +141,107 @@ function M.scan_tree(root, out_map)
 	scan_dir(root)
 end
 
+--- Partial scan: only scan specific directories and merge into existing snapshot
+--- Used for incremental updates to avoid full tree rescans
+---@param dirs string[] List of directories to scan
+---@param existing_map table<string, roslyn_filewatch.SnapshotEntry> Existing snapshot to update
+---@param root string Root path (for gitignore context)
+function M.partial_scan(dirs, existing_map, root)
+	if not dirs or #dirs == 0 then
+		return
+	end
+
+	root = normalize_path(root)
+	local ignore_dirs = config.options.ignore_dirs or {}
+	local watch_extensions = config.options.watch_extensions or {}
+
+	-- Cache platform check
+	local is_win = utils.is_windows()
+
+	-- Pre-compute lowercase ignore dirs on Windows
+	local ignore_dirs_lower = {}
+	if is_win then
+		for _, dir in ipairs(ignore_dirs) do
+			table.insert(ignore_dirs_lower, dir:lower())
+		end
+	end
+
+	-- Load gitignore if enabled
+	local gitignore_matcher = nil
+	if config.options.respect_gitignore ~= false then
+		local ok, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and gitignore_mod then
+			gitignore_matcher = gitignore_mod.load(root)
+		end
+	end
+
+	-- First, remove all existing entries under the dirty directories
+	for _, dir in ipairs(dirs) do
+		local normalized_dir = normalize_path(dir)
+		local prefix = normalized_dir .. "/"
+		local to_remove = {}
+		for path, _ in pairs(existing_map) do
+			if path == normalized_dir or path:sub(1, #prefix) == prefix then
+				table.insert(to_remove, path)
+			end
+		end
+		for _, path in ipairs(to_remove) do
+			existing_map[path] = nil
+		end
+	end
+
+	-- Scan function (non-recursive, single level for partial scan)
+	---@param path string
+	local function scan_single_dir(path)
+		local fd = uv.fs_scandir(path)
+		if not fd then
+			return
+		end
+
+		while true do
+			local name, typ = uv.fs_scandir_next(fd)
+			if not name then
+				break
+			end
+
+			local fullpath = normalize_path(path .. "/" .. name)
+
+			-- Check gitignore
+			if gitignore_matcher then
+				local ok_gi, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+				if ok_gi and gitignore_mod and gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+					goto continue
+				end
+			end
+
+			if typ == "file" then
+				if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
+					local st = uv.fs_stat(fullpath)
+					if st then
+						existing_map[fullpath] = {
+							mtime = mtime_ns(st),
+							size = st.size,
+							ino = st.ino,
+							dev = st.dev,
+						}
+					end
+				end
+			end
+
+			::continue::
+		end
+	end
+
+	-- Scan each dirty directory (single level only)
+	for _, dir in ipairs(dirs) do
+		local normalized_dir = normalize_path(dir)
+		local stat = uv.fs_stat(normalized_dir)
+		if stat and stat.type == "directory" then
+			scan_single_dir(normalized_dir)
+		end
+	end
+end
+
 --- Resync snapshot for a specific client.
 --- Compares current filesystem state with stored snapshot and emits appropriate events.
 ---@param client_id number Numeric id of client

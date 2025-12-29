@@ -3,6 +3,9 @@
 
 ---@class roslyn_filewatch.FsPollDeps
 ---@field scan_tree fun(root: string, out_map: table<string, roslyn_filewatch.SnapshotEntry>)
+---@field partial_scan fun(dirs: string[], existing_map: table<string, roslyn_filewatch.SnapshotEntry>, root: string)|nil
+---@field get_dirty_dirs fun(client_id: number): string[]|nil
+---@field should_full_scan fun(client_id: number): boolean|nil
 ---@field identity_from_stat fun(st: roslyn_filewatch.SnapshotEntry|nil): string|nil
 ---@field same_file_info fun(a: roslyn_filewatch.SnapshotEntry|nil, b: roslyn_filewatch.SnapshotEntry|nil): boolean
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
@@ -69,21 +72,55 @@ function M.start(client, root, snapshots, deps)
 			-- Store last_event BEFORE updating it, so threshold comparison works
 			local last_event_time = (deps.last_events and deps.last_events[client.id]) or 0
 
-			-- Rescan tree into new_map
-			---@type table<string, roslyn_filewatch.SnapshotEntry>
-			local new_map = {}
-			local scan_ok, scan_err = pcall(function()
-				deps.scan_tree(root, new_map)
-			end)
-			if not scan_ok then
-				-- If scan failed, skip this poll cycle to avoid false delete events
-				if deps.notify then
-					pcall(deps.notify, "Poller scan_tree failed: " .. tostring(scan_err), vim.log.levels.WARN)
+			-- Incremental scanning: check if we need full scan or partial scan
+			local do_full_scan = true
+			local dirty_dir_list = nil
+
+			if deps.should_full_scan and deps.get_dirty_dirs and deps.partial_scan then
+				do_full_scan = deps.should_full_scan(client.id)
+
+				if not do_full_scan then
+					dirty_dir_list = deps.get_dirty_dirs(client.id)
+					if not dirty_dir_list or #dirty_dir_list == 0 then
+						-- No dirty dirs and no need for full scan - skip this poll cycle
+						return
+					end
 				end
-				return
 			end
 
+			---@type table<string, roslyn_filewatch.SnapshotEntry>
+			local new_map
 			local old_map = snapshots[client.id] or {}
+
+			if do_full_scan then
+				-- Full scan: build new map from scratch
+				new_map = {}
+				local scan_ok, scan_err = pcall(function()
+					deps.scan_tree(root, new_map)
+				end)
+				if not scan_ok then
+					if deps.notify then
+						pcall(deps.notify, "Poller scan_tree failed: " .. tostring(scan_err), vim.log.levels.WARN)
+					end
+					return
+				end
+			else
+				-- Partial scan: copy old map and update only dirty dirs
+				new_map = {}
+				for k, v in pairs(old_map) do
+					new_map[k] = v
+				end
+				local scan_ok, scan_err = pcall(function()
+					deps.partial_scan(dirty_dir_list, new_map, root)
+				end)
+				if not scan_ok then
+					if deps.notify then
+						pcall(deps.notify, "Poller partial_scan failed: " .. tostring(scan_err), vim.log.levels.WARN)
+					end
+					-- Fallback: request full scan next time
+					return
+				end
+			end
 
 			---@type roslyn_filewatch.FileChange[]
 			local evs = {}

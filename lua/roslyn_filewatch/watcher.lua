@@ -46,6 +46,15 @@ local autocmds = {}
 ---@type table<number, number>
 local fs_event_disabled_until = {}
 
+-- Incremental scanning: track directories that need rescanning
+---@type table<number, table<string, boolean>>
+local dirty_dirs = {}
+-- Force full scan on next poll (set on startup, watchdog restart, errors)
+---@type table<number, boolean>
+local needs_full_scan = {}
+-- Threshold: if more than this many dirty dirs, do full scan instead
+local DIRTY_DIRS_THRESHOLD = 10
+
 -- Register state references with status module for RoslynFilewatchStatus command
 pcall(function()
 	local status_mod = require("roslyn_filewatch.status")
@@ -56,9 +65,82 @@ pcall(function()
 			watchdogs = watchdogs,
 			snapshots = snapshots,
 			last_events = last_events,
+			dirty_dirs = dirty_dirs,
 		})
 	end
 end)
+
+------------------------------------------------------
+-- Incremental scanning helpers
+------------------------------------------------------
+
+--- Mark a directory as needing rescan
+---@param client_id number
+---@param path string File or directory path that changed
+local function mark_dirty_dir(client_id, path)
+	if not path or path == "" then
+		return
+	end
+
+	-- Initialize if needed
+	if not dirty_dirs[client_id] then
+		dirty_dirs[client_id] = {}
+	end
+
+	-- Get parent directory of the path
+	local normalized = normalize_path(path)
+	local parent = normalized:match("^(.+)/[^/]+$")
+	if parent then
+		dirty_dirs[client_id][parent] = true
+	else
+		-- Path is a root-level item, mark root
+		dirty_dirs[client_id][normalized] = true
+	end
+end
+
+--- Get and clear dirty directories for a client
+---@param client_id number
+---@return string[] dirs List of dirty directories
+local function get_and_clear_dirty_dirs(client_id)
+	local dirs = {}
+	if dirty_dirs[client_id] then
+		for dir, _ in pairs(dirty_dirs[client_id]) do
+			table.insert(dirs, dir)
+		end
+		dirty_dirs[client_id] = {}
+	end
+	return dirs
+end
+
+--- Check if full scan is needed
+---@param client_id number
+---@return boolean
+local function should_full_scan(client_id)
+	-- Check explicit flag
+	if needs_full_scan[client_id] then
+		needs_full_scan[client_id] = nil
+		return true
+	end
+
+	-- Check dirty dirs count threshold
+	if dirty_dirs[client_id] then
+		local count = 0
+		for _ in pairs(dirty_dirs[client_id]) do
+			count = count + 1
+			if count > DIRTY_DIRS_THRESHOLD then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+--- Request full scan on next poll
+---@param client_id number
+local function request_full_scan(client_id)
+	needs_full_scan[client_id] = true
+end
 
 ------------------------------------------------------
 
@@ -388,6 +470,7 @@ function M.start(client)
 			queue_events = queue_events,
 			close_deleted_buffers = close_deleted_buffers,
 			restart_watcher = restart_watcher,
+			mark_dirty_dir = mark_dirty_dir,
 			mtime_ns = mtime_ns,
 			identity_from_stat = identity_from_stat,
 			same_file_info = same_file_info,
@@ -423,8 +506,14 @@ function M.start(client)
 	end
 
 	-- Always create poller fallback (keeps snapshot reliable)
+	-- Request full scan on startup
+	needs_full_scan[client.id] = true
+
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
+		partial_scan = snapshot_mod.partial_scan,
+		get_dirty_dirs = get_and_clear_dirty_dirs,
+		should_full_scan = should_full_scan,
 		identity_from_stat = identity_from_stat,
 		same_file_info = same_file_info,
 		queue_events = queue_events,
