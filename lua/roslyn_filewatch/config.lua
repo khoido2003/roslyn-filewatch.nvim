@@ -27,7 +27,7 @@ local M = {}
 M.options = {
 	batching = {
 		enabled = true,
-		interval = 300,
+		interval = 150, -- Fast batching for VS Code-like experience
 	},
 
 	ignore_dirs = {
@@ -74,10 +74,10 @@ M.options = {
 	watchdog_idle = 60,
 
 	--- Window (ms) used to detect renames by buffering deletes and matching by identity.
-	rename_detection_ms = 300,
+	rename_detection_ms = 200, -- Faster rename detection
 
 	--- Debounce (ms) used to aggregate high-frequency fs events before processing.
-	processing_debounce_ms = 80,
+	processing_debounce_ms = 50, -- Faster debounce for VS Code-like experience
 
 	--- Logging level for plugin notifications (controls what gets passed to vim.notify).
 	--- Default: WARN (show only warnings and errors). Set to vim.log.levels.INFO or DEBUG

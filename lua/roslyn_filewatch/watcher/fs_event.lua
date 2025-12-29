@@ -403,16 +403,19 @@ function M.start(client, root, snapshots, deps)
 				if err2 then
 					-- Handle libuv-level error (often EPERM on Windows dir delete race)
 					local msg = tostring(err2)
-					-- Escalate only after repeated occurrences
-					local escalated = record_error_and_maybe_escalate(client.id, msg, notify_fn, function()
-						-- NOTE: Removed resync_snapshot - causes full tree scan and lag
-					end, function(reason, delay_ms, disable)
-						if restart_watcher then
-							pcall(function()
-								restart_watcher(reason or "EPERM", delay_ms or 1200, disable)
-							end)
+					local escalated = record_error_and_maybe_escalate(
+						client.id,
+						msg,
+						notify_fn,
+						function() end,
+						function(reason, delay_ms, disable)
+							if restart_watcher then
+								pcall(function()
+									restart_watcher(reason or "EPERM", delay_ms or 1200, disable)
+								end)
+							end
 						end
-					end)
+					)
 
 					-- Schedule a deferred stop+restart if not escalated
 					if not escalated then
@@ -439,9 +442,7 @@ function M.start(client, root, snapshots, deps)
 
 				-- Filename missing: rate-limit resyncs
 				if not filename then
-					may_resync_due_to_nil_filename(client.id, notify_fn, function()
-						-- NOTE: Removed resync_snapshot - causes full tree scan and lag
-					end, function(reason, delay_ms)
+					may_resync_due_to_nil_filename(client.id, notify_fn, function() end, function(reason, delay_ms)
 						if restart_watcher then
 							pcall(function()
 								restart_watcher(reason or "filename_nil", delay_ms or 800)
@@ -475,15 +476,19 @@ function M.start(client, root, snapshots, deps)
 
 			if not ok_cb then
 				local msg = tostring(cb_err)
-				record_error_and_maybe_escalate(client.id, msg, notify_fn, function()
-					-- NOTE: Removed resync_snapshot - causes full tree scan and lag
-				end, function(reason, delay_ms, disable)
-					if restart_watcher then
-						pcall(function()
-							restart_watcher(reason or "callback_error", delay_ms or 800, disable)
-						end)
+				record_error_and_maybe_escalate(
+					client.id,
+					msg,
+					notify_fn,
+					function() end,
+					function(reason, delay_ms, disable)
+						if restart_watcher then
+							pcall(function()
+								restart_watcher(reason or "callback_error", delay_ms or 800, disable)
+							end)
+						end
 					end
-				end)
+				)
 			end
 		end)
 	end)

@@ -193,12 +193,6 @@ function M.start(client, root, snapshots, deps)
 				if deps.last_events then
 					deps.last_events[client.id] = os.time()
 				end
-
-				-- NOTE: Removed restart_watcher on missed_events - causes performance issues
-				-- The snapshot is already updated correctly, no need to restart
-
-				-- NOTE: Removed restart_watcher on delete - unnecessary and causes performance issues
-				-- The snapshot is already updated correctly, no need to restart
 			else
 				-- No diffs -> update snapshot
 				snapshots[client.id] = new_map

@@ -331,8 +331,6 @@ function M.resync_snapshot_for(client_id, root, snapshots, helpers)
 		if helpers.queue_events then
 			pcall(helpers.queue_events, client_id, evs)
 		end
-		-- NOTE: Removed restart_watcher on delete - unnecessary and causes performance issues
-		-- The snapshot is already updated correctly, no need to restart
 	end
 
 	-- Replace snapshot

@@ -76,7 +76,6 @@ function M.start(client, root, snapshots, deps)
 	end
 
 	--- Handle file existence check
-	--- NOTE: Removed resync_snapshot - causes full tree scan and lag
 	---@param bufpath string
 	local function handle_file_check(bufpath)
 		if not uv.fs_stat(bufpath) then
@@ -109,7 +108,7 @@ function M.start(client, root, snapshots, deps)
 				-- Queue create event for LSP (uses batching for safety)
 				if deps.queue_events then
 					vim.schedule(function()
-						pcall(deps.queue_events, client.id, {{ uri = vim.uri_from_fname(npath), type = 1 }})
+						pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(npath), type = 1 } })
 					end)
 				end
 			end
@@ -140,8 +139,6 @@ function M.start(client, root, snapshots, deps)
 
 			-- Check if file still exists
 			if not uv.fs_stat(bufpath) then
-				-- NOTE: Removed resync_snapshot - causes full tree scan and lag
-				-- fs_event/fs_poll will handle delete detection
 			end
 		end,
 	})
@@ -154,10 +151,6 @@ function M.start(client, root, snapshots, deps)
 			if should_ignore_buf(args.buf) then
 				return
 			end
-
-			-- NOTE: Removed is_buffer_attached_to_client check
-			-- New files from external editors won't have LSP attached yet
-			-- We still need to notify LSP about them for immediate recognition
 
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if not is_in_client_root(bufpath) then

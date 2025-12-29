@@ -60,7 +60,6 @@ function M.start(client, root, snapshots, deps)
 				if notify then
 					pcall(notify, "Idle " .. watchdog_idle .. "s, recycling watcher", vim.log.levels.DEBUG)
 				end
-				-- NOTE: Removed resync_snapshot - causes full tree scan and lag
 				if restart_watcher then
 					pcall(restart_watcher, "idle_timeout")
 				end
@@ -75,7 +74,6 @@ function M.start(client, root, snapshots, deps)
 					if notify then
 						pcall(notify, "Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
 					end
-					-- NOTE: Removed resync_snapshot - causes full tree scan and lag
 					if restart_watcher then
 						pcall(restart_watcher, "handle_closed")
 					end

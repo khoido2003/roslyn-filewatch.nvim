@@ -420,8 +420,12 @@ function M.start(client)
 				pcall(function()
 					local h = watchers[client.id]
 					if h and not (h.is_closing and h:is_closing()) then
-						if h.stop then pcall(h.stop, h) end
-						if h.close then pcall(h.close, h) end
+						if h.stop then
+							pcall(h.stop, h)
+						end
+						if h.close then
+							pcall(h.close, h)
+						end
 					end
 				end)
 				watchers[client.id] = nil
