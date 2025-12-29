@@ -194,26 +194,11 @@ function M.start(client, root, snapshots, deps)
 					deps.last_events[client.id] = os.time()
 				end
 
-				-- BUG FIX: Use the STORED last_event_time for threshold comparison
-				-- This correctly detects if fs_event was quiet while poller found changes
-				if os.time() - last_event_time > poller_restart_threshold then
-					if deps.notify then
-						pcall(
-							deps.notify,
-							"Poller detected diffs while fs_event quiet; restarting watcher",
-							vim.log.levels.DEBUG
-						)
-					end
-					if deps.restart_watcher then
-						pcall(deps.restart_watcher, "poller_detected_missed_events")
-					end
-				end
+				-- NOTE: Removed restart_watcher on missed_events - causes performance issues
+				-- The snapshot is already updated correctly, no need to restart
 
-				if saw_delete then
-					if deps.restart_watcher then
-						pcall(deps.restart_watcher, "delete_detected")
-					end
-				end
+				-- NOTE: Removed restart_watcher on delete - unnecessary and causes performance issues
+				-- The snapshot is already updated correctly, no need to restart
 			else
 				-- No diffs -> update snapshot
 				snapshots[client.id] = new_map

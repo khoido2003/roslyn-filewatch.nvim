@@ -398,48 +398,58 @@ function M.start(client)
 
 		vim.defer_fn(function()
 			restart_scheduled[client.id] = nil
-			local old_snapshot = snapshots[client.id] or {}
-			-- Use centralized cleanup
-			cleanup_client(client.id)
-			if not client.is_stopped() then
-				notify(
-					"Restarting watcher for client "
-						.. client.name
-						.. " (reason: "
-						.. tostring(reason or "unspecified")
-						.. ")",
-					vim.log.levels.DEBUG
-				)
-				M.start(client)
 
-				-- Rescan and backfill events after restart
-				---@type table<string, roslyn_filewatch.SnapshotEntry>
-				local new_map = {}
-				pcall(function()
-					scan_tree(client.config.root_dir, new_map)
-				end)
-
-				---@type roslyn_filewatch.FileChange[]
-				local evs = {}
-				for path, _ in pairs(old_snapshot) do
-					if new_map[path] == nil then
-						close_deleted_buffers(path)
-						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-					end
-				end
-				for path, _ in pairs(new_map) do
-					if old_snapshot[path] == nil then
-						table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-					end
-				end
-
-				if #evs > 0 then
-					notify("Backfilled " .. #evs .. " events after restart", vim.log.levels.DEBUG)
-					queue_events(client.id, evs)
-				end
-
-				snapshots[client.id] = new_map
+			if client.is_stopped() then
+				return
 			end
+
+			notify(
+				"Restarting watcher for client "
+					.. client.name
+					.. " (reason: "
+					.. tostring(reason or "unspecified")
+					.. ")",
+				vim.log.levels.DEBUG
+			)
+
+			-- LIGHTWEIGHT RESTART: Only recreate fs_event handle, preserve snapshot
+			-- This avoids the expensive full tree scan that was causing freezes
+
+			-- Stop old fs_event handle if exists
+			if watchers[client.id] then
+				pcall(function()
+					local h = watchers[client.id]
+					if h and not (h.is_closing and h:is_closing()) then
+						if h.stop then pcall(h.stop, h) end
+						if h.close then pcall(h.close, h) end
+					end
+				end)
+				watchers[client.id] = nil
+			end
+
+			-- Recreate fs_event handle (if not disabled)
+			local use_fs_event = not config.options.force_polling
+			if fs_event_disabled_until[client.id] and os.time() < fs_event_disabled_until[client.id] then
+				use_fs_event = false
+			end
+
+			if use_fs_event then
+				local handle, err = fs_event_mod.start(client, root, snapshots, {
+					notify = notify,
+					queue_events = queue_events,
+					notify_roslyn_renames = notify_roslyn_renames,
+					restart_watcher = restart_watcher,
+					mark_dirty_dir = mark_dirty_dir,
+				})
+				if handle then
+					watchers[client.id] = handle
+				else
+					notify("Failed to recreate fs_event: " .. tostring(err), vim.log.levels.DEBUG)
+				end
+			end
+
+			-- Note: Snapshot is preserved, no full scan needed
+			-- The poller will continue with incremental scanning using dirty_dirs
 		end, delay_ms)
 	end
 
@@ -576,6 +586,8 @@ function M.start(client)
 		resync_snapshot = resync_fn,
 		restart_watcher = restart_watcher,
 		normalize_path = normalize_path,
+		queue_events = queue_events,
+		notify_roslyn_direct = notify_roslyn, -- Direct LSP notification (no batching)
 	})
 	autocmds[client.id] = autocmd_ids
 

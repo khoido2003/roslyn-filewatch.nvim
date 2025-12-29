@@ -7,6 +7,8 @@
 ---@field immediate_resync? fun()
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field normalize_path fun(path: string): string
+---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])|nil
+---@field notify_roslyn_direct fun(evs: roslyn_filewatch.FileChange[])|nil
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -73,33 +75,43 @@ function M.start(client, root, snapshots, deps)
 		return false
 	end
 
-	--- Handle file existence check and resync
+	--- Handle file existence check
+	--- NOTE: Removed resync_snapshot - causes full tree scan and lag
 	---@param bufpath string
 	local function handle_file_check(bufpath)
 		if not uv.fs_stat(bufpath) then
-			-- File vanished -> resync + restart
-			if resync_snapshot then
-				pcall(resync_snapshot)
-			end
-			if restart_watcher then
-				pcall(restart_watcher, "file_vanished")
-			end
+			-- File vanished - do nothing, fs_event/fs_poll will handle it
 			return true
 		end
 		return false
 	end
 
-	--- Check if file is in snapshot, trigger resync if not
+	--- Check if file is in snapshot - lightweight version that doesn't do full resync
+	--- Adds the file to snapshot and queues create event for LSP
 	---@param bufpath string
 	local function ensure_in_snapshot(bufpath)
 		local npath = normalize_path(bufpath)
 		local client_snap = snapshots[client.id]
 		if not client_snap or client_snap[npath] == nil then
-			-- File not in snapshot, trigger resync
-			if immediate_resync then
-				pcall(immediate_resync)
-			elseif resync_snapshot then
-				pcall(resync_snapshot)
+			-- File not in snapshot - check if it exists and add it directly
+			local st = uv.fs_stat(bufpath)
+			if st and st.type == "file" then
+				-- Add to snapshot directly
+				if not snapshots[client.id] then
+					snapshots[client.id] = {}
+				end
+				snapshots[client.id][npath] = {
+					mtime = st.mtime and (st.mtime.sec * 1e9 + (st.mtime.nsec or 0)) or 0,
+					size = st.size,
+					ino = st.ino,
+					dev = st.dev,
+				}
+				-- Queue create event for LSP (uses batching for safety)
+				if deps.queue_events then
+					vim.schedule(function()
+						pcall(deps.queue_events, client.id, {{ uri = vim.uri_from_fname(npath), type = 1 }})
+					end)
+				end
 			end
 		end
 	end
@@ -128,12 +140,8 @@ function M.start(client, root, snapshots, deps)
 
 			-- Check if file still exists
 			if not uv.fs_stat(bufpath) then
-				if resync_snapshot then
-					pcall(resync_snapshot)
-				end
-				if restart_watcher then
-					pcall(restart_watcher, "buffer_deleted_without_file")
-				end
+				-- NOTE: Removed resync_snapshot - causes full tree scan and lag
+				-- fs_event/fs_poll will handle delete detection
 			end
 		end,
 	})
@@ -147,10 +155,9 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- Only process if buffer is attached to THIS client
-			if not is_buffer_attached_to_client(args.buf) then
-				return
-			end
+			-- NOTE: Removed is_buffer_attached_to_client check
+			-- New files from external editors won't have LSP attached yet
+			-- We still need to notify LSP about them for immediate recognition
 
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if not is_in_client_root(bufpath) then

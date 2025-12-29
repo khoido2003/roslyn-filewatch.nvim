@@ -405,9 +405,7 @@ function M.start(client, root, snapshots, deps)
 					local msg = tostring(err2)
 					-- Escalate only after repeated occurrences
 					local escalated = record_error_and_maybe_escalate(client.id, msg, notify_fn, function()
-						pcall(function()
-							snapshot_m.resync_snapshot_for(client.id, root, snapshots, helpers)
-						end)
+						-- NOTE: Removed resync_snapshot - causes full tree scan and lag
 					end, function(reason, delay_ms, disable)
 						if restart_watcher then
 							pcall(function()
@@ -442,9 +440,7 @@ function M.start(client, root, snapshots, deps)
 				-- Filename missing: rate-limit resyncs
 				if not filename then
 					may_resync_due_to_nil_filename(client.id, notify_fn, function()
-						pcall(function()
-							snapshot_m.resync_snapshot_for(client.id, root, snapshots, helpers)
-						end)
+						-- NOTE: Removed resync_snapshot - causes full tree scan and lag
 					end, function(reason, delay_ms)
 						if restart_watcher then
 							pcall(function()
@@ -480,9 +476,7 @@ function M.start(client, root, snapshots, deps)
 			if not ok_cb then
 				local msg = tostring(cb_err)
 				record_error_and_maybe_escalate(client.id, msg, notify_fn, function()
-					pcall(function()
-						snapshot_m.resync_snapshot_for(client.id, root, snapshots, helpers)
-					end)
+					-- NOTE: Removed resync_snapshot - causes full tree scan and lag
 				end, function(reason, delay_ms, disable)
 					if restart_watcher then
 						pcall(function()

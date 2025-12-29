@@ -43,12 +43,14 @@ function M.scan_tree(root, out_map)
 		end
 	end
 
-	-- Load gitignore if enabled
+	-- Cache gitignore module and matcher outside scan loop (optimization)
+	local gitignore_mod = nil
 	local gitignore_matcher = nil
 	if config.options.respect_gitignore ~= false then
-		local ok, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-		if ok and gitignore_mod then
-			gitignore_matcher = gitignore_mod.load(root)
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and mod then
+			gitignore_mod = mod
+			gitignore_matcher = mod.load(root)
 		end
 	end
 
@@ -67,10 +69,9 @@ function M.scan_tree(root, out_map)
 
 			local fullpath = normalize_path(path .. "/" .. name)
 
-			-- Check gitignore first (applies to both files and dirs)
-			if gitignore_matcher then
-				local ok_gi, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-				if ok_gi and gitignore_mod and gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+			-- Check gitignore first (using cached module)
+			if gitignore_matcher and gitignore_mod then
+				if gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
 					goto continue
 				end
 			end
@@ -166,12 +167,14 @@ function M.partial_scan(dirs, existing_map, root)
 		end
 	end
 
-	-- Load gitignore if enabled
+	-- Cache gitignore module and matcher outside scan loop (optimization)
+	local gitignore_mod = nil
 	local gitignore_matcher = nil
 	if config.options.respect_gitignore ~= false then
-		local ok, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-		if ok and gitignore_mod then
-			gitignore_matcher = gitignore_mod.load(root)
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and mod then
+			gitignore_mod = mod
+			gitignore_matcher = mod.load(root)
 		end
 	end
 
@@ -190,7 +193,8 @@ function M.partial_scan(dirs, existing_map, root)
 		end
 	end
 
-	-- Scan function (non-recursive, single level for partial scan)
+	-- Fast single-level scan (NOT recursive - keeps incremental scan lightweight)
+	-- File events mark exact parent directories, so single-level is sufficient
 	---@param path string
 	local function scan_single_dir(path)
 		local fd = uv.fs_scandir(path)
@@ -206,14 +210,14 @@ function M.partial_scan(dirs, existing_map, root)
 
 			local fullpath = normalize_path(path .. "/" .. name)
 
-			-- Check gitignore
-			if gitignore_matcher then
-				local ok_gi, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-				if ok_gi and gitignore_mod and gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+			-- Check gitignore (using cached module)
+			if gitignore_matcher and gitignore_mod then
+				if gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
 					goto continue
 				end
 			end
 
+			-- Only process files (not directories - keeping it single-level)
 			if typ == "file" then
 				if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
 					local st = uv.fs_stat(fullpath)
@@ -232,7 +236,7 @@ function M.partial_scan(dirs, existing_map, root)
 		end
 	end
 
-	-- Scan each dirty directory (single level only)
+	-- Scan each dirty directory (single level for speed)
 	for _, dir in ipairs(dirs) do
 		local normalized_dir = normalize_path(dir)
 		local stat = uv.fs_stat(normalized_dir)
@@ -327,10 +331,8 @@ function M.resync_snapshot_for(client_id, root, snapshots, helpers)
 		if helpers.queue_events then
 			pcall(helpers.queue_events, client_id, evs)
 		end
-		-- If deletes were found, restart to ensure fs_event isn't left in a bad state
-		if saw_delete and helpers.restart_watcher then
-			pcall(helpers.restart_watcher, "delete_detected")
-		end
+		-- NOTE: Removed restart_watcher on delete - unnecessary and causes performance issues
+		-- The snapshot is already updated correctly, no need to restart
 	end
 
 	-- Replace snapshot
