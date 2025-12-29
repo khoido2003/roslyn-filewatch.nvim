@@ -94,7 +94,8 @@ M.options = {
 
 	--- Solution-aware watching: parse .sln files to limit watch scope
 	--- to project directories only. Reduces I/O on large repositories.
-	--- Set to false to always scan the entire root directory.
+	--- Default is false for compatibility with .csproj-only projects.
+	--- Set to true if you have a .sln file and want better performance.
 	solution_aware = true,
 
 	--- Respect .gitignore patterns when scanning files.

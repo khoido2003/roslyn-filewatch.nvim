@@ -553,15 +553,8 @@ function M.start(client)
 	pollers[client.id] = poller
 
 	-- Watchdog
-	local resync_fn = function()
-		pcall(function()
-			snapshot_mod.resync_snapshot_for(client.id, root, snapshots, helpers)
-		end)
-	end
-
 	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots, {
 		notify = notify,
-		resync_snapshot = resync_fn,
 		restart_watcher = restart_watcher,
 		get_handle = function()
 			return watchers[client.id]
@@ -587,11 +580,9 @@ function M.start(client)
 	-- Autocmds to keep editor <-> fs state coherent
 	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
 		notify = notify,
-		resync_snapshot = resync_fn,
 		restart_watcher = restart_watcher,
 		normalize_path = normalize_path,
 		queue_events = queue_events,
-		notify_roslyn_direct = notify_roslyn, -- Direct LSP notification (no batching)
 	})
 	autocmds[client.id] = autocmd_ids
 

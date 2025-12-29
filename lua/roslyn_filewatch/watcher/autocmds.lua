@@ -3,12 +3,9 @@
 
 ---@class roslyn_filewatch.AutocmdDeps
 ---@field notify fun(msg: string, level?: number)
----@field resync_snapshot fun()
----@field immediate_resync? fun()
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field normalize_path fun(path: string): string
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])|nil
----@field notify_roslyn_direct fun(evs: roslyn_filewatch.FileChange[])|nil
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -25,8 +22,6 @@ local M = {}
 function M.start(client, root, snapshots, deps)
 	deps = deps or {}
 	local notify = deps.notify or function() end
-	local resync_snapshot = deps.resync_snapshot
-	local immediate_resync = deps.immediate_resync
 	local restart_watcher = deps.restart_watcher
 	local normalize_path = deps.normalize_path or utils.normalize_path
 
@@ -87,6 +82,7 @@ function M.start(client, root, snapshots, deps)
 
 	--- Check if file is in snapshot - lightweight version that doesn't do full resync
 	--- Adds the file to snapshot and queues create event for LSP
+	--- Also notifies about .csproj to help Roslyn refresh project model
 	---@param bufpath string
 	local function ensure_in_snapshot(bufpath)
 		local npath = normalize_path(bufpath)
@@ -105,10 +101,32 @@ function M.start(client, root, snapshots, deps)
 					ino = st.ino,
 					dev = st.dev,
 				}
-				-- Queue create event for LSP (uses batching for safety)
+
+				-- Queue create event for LSP
+				local events = { { uri = vim.uri_from_fname(npath), type = 1 } }
+
+				-- For .cs files, also notify about the nearest .csproj to trigger project refresh
+				if npath:match("%.cs$") then
+					local dir = npath:match("^(.+)/[^/]+$")
+					while dir and dir ~= "" and utils.path_starts_with(dir, root) do
+						local csproj_pattern = dir .. "/*.csproj"
+						local csproj_files = vim.fn.glob(csproj_pattern, false, true)
+						if csproj_files and #csproj_files > 0 then
+							for _, csproj in ipairs(csproj_files) do
+								local csproj_norm = normalize_path(csproj)
+								-- Send a "changed" event for csproj to trigger Roslyn project refresh
+								table.insert(events, { uri = vim.uri_from_fname(csproj_norm), type = 2 })
+							end
+							break
+						end
+						-- Move up one directory
+						dir = dir:match("^(.+)/[^/]+$")
+					end
+				end
+
 				if deps.queue_events then
 					vim.schedule(function()
-						pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(npath), type = 1 } })
+						pcall(deps.queue_events, client.id, events)
 					end)
 				end
 			end

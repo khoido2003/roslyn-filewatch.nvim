@@ -3,7 +3,6 @@
 
 ---@class roslyn_filewatch.WatchdogDeps
 ---@field notify fun(msg: string, level?: number)
----@field resync_snapshot fun()
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field get_handle fun(): uv_fs_event_t|nil
 ---@field last_events table<number, number>
@@ -27,7 +26,6 @@ local WATCHDOG_INTERVAL_MS = 15000
 function M.start(client, root, snapshots, deps)
 	deps = deps or {}
 	local notify = deps.notify
-	local resync_snapshot = deps.resync_snapshot
 	local restart_watcher = deps.restart_watcher
 	local get_handle = deps.get_handle
 	local last_events = deps.last_events

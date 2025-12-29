@@ -129,14 +129,13 @@ local function should_watch_path(fullpath, cfg)
 	return utils.should_watch_path(fullpath, opts.ignore_dirs or {}, opts.watch_extensions or {})
 end
 
---- Record error and maybe escalate to resync/restart
+--- Record error and maybe escalate to restart
 ---@param client_id number
 ---@param msg string
 ---@param notify_fn fun(msg: string, level: number)
----@param resync_fn fun()
 ---@param restart_fn fun(reason: string, delay_ms: number, disable_fs_event: boolean)
 ---@return boolean escalated
-local function record_error_and_maybe_escalate(client_id, msg, notify_fn, resync_fn, restart_fn)
+local function record_error_and_maybe_escalate(client_id, msg, notify_fn, restart_fn)
 	local now = os.time()
 	local ec = error_counters[client_id] or { count = 0, since = now }
 	if now - (ec.since or 0) > ERROR_WINDOW_SEC then
@@ -152,17 +151,10 @@ local function record_error_and_maybe_escalate(client_id, msg, notify_fn, resync
 	if looks_like_perm then
 		if ec.count >= ERROR_THRESHOLD then
 			pcall(function()
-				notify_fn(
-					"Persistent permission/EPERM errors from fs_event; resyncing and restarting watcher",
-					vim.log.levels.ERROR
-				)
+				notify_fn("Persistent EPERM errors; restarting watcher", vim.log.levels.ERROR)
 			end)
 			error_counters[client_id] = nil
-			-- Escalate (do resync+restart with fs_event disabled)
 			vim.defer_fn(function()
-				if resync_fn then
-					pcall(resync_fn)
-				end
 				if restart_fn then
 					pcall(function()
 						restart_fn("EPERM_escalated", 1200, true)
@@ -172,44 +164,36 @@ local function record_error_and_maybe_escalate(client_id, msg, notify_fn, resync
 			return true
 		else
 			pcall(function()
-				notify_fn(
-					"fs_event permission error (will escalate on repeated occurrences): " .. tostring(msg),
-					vim.log.levels.WARN
-				)
+				notify_fn("EPERM error (will escalate on repeated): " .. tostring(msg), vim.log.levels.WARN)
 			end)
 			return false
 		end
 	else
 		pcall(function()
-			notify_fn("fs_event callback error (non-EPERM): " .. tostring(msg), vim.log.levels.ERROR)
+			notify_fn("fs_event error: " .. tostring(msg), vim.log.levels.ERROR)
 		end)
 		return false
 	end
 end
 
---- Rate-limited resync due to nil filename
 ---@param client_id number
 ---@param notify_fn fun(msg: string, level: number)
----@param resync_fn fun()
 ---@param restart_fn fun(reason: string, delay_ms: number)
----@return boolean resynced
-local function may_resync_due_to_nil_filename(client_id, notify_fn, resync_fn, restart_fn)
+---@return boolean restarted
+local function may_restart_due_to_nil_filename(client_id, notify_fn, restart_fn)
 	local now = os.time()
 	local last = last_resync_ts[client_id] or 0
 	if now - last < RESYNC_MIN_INTERVAL_SEC then
 		pcall(function()
-			notify_fn("Skipping frequent resync (recently resynced)", vim.log.levels.DEBUG)
+			notify_fn("Skipping frequent restart (recently restarted)", vim.log.levels.DEBUG)
 		end)
 		return false
 	end
 	last_resync_ts[client_id] = now
 	vim.defer_fn(function()
 		pcall(function()
-			notify_fn("fs_event filename=nil -> resync + restart", vim.log.levels.DEBUG)
+			notify_fn("fs_event filename=nil -> restart", vim.log.levels.DEBUG)
 		end)
-		if resync_fn then
-			pcall(resync_fn)
-		end
 		if restart_fn then
 			pcall(function()
 				restart_fn("filename_nil", 800)
@@ -407,7 +391,6 @@ function M.start(client, root, snapshots, deps)
 						client.id,
 						msg,
 						notify_fn,
-						function() end,
 						function(reason, delay_ms, disable)
 							if restart_watcher then
 								pcall(function()
@@ -440,9 +423,9 @@ function M.start(client, root, snapshots, deps)
 					return
 				end
 
-				-- Filename missing: rate-limit resyncs
+				-- Filename missing: rate-limit restarts
 				if not filename then
-					may_resync_due_to_nil_filename(client.id, notify_fn, function() end, function(reason, delay_ms)
+					may_restart_due_to_nil_filename(client.id, notify_fn, function(reason, delay_ms)
 						if restart_watcher then
 							pcall(function()
 								restart_watcher(reason or "filename_nil", delay_ms or 800)
@@ -476,19 +459,13 @@ function M.start(client, root, snapshots, deps)
 
 			if not ok_cb then
 				local msg = tostring(cb_err)
-				record_error_and_maybe_escalate(
-					client.id,
-					msg,
-					notify_fn,
-					function() end,
-					function(reason, delay_ms, disable)
-						if restart_watcher then
-							pcall(function()
-								restart_watcher(reason or "callback_error", delay_ms or 800, disable)
-							end)
-						end
+				record_error_and_maybe_escalate(client.id, msg, notify_fn, function(reason, delay_ms, disable)
+					if restart_watcher then
+						pcall(function()
+							restart_watcher(reason or "callback_error", delay_ms or 800, disable)
+						end)
 					end
-				)
+				end)
 			end
 		end)
 	end)
