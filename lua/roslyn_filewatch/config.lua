@@ -94,8 +94,11 @@ M.options = {
 
 	--- Solution-aware watching: parse .sln files to limit watch scope
 	--- to project directories only. Reduces I/O on large repositories.
-	--- Default is false for compatibility with .csproj-only projects.
-	--- Set to true if you have a .sln file and want better performance.
+	--- When enabled, the plugin will:
+	---   1. First look for .sln files and parse project directories from them
+	---   2. If no .sln found, fall back to scanning for .csproj files
+	---   3. If neither found, perform a full directory scan
+	--- This makes it work well for both solution-based and simple csproj-only projects.
 	solution_aware = true,
 
 	--- Respect .gitignore patterns when scanning files.

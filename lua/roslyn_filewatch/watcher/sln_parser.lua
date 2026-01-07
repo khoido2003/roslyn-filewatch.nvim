@@ -117,6 +117,57 @@ function M.get_project_dirs(sln_path)
 	return parse_sln_content(content, sln_dir)
 end
 
+--- Find .csproj files in the given root directory
+---@param root string Root directory path
+---@return string[] csproj_paths List of paths to .csproj files
+function M.find_csproj_files(root)
+	if not root or root == "" then
+		return {}
+	end
+
+	root = utils.normalize_path(root)
+
+	-- Use vim.fs.find to search for .csproj files
+	local csproj_files = vim.fs.find(function(name, _)
+		return name:match("%.csproj$")
+	end, {
+		path = root,
+		limit = 50, -- reasonable limit to avoid scanning huge monorepos
+		type = "file",
+	})
+
+	local result = {}
+	for _, path in ipairs(csproj_files or {}) do
+		table.insert(result, utils.normalize_path(path))
+	end
+
+	return result
+end
+
+--- Get project directories from .csproj files (fallback when no .sln found)
+---@param root string Root directory path
+---@return string[] project_dirs List of absolute project directory paths
+function M.get_csproj_dirs(root)
+	local csproj_files = M.find_csproj_files(root)
+	if #csproj_files == 0 then
+		return {}
+	end
+
+	local project_dirs = {}
+	local seen = {}
+
+	for _, csproj_path in ipairs(csproj_files) do
+		-- Get the directory containing the .csproj file
+		local project_dir = csproj_path:match("^(.+)/[^/]+$")
+		if project_dir and not seen[project_dir] then
+			seen[project_dir] = true
+			table.insert(project_dirs, project_dir)
+		end
+	end
+
+	return project_dirs
+end
+
 --- Get project directories for a root, with caching
 --- Returns nil if solution-aware watching should be skipped (fallback to full scan)
 ---@param root string Root directory path
@@ -127,28 +178,41 @@ function M.get_watch_dirs(root)
 	end
 
 	local sln_path = M.find_sln(root)
-	if not sln_path then
-		return nil -- No .sln found, use full scan
+	if sln_path then
+		-- .sln found, parse it for project directories
+		local dirs = M.get_project_dirs(sln_path)
+		if #dirs > 0 then
+			-- Always include the sln directory itself (for .sln/.props/.targets changes)
+			local sln_dir = sln_path:match("^(.+)/[^/]+$")
+			if sln_dir then
+				local seen = {}
+				for _, d in ipairs(dirs) do
+					seen[d] = true
+				end
+				if not seen[sln_dir] then
+					table.insert(dirs, sln_dir)
+				end
+			end
+			return dirs
+		end
 	end
 
-	local dirs = M.get_project_dirs(sln_path)
-	if #dirs == 0 then
-		return nil -- No projects found, use full scan
-	end
-
-	-- Always include the sln directory itself (for .sln/.props/.targets changes)
-	local sln_dir = sln_path:match("^(.+)/[^/]+$")
-	if sln_dir then
+	-- No .sln found (or empty), try fallback to .csproj scanning
+	local csproj_dirs = M.get_csproj_dirs(root)
+	if #csproj_dirs > 0 then
+		-- Also include root directory for shared files like .editorconfig, Directory.Build.props etc.
 		local seen = {}
-		for _, d in ipairs(dirs) do
+		for _, d in ipairs(csproj_dirs) do
 			seen[d] = true
 		end
-		if not seen[sln_dir] then
-			table.insert(dirs, sln_dir)
+		root = utils.normalize_path(root)
+		if not seen[root] then
+			table.insert(csproj_dirs, root)
 		end
+		return csproj_dirs
 	end
 
-	return dirs
+	return nil -- No .sln or .csproj found, use full scan
 end
 
 return M
