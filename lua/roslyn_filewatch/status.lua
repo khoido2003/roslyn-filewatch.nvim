@@ -134,27 +134,62 @@ end
 function M.show()
 	local status = M.get_status()
 
-	local lines = {
-		"",
-		"roslyn-filewatch Status",
-		string.rep("─", 40),
-		"",
-		"Config:",
-		"  Solution-aware: " .. (status.config_summary.solution_aware and "✓ enabled" or "✗ disabled"),
-		"  Gitignore:      " .. (status.config_summary.respect_gitignore and "✓ enabled" or "✗ disabled"),
-		"  Force polling:  " .. (status.config_summary.force_polling and "✓ enabled" or "✗ disabled"),
-		"  Batching:       " .. (status.config_summary.batching and "✓ enabled" or "✗ disabled"),
-	}
+	--- Helper to echo a line with optional highlight
+	---@param text string
+	---@param hl string|nil Highlight group name
+	local function echo(text, hl)
+		vim.api.nvim_echo({ { text, hl or "Normal" } }, true, {})
+	end
+
+	--- Helper to echo multiple segments with different highlights
+	---@param segments table[] Array of {text, hl} pairs
+	local function echo_multi(segments)
+		local formatted = {}
+		for _, seg in ipairs(segments) do
+			table.insert(formatted, { seg[1], seg[2] or "Normal" })
+		end
+		vim.api.nvim_echo(formatted, true, {})
+	end
+
+	-- Header
+	echo("")
+	echo("roslyn-filewatch Status", "Title")
+	echo(string.rep("─", 40), "Comment")
+	echo("")
+
+	-- Config section
+	echo("Config:", "Bold")
+	local function config_line(label, enabled)
+		if enabled then
+			echo_multi({
+				{ "  " .. label .. ": ", "Normal" },
+				{ "✓ enabled", "DiagnosticOk" },
+			})
+		else
+			echo_multi({
+				{ "  " .. label .. ": ", "Normal" },
+				{ "✗ disabled", "Comment" },
+			})
+		end
+	end
+	config_line("Solution-aware", status.config_summary.solution_aware)
+	config_line("Gitignore     ", status.config_summary.respect_gitignore)
+	config_line("Force polling ", status.config_summary.force_polling)
+	config_line("Batching      ", status.config_summary.batching)
 
 	if #status.clients == 0 then
-		table.insert(lines, "")
-		table.insert(lines, "No active Roslyn clients")
+		echo("")
+		echo("No active Roslyn clients", "WarningMsg")
 	else
 		for _, client in ipairs(status.clients) do
-			table.insert(lines, "")
-			table.insert(lines, string.rep("─", 40))
-			table.insert(lines, "Client: " .. client.name .. " (id: " .. client.id .. ")")
-			table.insert(lines, "  Root: " .. utils.normalize_path(client.root))
+			echo("")
+			echo(string.rep("─", 40), "Comment")
+			echo_multi({
+				{ "Client: ", "Normal" },
+				{ client.name, "Identifier" },
+				{ " (id: " .. client.id .. ")", "Comment" },
+			})
+			echo("  Root: " .. utils.normalize_path(client.root), "Normal")
 
 			-- Watch mode
 			local mode = "none"
@@ -165,40 +200,44 @@ function M.show()
 			elseif client.has_poller then
 				mode = "polling only"
 			end
-			table.insert(lines, "  Mode: " .. mode)
+			echo("  Mode: " .. mode, "Normal")
 
 			-- Files and events
-			table.insert(lines, "  Files watched: " .. tostring(client.file_count))
-			table.insert(lines, "  Last event: " .. format_time_ago(client.last_event))
+			echo_multi({
+				{ "  Files watched: ", "Normal" },
+				{ tostring(client.file_count), "Number" },
+			})
+			echo_multi({
+				{ "  Last event: ", "Normal" },
+				{ format_time_ago(client.last_event), "Comment" },
+			})
 
 			-- Solution info
 			if client.sln_file then
 				local sln_name = client.sln_file:match("[^/]+$") or client.sln_file
-				table.insert(lines, "  Solution: " .. sln_name)
+				echo_multi({
+					{ "  Solution: ", "Normal" },
+					{ sln_name, "String" },
+				})
 				if client.project_dirs then
-					table.insert(lines, "  Projects: " .. #client.project_dirs .. " directories")
+					echo("  Projects: " .. #client.project_dirs .. " directories", "Normal")
 				end
 			elseif client.has_csproj then
-				table.insert(lines, "  Solution: (none found - using .csproj files)")
+				echo("  Solution: (none found - using .csproj files)", "Comment")
 			elseif client.missing_project then
-				table.insert(lines, "  Solution: (none found - scanning full root)")
-				table.insert(lines, "")
-				table.insert(lines, "  ⚠ No .sln or .csproj found!")
-				table.insert(lines, "  IntelliSense may be limited. To fix, run:")
-				table.insert(lines, "    dotnet new console   (for new projects)")
-				table.insert(lines, "    dotnet restore       (if project exists)")
+				echo("  Solution: (none found - scanning full root)", "Comment")
+				echo("")
+				echo("  ⚠ No .sln or .csproj found!", "WarningMsg")
+				echo("  IntelliSense may be limited. To fix, run:", "Comment")
+				echo("    dotnet new console   (for new projects)", "Comment")
+				echo("    dotnet restore       (if project exists)", "Comment")
 			else
-				table.insert(lines, "  Solution: (none found - scanning full root)")
+				echo("  Solution: (none found - scanning full root)", "Comment")
 			end
 		end
 	end
 
-	table.insert(lines, "")
-
-	-- Print to messages
-	for _, line in ipairs(lines) do
-		vim.api.nvim_echo({ { line, "Normal" } }, true, {})
-	end
+	echo("")
 end
 
 return M

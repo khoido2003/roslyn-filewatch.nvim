@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unity-style project detection: automatically triggers full scan when all projects are at root level
 - **`ignore_patterns`**: New config option for gitignore-style glob exclusions (like VS Code's `files.watcherExclude`)
 - **Missing project hint**: `:RoslynFilewatchStatus` now warns when no `.sln`/`.csproj` found and suggests `dotnet new console` or `dotnet restore`
+- **Colored status output**: `:RoslynFilewatchStatus` now uses syntax highlighting for better readability
+- **`:RoslynFilewatchResync` command**: Force resync file watcher snapshots for debugging/recovery
+- **Updated vimdoc**: Complete `:help roslyn-filewatch` documentation with all commands and config options
 
 ### Fixed
 - Unity projects with `.slnx` files now properly detect and watch all `.cs` files in subdirectories

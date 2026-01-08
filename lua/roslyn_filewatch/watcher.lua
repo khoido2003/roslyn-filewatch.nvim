@@ -338,6 +338,35 @@ function M.stop(client)
 	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
 end
 
+--- Force resync for all active clients
+--- Clears snapshots and sets needs_full_scan flag for next poll cycle
+function M.resync()
+	local clients = vim.lsp.get_clients()
+	local resynced = 0
+
+	for _, client in ipairs(clients) do
+		if vim.tbl_contains(config.options.client_names, client.name) then
+			local cid = client.id
+			-- Clear snapshot to force full scan
+			snapshots[cid] = {}
+			-- Set full scan flag
+			needs_full_scan[cid] = true
+			-- Clear dirty dirs
+			dirty_dirs[cid] = {}
+			-- Update last event time
+			last_events[cid] = os.time()
+			resynced = resynced + 1
+			notify("Resync triggered for client " .. client.name, vim.log.levels.INFO)
+		end
+	end
+
+	if resynced > 0 then
+		vim.notify("[roslyn-filewatch] Resync triggered for " .. resynced .. " client(s)", vim.log.levels.INFO)
+	else
+		vim.notify("[roslyn-filewatch] No active Roslyn clients to resync", vim.log.levels.WARN)
+	end
+end
+
 -- /////////////////////////////////////////////////
 -- /////////////////////////////////////////////////
 

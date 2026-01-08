@@ -1,6 +1,7 @@
 ---@class roslyn_filewatch
 ---@field setup fun(opts?: roslyn_filewatch.Options)
 ---@field status fun()
+---@field resync fun()
 
 local config = require("roslyn_filewatch.config")
 local watcher = require("roslyn_filewatch.watcher")
@@ -26,6 +27,11 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("RoslynFilewatchStatus", function()
 		M.status()
 	end, { desc = "Show roslyn-filewatch status" })
+
+	-- Create user command for manual resync
+	vim.api.nvim_create_user_command("RoslynFilewatchResync", function()
+		M.resync()
+	end, { desc = "Force resync file watcher snapshots" })
 end
 
 --- Show current watcher status
@@ -35,6 +41,15 @@ function M.status()
 		status_mod.show()
 	else
 		vim.notify("[roslyn-filewatch] Status module not available", vim.log.levels.ERROR)
+	end
+end
+
+--- Force resync for all active clients
+function M.resync()
+	if watcher and watcher.resync then
+		watcher.resync()
+	else
+		vim.notify("[roslyn-filewatch] Watcher module not available", vim.log.levels.ERROR)
 	end
 end
 
