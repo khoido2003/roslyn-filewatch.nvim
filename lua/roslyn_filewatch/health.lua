@@ -133,7 +133,7 @@ local function check_config()
 
 	-- Solution-aware watching status
 	if opts.solution_aware ~= false then
-		ok("Solution-aware watching enabled (parses .sln for project scope)")
+		ok("Solution-aware watching enabled (parses .sln/.slnx/.slnf for project scope)")
 	else
 		info("Solution-aware watching disabled (scanning entire root)")
 	end

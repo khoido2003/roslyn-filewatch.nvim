@@ -14,7 +14,7 @@
 ---@field processing_debounce_ms? number Debounce for processing events
 ---@field log_level? number vim.log.levels value
 ---@field force_polling? boolean Force polling mode (disable fs_event)
----@field solution_aware? boolean Parse .sln to limit watch scope (default: true)
+---@field solution_aware? boolean Parse .sln/.slnx/.slnf to limit watch scope (default: true)
 ---@field respect_gitignore? boolean Respect .gitignore patterns (default: true)
 
 ---@class roslyn_filewatch.BatchingOptions
@@ -52,6 +52,8 @@ M.options = {
 		".cs",
 		".csproj",
 		".sln",
+		".slnx",
+		".slnf",
 		".props",
 		".targets",
 		".editorconfig",
@@ -92,11 +94,11 @@ M.options = {
 	--- Set to true if you experience issues with native file watching
 	force_polling = false,
 
-	--- Solution-aware watching: parse .sln files to limit watch scope
+	--- Solution-aware watching: parse .sln/.slnx/.slnf files to limit watch scope
 	--- to project directories only. Reduces I/O on large repositories.
 	--- When enabled, the plugin will:
-	---   1. First look for .sln files and parse project directories from them
-	---   2. If no .sln found, fall back to scanning for .csproj files
+	---   1. First look for .slnf (filter), .slnx (XML), or .sln files and parse project directories
+	---   2. If no solution found, fall back to scanning for .csproj files
 	---   3. If neither found, perform a full directory scan
 	--- This makes it work well for both solution-based and simple csproj-only projects.
 	solution_aware = true,

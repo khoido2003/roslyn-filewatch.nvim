@@ -1,42 +1,66 @@
 ---@class roslyn_filewatch.sln_parser
----@field find_sln fun(root: string): string|nil
----@field get_project_dirs fun(sln_path: string): string[]
+---@field find_sln fun(root: string): string|nil, "sln"|"slnx"|"slnf"|nil
+---@field get_project_dirs fun(sln_path: string, sln_type?: "sln"|"slnx"|"slnf"): string[]
 
----Solution file (.sln) parser for solution-aware watching.
----Extracts project directories from .sln files to limit watch scope.
+---Solution file (.sln/.slnx/.slnf) parser for solution-aware watching.
+---Extracts project directories from solution files to limit watch scope.
+---Supports:
+---  - Traditional .sln text format
+---  - Newer .slnx XML format (VS 2022 17.13+, .NET 9)
+---  - Solution filter .slnf JSON format
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}
 
---- Find .sln file in the given root directory
+--- Find .sln, .slnx, or .slnf file in the given root directory
+--- Priority: .slnf > .slnx > .sln (filter first, then newer format)
 ---@param root string Root directory path
----@return string|nil sln_path Path to .sln file, or nil if not found
+---@return string|nil sln_path Path to solution file, or nil if not found
+---@return "sln"|"slnx"|"slnf"|nil sln_type Type of solution file found
 function M.find_sln(root)
 	if not root or root == "" then
-		return nil
+		return nil, nil
 	end
 
 	root = utils.normalize_path(root)
 
-	-- Use vim.fs.find for efficient file search
-	local sln_files = vim.fs.find(function(name, _)
-		return name:match("%.sln$")
+	-- Use vim.fs.find to search for .sln, .slnx, and .slnf files
+	local solution_files = vim.fs.find(function(name, _)
+		return name:match("%.slnx?$") or name:match("%.slnf$")
 	end, {
 		path = root,
-		limit = 1,
+		limit = 10, -- get several to pick the best one
 		type = "file",
 	})
 
-	if sln_files and #sln_files > 0 then
-		return utils.normalize_path(sln_files[1])
+	if solution_files and #solution_files > 0 then
+		-- Priority: .slnf > .slnx > .sln
+		-- .slnf (solution filter) takes highest priority as it's a user preference
+		for _, path in ipairs(solution_files) do
+			if path:match("%.slnf$") then
+				return utils.normalize_path(path), "slnf"
+			end
+		end
+		-- Then .slnx (newer format)
+		for _, path in ipairs(solution_files) do
+			if path:match("%.slnx$") then
+				return utils.normalize_path(path), "slnx"
+			end
+		end
+		-- Fall back to .sln
+		for _, path in ipairs(solution_files) do
+			if path:match("%.sln$") then
+				return utils.normalize_path(path), "sln"
+			end
+		end
 	end
 
-	return nil
+	return nil, nil
 end
 
---- Parse .sln file content and extract project paths
+--- Parse traditional .sln file content and extract project paths
 ---@param content string Content of the .sln file
 ---@param sln_dir string Directory containing the .sln file
 ---@return string[] project_dirs List of absolute project directory paths
@@ -76,17 +100,97 @@ local function parse_sln_content(content, sln_dir)
 	return project_dirs
 end
 
---- Get project directories from a .sln file
----@param sln_path string Path to the .sln file
+--- Parse .slnx (XML format) file content and extract project paths
+--- Format: <Solution><Project Path="relative/path/to/project.csproj" /></Solution>
+---@param content string Content of the .slnx file
+---@param sln_dir string Directory containing the .slnx file
 ---@return string[] project_dirs List of absolute project directory paths
-function M.get_project_dirs(sln_path)
+local function parse_slnx_content(content, sln_dir)
+	local project_dirs = {}
+	local seen = {}
+	local has_subdirectory_projects = false
+
+	-- Match <Project Path="..."> or <Project Path='...'> elements
+	-- The .slnx format uses XML with Project elements containing Path attributes
+	for project_path in content:gmatch('<Project[^>]*Path%s*=%s*"([^"]+)"') do
+		local normalized = project_path:gsub("\\", "/")
+
+		-- Get the directory containing the project file
+		local project_dir = normalized:match("^(.+)/[^/]+$")
+		if project_dir then
+			has_subdirectory_projects = true
+			-- Make absolute path
+			local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+
+			-- Avoid duplicates
+			if not seen[abs_dir] then
+				seen[abs_dir] = true
+				table.insert(project_dirs, abs_dir)
+			end
+		else
+			-- Project file is in sln directory (no path separator)
+			if not seen[sln_dir] then
+				seen[sln_dir] = true
+				table.insert(project_dirs, sln_dir)
+			end
+		end
+	end
+
+	-- Also try single-quoted attributes (less common but valid XML)
+	for project_path in content:gmatch("<Project[^>]*Path%s*=%s*'([^']+)'") do
+		local normalized = project_path:gsub("\\", "/")
+
+		local project_dir = normalized:match("^(.+)/[^/]+$")
+		if project_dir then
+			has_subdirectory_projects = true
+			local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+			if not seen[abs_dir] then
+				seen[abs_dir] = true
+				table.insert(project_dirs, abs_dir)
+			end
+		else
+			if not seen[sln_dir] then
+				seen[sln_dir] = true
+				table.insert(project_dirs, sln_dir)
+			end
+		end
+	end
+
+	-- Unity-style slnx fix: If ALL projects are at root level (no subdirectory paths),
+	-- this is likely a Unity project where .csproj files are in root but actual
+	-- source files (.cs) are in Assets/ subdirectories.
+	-- Return empty to trigger full recursive scan instead of solution-aware scan.
+	if not has_subdirectory_projects and #project_dirs == 1 then
+		-- All projects are at root level - return empty to trigger full scan fallback
+		return {}
+	end
+
+	return project_dirs
+end
+
+--- Get project directories from a .sln, .slnx, or .slnf file
+---@param sln_path string Path to the solution file
+---@param sln_type? "sln"|"slnx"|"slnf" Type of solution file (auto-detected if nil)
+---@return string[] project_dirs List of absolute project directory paths
+function M.get_project_dirs(sln_path, sln_type)
 	if not sln_path or sln_path == "" then
 		return {}
 	end
 
 	sln_path = utils.normalize_path(sln_path)
 
-	-- Read the .sln file
+	-- Auto-detect type if not provided
+	if not sln_type then
+		if sln_path:match("%.slnf$") then
+			sln_type = "slnf"
+		elseif sln_path:match("%.slnx$") then
+			sln_type = "slnx"
+		else
+			sln_type = "sln"
+		end
+	end
+
+	-- Read the solution file
 	local ok, content = pcall(function()
 		local fd = uv.fs_open(sln_path, "r", 438)
 		if not fd then
@@ -108,13 +212,61 @@ function M.get_project_dirs(sln_path)
 		return {}
 	end
 
-	-- Get the directory containing the .sln file
+	-- Get the directory containing the solution file
 	local sln_dir = sln_path:match("^(.+)/[^/]+$") or sln_path:match("^(.+)$")
 	if not sln_dir then
 		return {}
 	end
 
-	return parse_sln_content(content, sln_dir)
+	-- Parse based on file type
+	if sln_type == "slnf" then
+		-- .slnf is JSON format: { "solution": { "path": "x.sln", "projects": ["a.csproj", "b.csproj"] } }
+		local decode_ok, json = pcall(vim.json.decode, content)
+		if not decode_ok or not json or not json.solution then
+			return {}
+		end
+		
+		local project_dirs = {}
+		local seen = {}
+		local has_subdirectory_projects = false
+		
+		-- Parse project paths from the filter
+		local projects = json.solution.projects or {}
+		for _, project_path in ipairs(projects) do
+			-- Normalize path separators
+			local normalized = project_path:gsub("\\", "/")
+			
+			-- Get the directory containing the project file
+			local project_dir = normalized:match("^(.+)/[^/]+$")
+			if project_dir then
+				has_subdirectory_projects = true
+				-- Make absolute path
+				local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+				
+				if not seen[abs_dir] then
+					seen[abs_dir] = true
+					table.insert(project_dirs, abs_dir)
+				end
+			else
+				-- Project file is in sln directory
+				if not seen[sln_dir] then
+					seen[sln_dir] = true
+					table.insert(project_dirs, sln_dir)
+				end
+			end
+		end
+		
+		-- Unity-style fix: if all projects are at root level, trigger full scan
+		if not has_subdirectory_projects and #project_dirs == 1 then
+			return {}
+		end
+		
+		return project_dirs
+	elseif sln_type == "slnx" then
+		return parse_slnx_content(content, sln_dir)
+	else
+		return parse_sln_content(content, sln_dir)
+	end
 end
 
 --- Find .csproj files in the given root directory
@@ -177,12 +329,12 @@ function M.get_watch_dirs(root)
 		return nil
 	end
 
-	local sln_path = M.find_sln(root)
+	local sln_path, sln_type = M.find_sln(root)
 	if sln_path then
-		-- .sln found, parse it for project directories
-		local dirs = M.get_project_dirs(sln_path)
+		-- .sln or .slnx found, parse it for project directories
+		local dirs = M.get_project_dirs(sln_path, sln_type)
 		if #dirs > 0 then
-			-- Always include the sln directory itself (for .sln/.props/.targets changes)
+			-- Always include the sln directory itself (for .sln/.slnx/.props/.targets changes)
 			local sln_dir = sln_path:match("^(.+)/[^/]+$")
 			if sln_dir then
 				local seen = {}
@@ -197,7 +349,7 @@ function M.get_watch_dirs(root)
 		end
 	end
 
-	-- No .sln found (or empty), try fallback to .csproj scanning
+	-- No .sln/.slnx found (or empty), try fallback to .csproj scanning
 	local csproj_dirs = M.get_csproj_dirs(root)
 	if #csproj_dirs > 0 then
 		-- Also include root directory for shared files like .editorconfig, Directory.Build.props etc.
@@ -209,10 +361,19 @@ function M.get_watch_dirs(root)
 		if not seen[root] then
 			table.insert(csproj_dirs, root)
 		end
+		
+		-- Unity-style fix: If all csproj files are at root level (only root in list),
+		-- return nil to trigger full recursive scan instead of solution-aware scan.
+		-- This ensures Unity projects where source files are in Assets/ subdirectories
+		-- get properly scanned.
+		if #csproj_dirs == 1 and csproj_dirs[1] == root then
+			return nil -- Full scan for Unity-style projects
+		end
+		
 		return csproj_dirs
 	end
 
-	return nil -- No .sln or .csproj found, use full scan
+	return nil -- No .sln/.slnx or .csproj found, use full scan
 end
 
 return M

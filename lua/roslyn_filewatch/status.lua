@@ -86,10 +86,10 @@ function M.get_status()
 			if config.options.solution_aware ~= false then
 				local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
 				if ok and sln_parser and client_status.root then
-					local sln = sln_parser.find_sln(client_status.root)
+					local sln, sln_type = sln_parser.find_sln(client_status.root)
 					if sln then
 						client_status.sln_file = sln
-						local dirs = sln_parser.get_project_dirs(sln)
+						local dirs = sln_parser.get_project_dirs(sln, sln_type)
 						if dirs and #dirs > 0 then
 							client_status.project_dirs = dirs
 						end
