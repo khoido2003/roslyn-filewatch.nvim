@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.slnf` support**: Parse solution filter files (JSON format) with highest priority
 - Unity-style project detection: automatically triggers full scan when all projects are at root level
 - **`ignore_patterns`**: New config option for gitignore-style glob exclusions (like VS Code's `files.watcherExclude`)
+- **Missing project hint**: `:RoslynFilewatchStatus` now warns when no `.sln`/`.csproj` found and suggests `dotnet new console` or `dotnet restore`
 
 ### Fixed
 - Unity projects with `.slnx` files now properly detect and watch all `.cs` files in subdirectories

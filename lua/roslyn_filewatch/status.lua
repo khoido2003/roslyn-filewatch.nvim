@@ -93,6 +93,15 @@ function M.get_status()
 						if dirs and #dirs > 0 then
 							client_status.project_dirs = dirs
 						end
+					else
+						-- No solution found, check if there are .csproj files
+						local csproj_files = sln_parser.find_csproj_files(client_status.root)
+						if csproj_files and #csproj_files > 0 then
+							client_status.has_csproj = true
+						else
+							-- No .sln, no .csproj - might need dotnet restore/init
+							client_status.missing_project = true
+						end
 					end
 				end
 			end
@@ -169,6 +178,15 @@ function M.show()
 				if client.project_dirs then
 					table.insert(lines, "  Projects: " .. #client.project_dirs .. " directories")
 				end
+			elseif client.has_csproj then
+				table.insert(lines, "  Solution: (none found - using .csproj files)")
+			elseif client.missing_project then
+				table.insert(lines, "  Solution: (none found - scanning full root)")
+				table.insert(lines, "")
+				table.insert(lines, "  ⚠ No .sln or .csproj found!")
+				table.insert(lines, "  IntelliSense may be limited. To fix, run:")
+				table.insert(lines, "    dotnet new console   (for new projects)")
+				table.insert(lines, "    dotnet restore       (if project exists)")
 			else
 				table.insert(lines, "  Solution: (none found - scanning full root)")
 			end
