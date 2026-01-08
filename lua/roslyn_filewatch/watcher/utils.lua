@@ -210,6 +210,121 @@ local function matches_ignore_dir(path, ignore_dir)
 	return false
 end
 
+--- Convert a gitignore/glob pattern to a Lua pattern
+--- Supports: ** (any path), * (any except /), ? (single char)
+---@param pattern string Glob pattern
+---@return string lua_pattern
+local function glob_to_lua_pattern(pattern)
+	-- Escape special Lua pattern characters except * and ?
+	local escaped = pattern:gsub("([%.%+%-%^%$%(%)%[%]%%])", "%%%1")
+
+	-- Convert gitignore wildcards to Lua patterns
+	-- ** matches any path (including /)
+	escaped = escaped:gsub("%*%*", "\1") -- placeholder
+	-- * matches anything except /
+	escaped = escaped:gsub("%*", "[^/]*")
+	-- ? matches single char except /
+	escaped = escaped:gsub("%?", "[^/]")
+	-- Restore ** as .*
+	escaped = escaped:gsub("\1", ".*")
+
+	return escaped
+end
+
+--- Check if a path matches a glob pattern (gitignore-style)
+---@param path string Normalized path to check
+---@param pattern string Glob pattern to match against
+---@return boolean
+local function matches_glob_pattern(path, pattern)
+	if not path or path == "" or not pattern or pattern == "" then
+		return false
+	end
+
+	-- Handle negation (! prefix)
+	local is_negated = false
+	if pattern:sub(1, 1) == "!" then
+		is_negated = true
+		pattern = pattern:sub(2)
+	end
+
+	-- Normalize pattern: convert backslashes to forward slashes
+	pattern = pattern:gsub("\\", "/")
+
+	-- Case-insensitive matching on Windows
+	local is_win = M.is_windows()
+	local cmp_path = is_win and path:lower() or path
+	local cmp_pattern = is_win and pattern:lower() or pattern
+
+	-- Convert glob to Lua pattern
+	local lua_pattern = glob_to_lua_pattern(cmp_pattern)
+
+	-- If pattern starts with **, it can match anywhere
+	-- If pattern doesn't contain /, it can match any basename
+	local matches = false
+
+	if cmp_pattern:sub(1, 2) == "**" then
+		-- ** at start: match anywhere in path
+		if cmp_path:match(lua_pattern) then
+			matches = true
+		end
+	elseif not cmp_pattern:find("/") then
+		-- No slash: match against basename only
+		local basename = cmp_path:match("[^/]+$") or cmp_path
+		if basename:match("^" .. lua_pattern .. "$") then
+			matches = true
+		end
+	else
+		-- Has slash: match against full path
+		-- Try matching from the start
+		if cmp_path:match("^" .. lua_pattern .. "$") or cmp_path:match("^" .. lua_pattern .. "/") then
+			matches = true
+		end
+		-- Also try matching from any path position (like **/pattern)
+		if not matches and cmp_path:match("/" .. lua_pattern .. "$") then
+			matches = true
+		end
+		if not matches and cmp_path:match("/" .. lua_pattern .. "/") then
+			matches = true
+		end
+	end
+
+	-- Apply negation
+	if is_negated then
+		return not matches
+	end
+	return matches
+end
+
+--- Check if a path matches any of the given glob patterns
+---@param path string Normalized path to check
+---@param patterns string[] List of glob patterns
+---@return boolean is_excluded Whether path is excluded by patterns
+function M.matches_any_pattern(path, patterns)
+	if not patterns or #patterns == 0 then
+		return false
+	end
+
+	local excluded = false
+	for _, pattern in ipairs(patterns) do
+		if pattern and pattern ~= "" then
+			local is_negated = pattern:sub(1, 1) == "!"
+			if is_negated then
+				-- Negation pattern: if matches, INCLUDE the file
+				if matches_glob_pattern(path, pattern:sub(2)) then
+					excluded = false
+				end
+			else
+				-- Normal pattern: if matches, EXCLUDE the file
+				if matches_glob_pattern(path, pattern) then
+					excluded = true
+				end
+			end
+		end
+	end
+
+	return excluded
+end
+
 --- Determine if a path should be watched based on ignore_dirs and extensions
 ---@param path string Normalized path
 ---@param ignore_dirs string[] List of directory names to ignore
@@ -220,10 +335,21 @@ function M.should_watch_path(path, ignore_dirs, watch_extensions)
 		return false
 	end
 
-	-- Check against ignored directories (exact segment match)
+	-- Check against ignored directories (exact segment match) - fast path
 	for _, dir in ipairs(ignore_dirs or {}) do
 		if matches_ignore_dir(path, dir) then
 			return false
+		end
+	end
+
+	-- Check against ignore_patterns (glob patterns) - only if configured
+	local config_ok, config = pcall(require, "roslyn_filewatch.config")
+	if config_ok and config and config.options and config.options.ignore_patterns then
+		local patterns = config.options.ignore_patterns
+		if patterns and #patterns > 0 then
+			if M.matches_any_pattern(path, patterns) then
+				return false
+			end
 		end
 	end
 
@@ -234,7 +360,6 @@ function M.should_watch_path(path, ignore_dirs, watch_extensions)
 	end
 
 	-- Try O(1) cached lookup first (from config module)
-	local config_ok, config = pcall(require, "roslyn_filewatch.config")
 	if config_ok and config and config.is_watched_extension then
 		return config.is_watched_extension(ext)
 	end

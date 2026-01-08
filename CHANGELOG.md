@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.slnx` support**: Parse XML-based solution files (Visual Studio 2022 17.13+, .NET 9)
 - **`.slnf` support**: Parse solution filter files (JSON format) with highest priority
 - Unity-style project detection: automatically triggers full scan when all projects are at root level
+- **`ignore_patterns`**: New config option for gitignore-style glob exclusions (like VS Code's `files.watcherExclude`)
 
 ### Fixed
 - Unity projects with `.slnx` files now properly detect and watch all `.cs` files in subdirectories

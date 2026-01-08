@@ -15,11 +15,12 @@ This plugin adds a proper **file system watcher** so Roslyn always stays updated
 - Detects file **create / change / delete** using `uv.fs_event` and `uv.fs_poll`.
 - Detects **file renames** reliably (`didRenameFiles`).
 - Sends `workspace/didChangeWatchedFiles` notifications to Roslyn
-- **Solution-aware watching**: Parses `.sln` files to limit watch scope to project directories only
+- **Solution-aware watching**: Parses `.sln`, `.slnx`, and `.slnf` files to limit watch scope
 
 - Configurable:
   - Ignore dirs (`bin`, `obj`, `.git`, etc.)
-  - File extensions to watch (`.cs`, `.csproj`, `.sln`, …)
+  - Glob pattern exclusions (like VS Code's `files.watcherExclude`)
+  - File extensions to watch (`.cs`, `.csproj`, `.sln`, `.slnx`, `.slnf`, …)
 
 - Auto cleans up watchers when LSP detaches
 - **Batching** of events to reduce spam.
@@ -83,7 +84,17 @@ require("roslyn_filewatch").setup({
     ".idea",
     ".vs",
   },
-  watch_extensions = { ".cs", ".csproj", ".sln", ".props", ".targets" },
+
+  -- Glob pattern exclusions (gitignore-style, like VS Code's files.watcherExclude)
+  -- Empty by default. Examples:
+  ignore_patterns = {
+    -- "*.generated.cs",      -- exclude generated files
+    -- "**/*.Designer.cs",    -- exclude designer files anywhere
+    -- "**/obj/**",           -- exclude obj directory contents
+    -- "!**/important/**",    -- but include important directory (negation)
+  },
+
+  watch_extensions = { ".cs", ".csproj", ".sln", ".slnx", ".slnf", ".props", ".targets" },
   batching = {
     enabled = true,
     interval = 300,
@@ -95,7 +106,7 @@ require("roslyn_filewatch").setup({
   rename_detection_ms = 300,       -- window to detect delete+create → rename
   processing_debounce_ms = 80,     -- debounce high-frequency events
 
-  -- Solution-aware watching: parse .sln to limit watch scope to project dirs only
+  -- Solution-aware watching: parse .sln/.slnx/.slnf to limit watch scope to project dirs only
   -- Reduces I/O significantly on large repositories. Set to false to scan entire root.
   solution_aware = true,           -- (default: true)
 

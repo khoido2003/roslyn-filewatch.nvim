@@ -5,6 +5,7 @@
 ---@class roslyn_filewatch.Options
 ---@field batching? roslyn_filewatch.BatchingOptions
 ---@field ignore_dirs? string[] Directories to ignore (exact segment match)
+---@field ignore_patterns? string[] Glob patterns to exclude (gitignore-style)
 ---@field watch_extensions? string[] File extensions to watch (with dots)
 ---@field client_names? string[] LSP client names to trigger watching
 ---@field poll_interval? number Poller interval in ms
@@ -47,6 +48,16 @@ M.options = {
 		"node_modules",
 		"packages",
 	},
+
+	--- Glob patterns to exclude files/directories (gitignore-style)
+	--- Patterns are applied in order; later patterns can override earlier ones
+	--- Use ! prefix to negate (include previously excluded files)
+	--- Examples:
+	---   "*.generated.cs"    - exclude generated files
+	---   "**/*.Designer.cs"  - exclude designer files anywhere
+	---   "**/obj/**"         - exclude obj directory contents
+	---   "!**/important/**"  - but include important directory
+	ignore_patterns = {},
 
 	watch_extensions = {
 		".cs",
