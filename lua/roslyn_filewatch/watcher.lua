@@ -330,6 +330,9 @@ function M.stop(client)
 	restart_backoff_until[cid] = nil
 	fs_event_disabled_until[cid] = nil
 	last_events[cid] = nil
+	-- Clear incremental scanning state
+	dirty_dirs[cid] = nil
+	needs_full_scan[cid] = nil
 	-- Cleanup handles/timers
 	cleanup_client(cid)
 	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
@@ -589,7 +592,6 @@ function M.start(client)
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
 	vim.api.nvim_create_autocmd("LspDetach", {
-		once = true,
 		callback = function(args)
 			if args.data.client_id == client.id then
 				-- Clear snapshot + state
@@ -598,9 +600,13 @@ function M.start(client)
 				restart_backoff_until[client.id] = nil
 				fs_event_disabled_until[client.id] = nil
 				last_events[client.id] = nil
+				-- Clear incremental scanning state
+				dirty_dirs[client.id] = nil
+				needs_full_scan[client.id] = nil
 				-- Cleanup handles & timers
 				cleanup_client(client.id)
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
+				return true -- Remove this autocmd after cleanup
 			end
 		end,
 	})

@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Unity projects with `.slnx` files now properly detect and watch all `.cs` files in subdirectories
 - Projects where all `.csproj` files are in root (like Unity) now trigger full recursive scan
+- Memory leak: `dirty_dirs` and `needs_full_scan` tables not cleaned up on client disconnect
+- LspDetach autocmd now properly removes itself only after the correct client detaches
 
 ### Changed
 - Solution detection priority is now: `.slnf` > `.slnx` > `.sln` (filter first, then newer format)

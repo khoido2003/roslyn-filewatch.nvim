@@ -225,24 +225,24 @@ function M.get_project_dirs(sln_path, sln_type)
 		if not decode_ok or not json or not json.solution then
 			return {}
 		end
-		
+
 		local project_dirs = {}
 		local seen = {}
 		local has_subdirectory_projects = false
-		
+
 		-- Parse project paths from the filter
 		local projects = json.solution.projects or {}
 		for _, project_path in ipairs(projects) do
 			-- Normalize path separators
 			local normalized = project_path:gsub("\\", "/")
-			
+
 			-- Get the directory containing the project file
 			local project_dir = normalized:match("^(.+)/[^/]+$")
 			if project_dir then
 				has_subdirectory_projects = true
 				-- Make absolute path
 				local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
-				
+
 				if not seen[abs_dir] then
 					seen[abs_dir] = true
 					table.insert(project_dirs, abs_dir)
@@ -255,12 +255,12 @@ function M.get_project_dirs(sln_path, sln_type)
 				end
 			end
 		end
-		
+
 		-- Unity-style fix: if all projects are at root level, trigger full scan
 		if not has_subdirectory_projects and #project_dirs == 1 then
 			return {}
 		end
-		
+
 		return project_dirs
 	elseif sln_type == "slnx" then
 		return parse_slnx_content(content, sln_dir)
@@ -361,7 +361,7 @@ function M.get_watch_dirs(root)
 		if not seen[root] then
 			table.insert(csproj_dirs, root)
 		end
-		
+
 		-- Unity-style fix: If all csproj files are at root level (only root in list),
 		-- return nil to trigger full recursive scan instead of solution-aware scan.
 		-- This ensures Unity projects where source files are in Assets/ subdirectories
@@ -369,7 +369,7 @@ function M.get_watch_dirs(root)
 		if #csproj_dirs == 1 and csproj_dirs[1] == root then
 			return nil -- Full scan for Unity-style projects
 		end
-		
+
 		return csproj_dirs
 	end
 
