@@ -55,6 +55,13 @@ local needs_full_scan = {}
 -- Threshold: if more than this many dirty dirs, do full scan instead
 local DIRTY_DIRS_THRESHOLD = 10
 
+-- Track solution file mtime per client for change detection
+---@type table<number, { path: string, mtime: number }>
+local sln_mtimes = {}
+-- Timer for polling solution file changes (separate from fs_poll)
+---@type table<number, uv_timer_t>
+local sln_poll_timers = {}
+
 -- Register state references with status module for RoslynFilewatchStatus command
 pcall(function()
 	local status_mod = require("roslyn_filewatch.status")
@@ -299,6 +306,18 @@ local function cleanup_client(client_id)
 		batch_queues[client_id] = nil
 	end
 
+	-- Stop solution file poll timer
+	if sln_poll_timers[client_id] then
+		pcall(function()
+			local t = sln_poll_timers[client_id]
+			if t and not (t.is_closing and t:is_closing()) then
+				t:stop()
+				t:close()
+			end
+		end)
+		sln_poll_timers[client_id] = nil
+	end
+
 	-- Clear rename buffers
 	pcall(function()
 		rename_mod.clear(client_id)
@@ -330,6 +349,8 @@ function M.stop(client)
 	restart_backoff_until[cid] = nil
 	fs_event_disabled_until[cid] = nil
 	last_events[cid] = nil
+	sln_mtimes[cid] = nil
+	sln_poll_timers[cid] = nil
 	-- Clear incremental scanning state
 	dirty_dirs[cid] = nil
 	needs_full_scan[cid] = nil
@@ -555,6 +576,78 @@ function M.start(client)
 	-- Request full scan on startup
 	needs_full_scan[client.id] = true
 
+	-- Capture initial solution file mtime for change detection
+	-- This is used to detect when Unity modifies .slnx and adds new projects
+	if config.options.solution_aware then
+		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
+		if ok and sln_parser and sln_parser.get_sln_info then
+			local sln_info = sln_parser.get_sln_info(root)
+			if sln_info then
+				-- Capture initial list of csproj files
+				local initial_csproj = {}
+				local csproj_files = vim.fn.glob(root .. "/*.csproj", false, true)
+				for _, csproj in ipairs(csproj_files or {}) do
+					local p = normalize_path(csproj)
+					local st = uv.fs_stat(p)
+					initial_csproj[p] = st and st.mtime.sec or 0
+				end
+
+				sln_mtimes[client.id] = {
+					path = sln_info.path,
+					mtime = sln_info.mtime,
+					csproj_files = initial_csproj,
+				}
+			else
+				vim.schedule(function()
+					vim.notify("[roslyn-filewatch] No solution file found in: " .. root, vim.log.levels.WARN)
+				end)
+			end
+		else
+			vim.schedule(function()
+				vim.notify("[roslyn-filewatch] Failed to load sln_parser", vim.log.levels.WARN)
+			end)
+		end
+	else
+		notify("[SLN] solution_aware is disabled", vim.log.levels.DEBUG)
+	end
+
+	--- Check if solution file has changed since last poll
+	---@param cid number Client ID
+	---@param croot string Root path
+	---@return boolean changed True if solution file mtime changed
+	local function check_sln_changed(cid, croot)
+		if not config.options.solution_aware then
+			return false
+		end
+
+		local cached = sln_mtimes[cid]
+		if not cached then
+			return false
+		end
+
+		-- Get current mtime of solution file
+		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
+		if not ok or not sln_parser or not sln_parser.get_sln_info then
+			return false
+		end
+
+		local current_info = sln_parser.get_sln_info(croot)
+		if not current_info then
+			return false
+		end
+
+		-- Check if mtime changed
+		if current_info.mtime ~= cached.mtime then
+			-- notify("[SLN] mtime changed: " .. tostring(cached.mtime) .. " -> " .. tostring(current_info.mtime), vim.log.levels.INFO)
+			-- Update cached mtime, but PRESERVE the project tracking set!
+			local old_csproj = cached.csproj_files
+			sln_mtimes[cid] = { path = current_info.path, mtime = current_info.mtime, csproj_files = old_csproj }
+			return true
+		end
+
+		return false
+	end
+
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
 		partial_scan = snapshot_mod.partial_scan,
@@ -570,6 +663,7 @@ function M.start(client)
 		last_events = last_events,
 		poll_interval = POLL_INTERVAL,
 		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
+		-- check_sln_changed = check_sln_changed, -- Disabled to prevent full scan freezes
 	})
 
 	if not poller then
@@ -583,6 +677,185 @@ function M.start(client)
 		return
 	end
 	pollers[client.id] = poller
+
+	-- Create a separate timer to check for solution file changes
+	-- This is needed because fs_poll only fires when root directory stat changes,
+	-- not when files inside (like .slnx) are modified
+	if config.options.solution_aware and sln_mtimes[client.id] then
+		local sln_timer = uv.new_timer()
+		if sln_timer then
+			-- vim.schedule(function()
+			-- 	vim.notify("[roslyn-filewatch] Started solution file watcher (poll: " .. POLL_INTERVAL .. "ms)", vim.log.levels.INFO)
+			-- end)
+			sln_timer:start(POLL_INTERVAL, POLL_INTERVAL, function()
+				-- Safety check: stop if client stopped
+				if client.is_stopped and client.is_stopped() then
+					pcall(function()
+						sln_timer:stop()
+						sln_timer:close()
+					end)
+					sln_poll_timers[client.id] = nil
+					return
+				end
+
+				-- ASYNC Solution File Check
+				-- Use cached path directly - NO directory scan!
+				local cached = sln_mtimes[client.id]
+				if not cached or not cached.path then
+					return
+				end
+
+				-- Async stat the solution file
+				uv.fs_stat(cached.path, function(err, stat)
+					if err or not stat then
+						return
+					end
+
+					-- Calculate mtime in nanoseconds for precision
+					local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
+					
+					-- Check if mtime changed
+					if current_mtime == cached.mtime then
+						return -- No change, skip
+					end
+
+					-- Update cached mtime (preserve csproj_files)
+					local old_csproj = cached.csproj_files
+					sln_mtimes[client.id] = { 
+						path = cached.path, 
+						mtime = current_mtime, 
+						csproj_files = old_csproj 
+					}
+
+					-- Solution changed! Trigger async project scan
+					vim.schedule(function()
+						local sln_info = sln_mtimes[client.id]
+						if not sln_info or not sln_info.path then
+							return
+						end
+
+						-- HELPER: Ensure path is canonical for Roslyn on Windows
+						local function to_roslyn_path(p)
+							p = normalize_path(p)
+							if vim.loop.os_uname().sysname == "Windows_NT" then
+								p = p:gsub("^(%a):", function(l)
+									return l:upper() .. ":"
+								end)
+								p = p:gsub("/", "\\")
+							end
+							return p
+						end
+
+						-- Scan csproj files (glob is fast for root-level files)
+						local csproj_files = vim.fn.glob(root .. "/*.csproj", false, true)
+						local previous_csproj = sln_info.csproj_files or {}
+
+						-- Async Collection State
+						local pending = 0
+						local collected_mtimes = {}
+						
+						-- Completion Handler
+						local function check_done()
+							if pending == 0 then
+								vim.schedule(function()
+									local new_projects_list = {}
+									local current_csproj_set = {}
+									local new_projects_count = 0
+
+									for internal_path, current_mtime_sec in pairs(collected_mtimes) do
+										current_csproj_set[internal_path] = current_mtime_sec
+										
+										local old_mtime_sec = previous_csproj[internal_path]
+										if sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
+											local roslyn_path = to_roslyn_path(internal_path)
+											table.insert(new_projects_list, roslyn_path)
+											new_projects_count = new_projects_count + 1
+										end
+									end
+									
+									-- Init check
+									if not sln_info.csproj_files then
+										sln_mtimes[client.id].csproj_files = current_csproj_set
+										return
+									end
+									
+									-- Update tracking set
+									sln_mtimes[client.id].csproj_files = current_csproj_set
+
+									-- Notify Roslyn if needed
+									if new_projects_count > 0 then
+										local clients_list = vim.lsp.get_clients()
+										for _, c in ipairs(clients_list) do
+											if vim.tbl_contains(config.options.client_names, c.name) then
+												local project_uris = vim.tbl_map(function(p)
+													return vim.uri_from_fname(p)
+												end, new_projects_list)
+
+												pcall(function()
+													c:notify("project/open", {
+														projects = project_uris,
+													})
+												end)
+												
+												-- Trigger diagnostic refresh
+												vim.defer_fn(function()
+													if c.is_stopped and c.is_stopped() then return end
+													local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
+													for _, buf in ipairs(attached_bufs or {}) do
+														if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+															pcall(function()
+																c:request(
+																	vim.lsp.protocol.Methods.textDocument_diagnostic,
+																	{ textDocument = vim.lsp.util.make_text_document_params(buf) },
+																	nil,
+																	buf
+																)
+															end)
+														end
+													end
+												end, 2000)
+											end
+										end
+									end
+								end)
+							end
+						end
+
+						-- Launch Async Stats for csproj files
+						for _, csproj in ipairs(csproj_files or {}) do
+							local internal_path = normalize_path(csproj)
+							pending = pending + 1
+							uv.fs_stat(internal_path, function(csproj_err, csproj_st)
+								if not csproj_err and csproj_st then
+									collected_mtimes[internal_path] = csproj_st.mtime.sec
+								else
+									collected_mtimes[internal_path] = 0
+								end
+								pending = pending - 1
+								check_done()
+							end)
+						end
+						
+						-- Handle empty list case
+						check_done()
+					end)
+				end)
+			end)
+			sln_poll_timers[client.id] = sln_timer
+		else
+			vim.schedule(function()
+				vim.notify("[roslyn-filewatch] Failed to create solution timer", vim.log.levels.ERROR)
+			end)
+		end
+	else
+		if not config.options.solution_aware then
+			notify("[SLN] Timer not started: solution_aware disabled", vim.log.levels.DEBUG)
+		elseif not sln_mtimes[client.id] then
+			vim.schedule(function()
+				vim.notify("[roslyn-filewatch] Timer not started: no solution file tracked", vim.log.levels.WARN)
+			end)
+		end
+	end
 
 	-- Watchdog
 	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots, {
@@ -629,6 +902,7 @@ function M.start(client)
 				restart_backoff_until[client.id] = nil
 				fs_event_disabled_until[client.id] = nil
 				last_events[client.id] = nil
+				sln_mtimes[client.id] = nil
 				-- Clear incremental scanning state
 				dirty_dirs[client.id] = nil
 				needs_full_scan[client.id] = nil

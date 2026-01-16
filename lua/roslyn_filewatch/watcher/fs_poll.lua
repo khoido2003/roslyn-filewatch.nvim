@@ -16,6 +16,8 @@
 ---@field last_events table<number, number>
 ---@field poll_interval number
 ---@field poller_restart_threshold number
+---@field check_sln_changed fun(client_id: number, root: string): boolean|nil Check if solution file changed since last poll
+---@field on_sln_changed fun(client_id: number, sln_path: string)|nil Called when solution file change is detected
 
 local uv = vim.uv or vim.loop
 
@@ -75,8 +77,28 @@ function M.start(client, root, snapshots, deps)
 			-- Incremental scanning: check if we need full scan or partial scan
 			local do_full_scan = true
 			local dirty_dir_list = nil
+			local sln_changed = false
 
-			if deps.should_full_scan and deps.get_dirty_dirs and deps.partial_scan then
+			-- Check if solution file (.slnx/.sln/.slnf) has changed
+			-- This triggers a full rescan when Unity adds new projects to the solution
+			if deps.check_sln_changed then
+				sln_changed = deps.check_sln_changed(client.id, root) or false
+				if sln_changed then
+					if deps.notify then
+						pcall(deps.notify, "Solution file changed, triggering full rescan", vim.log.levels.DEBUG)
+					end
+					-- Force full scan - clear snapshot to ensure all new project directories get scanned
+					do_full_scan = true
+					snapshots[client.id] = {}
+					if deps.on_sln_changed then
+						pcall(deps.on_sln_changed, client.id, root)
+					end
+				end
+			end
+
+			-- Only check incremental scan optimization if solution didn't change
+			-- Solution change always forces a full rescan
+			if not sln_changed and deps.should_full_scan and deps.get_dirty_dirs and deps.partial_scan then
 				do_full_scan = deps.should_full_scan(client.id)
 
 				if not do_full_scan then

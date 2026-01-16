@@ -376,4 +376,34 @@ function M.get_watch_dirs(root)
 	return nil -- No .sln/.slnx or .csproj found, use full scan
 end
 
+--- Get solution file information including path, type, and modification time
+--- Used for change detection to trigger rescans when .slnx is modified
+---@param root string Root directory path
+---@return { path: string, type: "sln"|"slnx"|"slnf", mtime: number }|nil sln_info Solution info or nil if not found
+function M.get_sln_info(root)
+	if not root or root == "" then
+		return nil
+	end
+
+	local sln_path, sln_type = M.find_sln(root)
+	if not sln_path then
+		return nil
+	end
+
+	-- Get the modification time of the solution file
+	local stat = uv.fs_stat(sln_path)
+	if not stat then
+		return nil
+	end
+
+	-- Use mtime in nanoseconds for precision
+	local mtime = stat.mtime and (stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)) or 0
+
+	return {
+		path = sln_path,
+		type = sln_type,
+		mtime = mtime,
+	}
+end
+
 return M
