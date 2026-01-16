@@ -657,8 +657,86 @@ function M.start(client)
 					end
 				end)
 			else
-				vim.schedule(function()
-					vim.notify("[roslyn-filewatch] No solution file found in: " .. root, vim.log.levels.WARN)
+				-- No solution file found - check for csproj-only project
+				-- This handles simple C# console projects without .sln files
+				notify("[SLN] No solution file found, checking for csproj-only project", vim.log.levels.DEBUG)
+
+				-- Async scan for csproj files and set up tracking
+				scan_csproj_async(root, function(csproj_files)
+					if not csproj_files or vim.tbl_count(csproj_files) == 0 then
+						vim.schedule(function()
+							vim.notify("[roslyn-filewatch] No solution or csproj files found in: " .. root, vim.log.levels.WARN)
+						end)
+						return
+					end
+
+					-- Set up csproj tracking (csproj_only mode - no solution path)
+					sln_mtimes[client.id] = {
+						path = nil, -- No solution file
+						mtime = 0,
+						csproj_files = csproj_files,
+						csproj_only = true, -- Flag to identify csproj-only mode
+					}
+
+					-- HELPER: Ensure path is canonical for Roslyn on Windows
+					local function to_roslyn_path(p)
+						p = normalize_path(p)
+						if vim.loop.os_uname().sysname == "Windows_NT" then
+							p = p:gsub("^(%a):", function(l)
+								return l:upper() .. ":"
+							end)
+							p = p:gsub("/", "\\")
+						end
+						return p
+					end
+
+					-- Collect all csproj paths for project/open notification
+					local project_paths = {}
+					for csproj_path, _ in pairs(csproj_files) do
+						table.insert(project_paths, to_roslyn_path(csproj_path))
+					end
+
+					if #project_paths > 0 then
+						vim.schedule(function()
+							-- Find matching Roslyn clients and send project/open
+							local clients_list = vim.lsp.get_clients()
+							for _, c in ipairs(clients_list) do
+								if vim.tbl_contains(config.options.client_names, c.name) then
+									local project_uris = vim.tbl_map(function(p)
+										return vim.uri_from_fname(p)
+									end, project_paths)
+
+									pcall(function()
+										c:notify("project/open", {
+											projects = project_uris,
+										})
+									end)
+
+									notify(
+										"[CSPROJ] Sent project/open for " .. #project_paths .. " csproj file(s)",
+										vim.log.levels.DEBUG
+									)
+
+									-- Trigger diagnostic refresh after a delay
+									vim.defer_fn(function()
+										if c.is_stopped and c.is_stopped() then
+											return
+										end
+										local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
+										for _, buf in ipairs(attached_bufs or {}) do
+											if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+												pcall(function()
+													c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
+														textDocument = vim.lsp.util.make_text_document_params(buf),
+													}, nil, buf)
+												end)
+											end
+										end
+									end, 2000)
+								end
+							end
+						end)
+					end
 				end)
 			end
 		else
@@ -740,15 +818,18 @@ function M.start(client)
 	end
 	pollers[client.id] = poller
 
-	-- Create a separate timer to check for solution file changes
+	-- Create a separate timer to check for solution/csproj file changes
 	-- This is needed because fs_poll only fires when root directory stat changes,
-	-- not when files inside (like .slnx) are modified
+	-- not when files inside (like .slnx or .csproj) are modified
 	if config.options.solution_aware and sln_mtimes[client.id] then
 		local sln_timer = uv.new_timer()
 		if sln_timer then
-			-- vim.schedule(function()
-			-- 	vim.notify("[roslyn-filewatch] Started solution file watcher (poll: " .. POLL_INTERVAL .. "ms)", vim.log.levels.INFO)
-			-- end)
+			local is_csproj_only = sln_mtimes[client.id].csproj_only == true
+			notify(
+				"[PROJECT] Started project watcher (mode: " .. (is_csproj_only and "csproj-only" or "solution") .. ")",
+				vim.log.levels.DEBUG
+			)
+
 			sln_timer:start(POLL_INTERVAL, POLL_INTERVAL, function()
 				-- Safety check: stop if client stopped
 				if client.is_stopped and client.is_stopped() then
@@ -760,10 +841,100 @@ function M.start(client)
 					return
 				end
 
-				-- ASYNC Solution File Check
-				-- Use cached path directly - NO directory scan!
 				local cached = sln_mtimes[client.id]
-				if not cached or not cached.path then
+				if not cached then
+					return
+				end
+
+				-- HELPER: Ensure path is canonical for Roslyn on Windows
+				local function to_roslyn_path(p)
+					p = normalize_path(p)
+					if vim.loop.os_uname().sysname == "Windows_NT" then
+						p = p:gsub("^(%a):", function(l)
+							return l:upper() .. ":"
+						end)
+						p = p:gsub("/", "\\")
+					end
+					return p
+				end
+
+				-- CSPROJ-ONLY MODE: Just poll for new csproj files
+				if cached.csproj_only then
+					-- Async scan for new csproj files
+					scan_csproj_async(root, function(collected_mtimes)
+						local sln_info = sln_mtimes[client.id]
+						if not sln_info then
+							return
+						end
+
+						local previous_csproj = sln_info.csproj_files or {}
+						local new_projects_list = {}
+						local current_csproj_set = {}
+						local new_projects_count = 0
+
+						for internal_path, current_mtime_sec in pairs(collected_mtimes) do
+							current_csproj_set[internal_path] = current_mtime_sec
+
+							local old_mtime_sec = previous_csproj[internal_path]
+							if not old_mtime_sec or old_mtime_sec ~= current_mtime_sec then
+								local roslyn_path = to_roslyn_path(internal_path)
+								table.insert(new_projects_list, roslyn_path)
+								new_projects_count = new_projects_count + 1
+							end
+						end
+
+						-- Update tracking set
+						if sln_mtimes[client.id] then
+							sln_mtimes[client.id].csproj_files = current_csproj_set
+						end
+
+						-- Notify Roslyn if new projects found
+						if new_projects_count > 0 then
+							vim.schedule(function()
+								local clients_list = vim.lsp.get_clients()
+								for _, c in ipairs(clients_list) do
+									if vim.tbl_contains(config.options.client_names, c.name) then
+										local project_uris = vim.tbl_map(function(p)
+											return vim.uri_from_fname(p)
+										end, new_projects_list)
+
+										pcall(function()
+											c:notify("project/open", {
+												projects = project_uris,
+											})
+										end)
+
+										notify(
+											"[CSPROJ] Detected " .. new_projects_count .. " new/changed csproj file(s)",
+											vim.log.levels.DEBUG
+										)
+
+										-- Trigger diagnostic refresh
+										vim.defer_fn(function()
+											if c.is_stopped and c.is_stopped() then
+												return
+											end
+											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
+											for _, buf in ipairs(attached_bufs or {}) do
+												if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+													pcall(function()
+														c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
+															textDocument = vim.lsp.util.make_text_document_params(buf),
+														}, nil, buf)
+													end)
+												end
+											end
+										end, 2000)
+									end
+								end
+							end)
+						end
+					end)
+					return -- Early return for csproj-only mode
+				end
+
+				-- SOLUTION MODE: Check solution file first, then scan csproj
+				if not cached.path then
 					return
 				end
 
@@ -794,18 +965,6 @@ function M.start(client)
 						local sln_info = sln_mtimes[client.id]
 						if not sln_info or not sln_info.path then
 							return
-						end
-
-						-- HELPER: Ensure path is canonical for Roslyn on Windows
-						local function to_roslyn_path(p)
-							p = normalize_path(p)
-							if vim.loop.os_uname().sysname == "Windows_NT" then
-								p = p:gsub("^(%a):", function(l)
-									return l:upper() .. ":"
-								end)
-								p = p:gsub("/", "\\")
-							end
-							return p
 						end
 
 						local previous_csproj = sln_info.csproj_files or {}
@@ -885,16 +1044,15 @@ function M.start(client)
 			sln_poll_timers[client.id] = sln_timer
 		else
 			vim.schedule(function()
-				vim.notify("[roslyn-filewatch] Failed to create solution timer", vim.log.levels.ERROR)
+				vim.notify("[roslyn-filewatch] Failed to create project timer", vim.log.levels.ERROR)
 			end)
 		end
 	else
 		if not config.options.solution_aware then
 			notify("[SLN] Timer not started: solution_aware disabled", vim.log.levels.DEBUG)
 		elseif not sln_mtimes[client.id] then
-			vim.schedule(function()
-				vim.notify("[roslyn-filewatch] Timer not started: no solution file tracked", vim.log.levels.WARN)
-			end)
+			-- This should no longer happen since we now set sln_mtimes for csproj-only projects
+			notify("[PROJECT] Timer not started: no project files tracked", vim.log.levels.DEBUG)
 		end
 	end
 
