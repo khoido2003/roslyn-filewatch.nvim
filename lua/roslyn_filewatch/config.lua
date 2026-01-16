@@ -18,10 +18,19 @@
 ---@field solution_aware? boolean Parse .sln/.slnx/.slnf to limit watch scope (default: true)
 ---@field respect_gitignore? boolean Respect .gitignore patterns (default: true)
 ---@field activity_quiet_period? number Seconds of quiet before allowing scans (default: 5)
+---@field preset? string Project preset: "auto", "unity", "console", "large", "none"
+---@field deferred_loading? boolean Defer project/open until first C# file opened
+---@field deferred_loading_delay_ms? number Delay before sending deferred project/open (default: 500)
+---@field diagnostic_throttling? roslyn_filewatch.DiagnosticThrottlingOptions
 
 ---@class roslyn_filewatch.BatchingOptions
 ---@field enabled? boolean Enable event batching
 ---@field interval? number Batch interval in ms
+
+---@class roslyn_filewatch.DiagnosticThrottlingOptions
+---@field enabled? boolean Enable diagnostic throttling (default: true)
+---@field debounce_ms? number Debounce interval for diagnostics (default: 500)
+---@field visible_only? boolean Only request diagnostics for visible buffers (default: true)
 
 local M = {}
 
@@ -138,14 +147,66 @@ M.options = {
 	--- Higher values prevent freezes during heavy file operations (Unity regeneration).
 	--- Default: 5 seconds (Unity regeneration can take 5-30+ seconds)
 	activity_quiet_period = 5,
+
+	--- Project preset for optimized settings based on project type.
+	--- "auto" = auto-detect (Unity, large, console)
+	--- "unity" = optimized for Unity projects (longer delays, more batching)
+	--- "console" = optimized for small projects (faster, more responsive)
+	--- "large" = balanced for large non-Unity solutions
+	--- "none" = use only explicit settings
+	preset = "auto",
+
+	--- Defer project/open notifications until first C# file is opened.
+	--- Helps reduce startup time for large solutions.
+	deferred_loading = false,
+
+	--- Delay (ms) before sending deferred project/open notification
+	deferred_loading_delay_ms = 500,
+
+	--- Diagnostic throttling options to reduce LSP load during heavy editing
+	diagnostic_throttling = {
+		enabled = true,
+		debounce_ms = 500, -- Debounce diagnostics by 500ms
+		visible_only = true, -- Only request diagnostics for visible buffers
+	},
 }
+
+-- Track detected root for preset application
+M._detected_root = nil
 
 --- Setup the configuration with user options
 ---@param opts? roslyn_filewatch.Options
 function M.setup(opts)
+	-- First merge user options with defaults
 	M.options = vim.tbl_deep_extend("force", M.options, opts or {})
 
 	-- Build cached lookup sets for O(1) performance
+	M._rebuild_cache()
+end
+
+--- Apply preset based on root directory (called when client starts)
+---@param root string Root directory for preset detection
+function M.apply_preset_for_root(root)
+	if not root then
+		return
+	end
+
+	M._detected_root = root
+
+	local preset_name = M.options.preset or "auto"
+	if preset_name == "none" then
+		return
+	end
+
+	local ok, presets = pcall(require, "roslyn_filewatch.presets")
+	if not ok or not presets then
+		return
+	end
+
+	-- Apply preset and merge with current options
+	M.options = presets.apply(preset_name, M.options, root)
+
+	-- Rebuild cache after preset application
 	M._rebuild_cache()
 end
 

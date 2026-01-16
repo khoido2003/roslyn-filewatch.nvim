@@ -5,6 +5,45 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0] - 2026-01-17
+
+### Added
+- **Deferred Project Loading**  
+  - New `deferred_loading` option delays `project/open` until the user opens a `.cs` file  
+  - Optional `deferred_loading_delay_ms` controls delay before first project load  
+  - Reduces startup time for large solutions and Unity projects
+
+- **Solution Explorer**  
+  - New `:RoslynExplorer` command provides a solution/project/file picker  
+  - Telescope integration when available, fallback to `vim.ui.select`  
+  - Hierarchical navigation: Solution → Projects → Files
+
+- **Unity-Optimized Presets**  
+  - New presets module with `"unity"` and `"console"` configurations  
+  - `"auto"` preset detection based on project type  
+  - Unity preset increases `activity_quiet_period`, batching interval, polling interval, and adds Unity-specific ignored directories
+
+- **Project Reload Command**  
+  - New `:RoslynReload` command to force Roslyn to reload all tracked `.csproj` files  
+  - Sends fresh `project/open` messages without restarting the LSP client
+
+- **Diagnostic Throttling**  
+  - New `diagnostic_throttling` config block  
+  - Debounces diagnostic requests and restricts updates to visible buffers  
+  - Automatically throttles diagnostics during heavy file activity or Unity regeneration
+
+### Changed
+- Updated `config.lua`, `watcher.lua`, and `init.lua` to integrate deferred loading, presets, diagnostic throttling, and new commands
+- Watcher now respects throttling state when dispatching file-change events
+- Unified project reload and deferred load logic under shared notification pathways
+
+### New Files
+- `explorer.lua` — Solution explorer implementation with Telescope support  
+- `presets.lua` — Unity/console presets and auto-detection logic  
+- `diagnostics.lua` — Diagnostic request debouncing and throttling
+
+---
+
 ## [v0.2.4] - 2026-01-16
 
 ### Fixed

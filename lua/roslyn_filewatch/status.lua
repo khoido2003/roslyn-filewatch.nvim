@@ -176,6 +176,16 @@ function M.show()
 	config_line("Gitignore     ", status.config_summary.respect_gitignore)
 	config_line("Force polling ", status.config_summary.force_polling)
 	config_line("Batching      ", status.config_summary.batching)
+	config_line("Diag throttle ", config.options.diagnostic_throttling and config.options.diagnostic_throttling.enabled)
+
+	-- Show applied preset
+	local applied_preset = config.options._applied_preset
+	if applied_preset then
+		echo_multi({
+			{ "  Preset        : ", "Normal" },
+			{ applied_preset, "String" },
+		})
+	end
 
 	if #status.clients == 0 then
 		echo("")

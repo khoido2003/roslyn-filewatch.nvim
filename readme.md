@@ -1,66 +1,74 @@
-
 # roslyn-filewatch.nvim
 
-A lightweight file-watching plugin for Neovim that keeps the **Roslyn LSP** in sync with file changes.
+A lightweight file-watching and project-sync plugin for Neovim that keeps the **Roslyn LSP** up-to-date with file changes.
 
 ⚡ **Why?**  
-Roslyn doesn’t watch your project files by default in Neovim. Without this, you often need to `:edit!` or restart the LSP when adding/removing/modifying files.  
-This plugin adds a proper **file system watcher** so Roslyn always stays updated.
+Roslyn does not watch your project files by default in Neovim. Without this, you often need to `:edit!` or restart the LSP to make Roslyn notice file creation, deletion, rename, or solution changes.  
+This plugin adds a robust **cross-platform file watcher** plus new project-sync and navigation features.
 
 ---
 
 ## ✨ Features
 
+### 🗂️ File Watching Core
 - Watches your project root recursively using Neovim’s built-in `vim.uv`
-- Detects file **create / change / delete** using `uv.fs_event` and `uv.fs_poll`.
-- Detects **file renames** reliably (`didRenameFiles`).
-- Sends `workspace/didChangeWatchedFiles` notifications to Roslyn
-- **Solution-aware watching**: Parses `.sln`, `.slnx`, and `.slnf` files to limit watch scope
+- Detects file **create / change / delete** using `uv.fs_event` and `uv.fs_poll`
+- Reliable **rename detection** with delete+create pairing
+- Sends:
+  - `workspace/didChangeWatchedFiles`
+  - `workspace/didRenameFiles`
+- Automatically cleans up watchers when LSP detaches
+- **Batching** to reduce notification spam
+- **Watchdog** detects dropped events and restarts watcher
+- Automatically closes deleted buffers
+- Solution-aware watching:
+  - Parses `.sln`, `.slnx`, `.slnf` to scope watch area to project folders
 
-- Configurable:
-  - Ignore dirs (`bin`, `obj`, `.git`, etc.)
-  - Glob pattern exclusions (like VS Code's `files.watcherExclude`)
-  - File extensions to watch (`.cs`, `.csproj`, `.sln`, `.slnx`, `.slnf`, …)
+### 🆕 New in v0.3.0
 
-- Auto cleans up watchers when LSP detaches
-- **Batching** of events to reduce spam.
-- **Watchdog** auto-resyncs when events are missed.
-- Closes buffers for deleted files automatically.
-- Works seamlessly in Unity projects with Roslyn.
+#### ⏳ Deferred Project Loading
+Roslyn project loading is delayed until you actually open a `.cs` file.  
+This improves startup time drastically, especially for **Unity** or large solutions.
+
+#### 🧭 Solution Explorer (`:RoslynExplorer`)
+A minimal tree picker for navigating solution → projects → files.
+
+#### 🎮 Unity-Optimized Presets
+Built-in presets auto-tune behavior for Unity:
+- reduced event frequency  
+- smarter batching  
+- ignores Unity noise  
+
+#### 📡 Diagnostic Throttling
+Smooths Roslyn diagnostic spam during heavy operations.
+
+#### 🔄 Project Reload Command
+Force Roslyn to reload all `.csproj` files without restarting the LSP: `:RoslynReload`
 
 ---
 
 ## 🔌 Requirements
 
-This plugin does **not** provide a Roslyn language server on its own.  
-You must already have an **LSP client for Roslyn** installed and configured.
-
-You can use one of the following:
-
-- [roslyn.nvim](https://github.com/seblyng/roslyn.nvim) — A Neovim plugin that manages Roslyn LSP automatically.  
-- [nvim-lspconfig (roslyn_ls)](https://github.com/neovim/nvim-lspconfig/blob/master/doc/configs.md#roslyn_ls) — Manual configuration for Roslyn LSP via `nvim-lspconfig`.
-
-The file watcher integrates with whichever Roslyn LSP client you are using,  
-and will forward file system events (`workspace/didChangeWatchedFiles`, `workspace/didRenameFiles`) to keep Roslyn in sync.
+Roslyn LSP must already be installed (`roslyn.nvim` or `nvim-lspconfig`).
 
 ---
 
 ## 📦 Installation
 
-### Using [lazy.nvim](https://github.com/folke/lazy.nvim)
+### lazy.nvim
 
 ```lua
 {
-    "khoido2003/roslyn-filewatch.nvim",
-    config = function()
-      require("roslyn_filewatch").setup({})
-   end,
-},
+  "khoido2003/roslyn-filewatch.nvim",
+  config = function()
+    require("roslyn_filewatch").setup()
+  end,
+}
 ```
 
-### Using [packer.nvim](https://github.com/wbthomason/packer.nvim?utm_source=chatgpt.com)
+### packer.nvim
 
-```lua 
+```lua
 use {
   "khoido2003/roslyn-filewatch.nvim",
   config = function()
@@ -69,168 +77,68 @@ use {
 }
 ```
 
-## Configuration
+---
 
-```lua 
+## ⚙️ Configuration
+
+```lua
 require("roslyn_filewatch").setup({
   client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
-  ignore_dirs = {
-    "Library",
-    "Temp",
-    "Logs",
-    "Obj",
-    "Bin",
-    ".git",
-    ".idea",
-    ".vs",
-  },
+  preset = "auto",
+  deferred_loading = true,
+  deferred_loading_delay_ms = 150,
 
-  -- Glob pattern exclusions (gitignore-style, like VS Code's files.watcherExclude)
-  -- Empty by default. Examples:
-  ignore_patterns = {
-    -- "*.generated.cs",      -- exclude generated files
-    -- "**/*.Designer.cs",    -- exclude designer files anywhere
-    -- "**/obj/**",           -- exclude obj directory contents
-    -- "!**/important/**",    -- but include important directory (negation)
-  },
-
+  ignore_dirs = { "Library", "Temp", "Logs", "Obj", "Bin", ".git", ".idea", ".vs" },
+  ignore_patterns = {},
   watch_extensions = { ".cs", ".csproj", ".sln", ".slnx", ".slnf", ".props", ".targets" },
-  batching = {
+
+  batching = { enabled = true, interval = 300 },
+
+  poll_interval = 3000,
+  poller_restart_threshold = 2,
+  watchdog_idle = 60,
+  rename_detection_ms = 300,
+  processing_debounce_ms = 80,
+
+  solution_aware = true,
+  respect_gitignore = true,
+
+  diagnostic_throttling = {
     enabled = true,
-    interval = 300,
+    debounce_ms = 150,
+    visible_only = true,
   },
 
-  poll_interval = 3000,            -- fs_poll interval (ms)
-  poller_restart_threshold = 2,    -- restart poller if idle for N seconds
-  watchdog_idle = 60,              -- restart watcher if idle for N seconds
-  rename_detection_ms = 300,       -- window to detect delete+create → rename
-  processing_debounce_ms = 80,     -- debounce high-frequency events
-
-  -- Solution-aware watching: parse .sln/.slnx/.slnf to limit watch scope to project dirs only
-  -- Reduces I/O significantly on large repositories. Set to false to scan entire root.
-  solution_aware = true,           -- (default: true)
-
-  -- Respect .gitignore patterns when scanning files.
-  -- Automatically skips files matching .gitignore rules.
-  respect_gitignore = true,        -- (default: true)
-
-  -- Control verbosity of plugin notifications:
-  --   TRACE < DEBUG < INFO < WARN < ERROR
-  -- Default: WARN (only warnings & errors are shown)
   log_level = vim.log.levels.WARN,
 })
 ```
 
 ---
 
-## Project Structure
-
-```
-lua/roslyn_filewatch/
-├── watcher.lua        # Core orchestrator, starts/stops subsystems per client
-├── watcher/
-│   ├── fs_event.lua   # Low-level uv.fs_event handling
-│   ├── fs_poll.lua    # Polling fallback for platforms with weak fs_event
-│   ├── watchdog.lua   # Periodic resync & restart if no events received
-│   ├── autocmds.lua   # Neovim autocmd integration (BufWrite, BufDelete, etc.)
-│   ├── rename.lua     # Rename detection (Deleted+Created → didRenameFiles)
-│   ├── snapshot.lua   # Snapshot tracking of file tree state
-│   ├── sln_parser.lua # Solution file parser for solution-aware watching
-│   ├── gitignore.lua  # Gitignore pattern parser and matcher
-│   ├── notify.lua     # Thin wrapper for LSP + user notifications
-│   └── utils.lua      # Path normalization, stat helpers, etc.
-```
-
----
-
-## 🔍 How It Works
-
-This plugin keeps Roslyn aware of **file system changes** that Neovim or Unity trigger:
-
-1. **fs_event** (`uv.fs_event`)  
-   - Listens for low-level file changes.  
-   - Fast and efficient where supported.  
-
-2. **fs_poll** (`uv.fs_poll`)  
-   - Polls periodically as a fallback.  
-   - Detects missed events and validates file integrity.  
-
-3. **Snapshots** (`snapshot.lua`)  
-   - Keeps an in-memory map of files and their metadata (mtime, inode, size).  
-   - Allows diffing to detect *created*, *deleted*, or *changed* files.  
-
-4. **Rename detection** (`rename.lua`)  
-   - If a file is deleted and a new one created within a short window → treat as **rename**.  
-   - Sends Roslyn `workspace/didRenameFiles` instead of separate delete/create.  
-
-5. **Batching**  
-   - Groups multiple events into a single LSP notification to reduce traffic.  
-
-6. **Watchdog**  
-   - Restarts the watcher if no events are seen for too long (e.g. Unity reload).  
-   - Ensures resilience against dropped events.  
-
-7. **Autocmds**  
-   - Hooks into Neovim’s buffer lifecycle (`BufWritePost`, `BufDelete`, etc.).  
-   - Keeps open buffers and file state in sync.  
-
-8. **Notifications**  
-   - Translates events into Roslyn-compatible LSP notifications:  
-     - `workspace/didChangeWatchedFiles`  
-     - `workspace/didRenameFiles`
-
----
-
-## 🔧 Commands
+## 🧭 Commands
 
 | Command | Description |
 |---------|-------------|
-| `:RoslynFilewatchStatus` | Show current watcher status including clients, watch mode, file count, and solution info |
-
-You can also call `require("roslyn_filewatch").status()` programmatically.
+| `:RoslynFilewatchStatus` | Show watcher & solution status |
+| `:RoslynExplorer` | Open solution browser |
+| `:RoslynReload` | Reload all project files |
 
 ---
 
 ## 🐛 Troubleshooting
 
-- **The plugin doesn’t seem to do anything?**
-  - Run `:LspInfo` and make sure the active LSP name matches one of the entries in `client_names`.
-  - Example: if your LSP shows up as `roslyn_ls`, ensure `client_names = { "roslyn_ls" }`.
-
-- **On Linux, file watchers stop working after deleting directories.**
-  - This is a known behavior of `libuv`. The plugin automatically reinitializes the watcher when this happens.
-
-- **Performance concerns on large projects.**
-  - Keep batching enabled (`enabled = true`) to reduce spammy notifications.
-  - Tune `interval` for your workflow (e.g., 200–500 ms for very large solutions).
-
-
----
-
-## ⚠️ Known Limitations
-
-- On very large repositories (tens of thousands of files):  
-  - Initial snapshot scans can cause **short CPU spikes** (UI may freeze briefly).  
-  - Memory usage scales with project size (released when projects close).  
-
-- During heavy operations (e.g. `git checkout`, Unity regenerating solution files):  
-  - Expect a burst of events. With batching enabled, these are grouped safely,  
-    but you may notice **slight delays** before Roslyn sees all updates.  
-
-- These spikes **will not crash Neovim**, but may temporarily impact responsiveness.  
-
-For most Unity/.NET projects, this plugin is **good enough** and keeps Roslyn in sync without manual restarts.
-
+- Ensure client name matches `client_names` in config.
+- Watchdog auto-restarts watchers on dropped events.
+- Use Unity preset for large repos.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT License
 
 ---
 
 ## ❤️ Acknowledgements
 
-- Inspired by the pain of using Roslyn in Neovim without file watchers 😅  
-- Thanks to Neovim’s `vim.uv` for making cross-platform file watching possible.
+Made to fix the pain of Roslyn not watching files in Neovim.

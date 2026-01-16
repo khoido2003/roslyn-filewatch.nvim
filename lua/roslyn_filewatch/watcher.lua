@@ -121,6 +121,25 @@ local sln_mtimes = {}
 ---@type table<number, uv_timer_t>
 local sln_poll_timers = {}
 
+-- Deferred loading state: pending project/open notifications
+---@type table<number, { projects: string[], root: string }>
+local deferred_projects = {}
+-- Track if deferred loading has been triggered for a client
+---@type table<number, boolean>
+local deferred_triggered = {}
+
+-- Diagnostics module (lazy loaded)
+local diagnostics_mod = nil
+local function get_diagnostics_mod()
+	if not diagnostics_mod then
+		local ok, mod = pcall(require, "roslyn_filewatch.diagnostics")
+		if ok then
+			diagnostics_mod = mod
+		end
+	end
+	return diagnostics_mod
+end
+
 -- Register state references with status module for RoslynFilewatchStatus command
 pcall(function()
 	local status_mod = require("roslyn_filewatch.status")
@@ -481,6 +500,13 @@ function M.start(client)
 	end
 	root = normalize_path(root)
 
+	-- Apply preset based on project type (Unity, console, large)
+	config.apply_preset_for_root(root)
+	local applied_preset = config.options._applied_preset
+	if applied_preset then
+		notify("[PRESET] Applied '" .. applied_preset .. "' preset for project", vim.log.levels.DEBUG)
+	end
+
 	--- Restart watcher with backoff and optional fs_event disable flag
 	---@param reason? string
 	---@param delay_ms? number
@@ -665,7 +691,10 @@ function M.start(client)
 				scan_csproj_async(root, function(csproj_files)
 					if not csproj_files or vim.tbl_count(csproj_files) == 0 then
 						vim.schedule(function()
-							vim.notify("[roslyn-filewatch] No solution or csproj files found in: " .. root, vim.log.levels.WARN)
+							vim.notify(
+								"[roslyn-filewatch] No solution or csproj files found in: " .. root,
+								vim.log.levels.WARN
+							)
 						end)
 						return
 					end
@@ -916,7 +945,9 @@ function M.start(client)
 											end
 											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
 											for _, buf in ipairs(attached_bufs or {}) do
-												if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+												if
+													vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)
+												then
 													pcall(function()
 														c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
 															textDocument = vim.lsp.util.make_text_document_params(buf),
@@ -1105,10 +1136,165 @@ function M.start(client)
 				-- Clear incremental scanning state
 				dirty_dirs[client.id] = nil
 				needs_full_scan[client.id] = nil
+				-- Clear deferred loading state
+				deferred_projects[client.id] = nil
+				deferred_triggered[client.id] = nil
+				-- Clear diagnostics state
+				local diag_mod = get_diagnostics_mod()
+				if diag_mod and diag_mod.clear_client then
+					pcall(diag_mod.clear_client, client.id)
+				end
 				-- Cleanup handles & timers
 				cleanup_client(client.id)
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
 				return true -- Remove this autocmd after cleanup
+			end
+		end,
+	})
+end
+
+--- Reload all tracked projects for all active Roslyn clients
+--- Forces Roslyn to refresh project information and diagnostics
+function M.reload_projects()
+	local clients = vim.lsp.get_clients()
+	local reloaded = 0
+
+	-- HELPER: Ensure path is canonical for Roslyn on Windows
+	local function to_roslyn_path(p)
+		p = normalize_path(p)
+		if vim.loop.os_uname().sysname == "Windows_NT" then
+			p = p:gsub("^(%a):", function(l)
+				return l:upper() .. ":"
+			end)
+			p = p:gsub("/", "\\")
+		end
+		return p
+	end
+
+	for _, client in ipairs(clients) do
+		if vim.tbl_contains(config.options.client_names, client.name) then
+			local cid = client.id
+			local sln_info = sln_mtimes[cid]
+
+			if sln_info and sln_info.csproj_files then
+				local project_paths = {}
+				for csproj_path, _ in pairs(sln_info.csproj_files) do
+					table.insert(project_paths, to_roslyn_path(csproj_path))
+				end
+
+				if #project_paths > 0 then
+					local project_uris = vim.tbl_map(function(p)
+						return vim.uri_from_fname(p)
+					end, project_paths)
+
+					-- Send project/open notification
+					pcall(function()
+						client:notify("project/open", {
+							projects = project_uris,
+						})
+					end)
+
+					reloaded = reloaded + 1
+					notify("[RELOAD] Sent project/open for " .. #project_paths .. " project(s)", vim.log.levels.DEBUG)
+
+					-- Trigger diagnostic refresh after a delay
+					vim.defer_fn(function()
+						if client.is_stopped and client.is_stopped() then
+							return
+						end
+
+						-- Use throttled diagnostics if available
+						local diag_mod = get_diagnostics_mod()
+						if diag_mod and diag_mod.request_visible_diagnostics then
+							diag_mod.request_visible_diagnostics(cid)
+						else
+							-- Fallback: request diagnostics for attached buffers
+							local attached_bufs = vim.lsp.get_buffers_by_client_id(cid)
+							for _, buf in ipairs(attached_bufs or {}) do
+								if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+									pcall(function()
+										client:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
+											textDocument = vim.lsp.util.make_text_document_params(buf),
+										}, nil, buf)
+									end)
+								end
+							end
+						end
+					end, 2000)
+				end
+			end
+		end
+	end
+
+	if reloaded > 0 then
+		vim.notify("[roslyn-filewatch] Reloaded projects for " .. reloaded .. " client(s)", vim.log.levels.INFO)
+	else
+		vim.notify("[roslyn-filewatch] No projects to reload", vim.log.levels.WARN)
+	end
+end
+
+--- Trigger deferred project loading for a client
+--- Called when first C# file is opened
+---@param client_id number
+local function trigger_deferred_loading(client_id)
+	if deferred_triggered[client_id] then
+		return -- Already triggered
+	end
+
+	local pending = deferred_projects[client_id]
+	if not pending or #pending.projects == 0 then
+		return
+	end
+
+	deferred_triggered[client_id] = true
+
+	local delay = config.options.deferred_loading_delay_ms or 500
+
+	vim.defer_fn(function()
+		local client = vim.lsp.get_client_by_id(client_id)
+		if not client or (client.is_stopped and client.is_stopped()) then
+			return
+		end
+
+		local project_uris = vim.tbl_map(function(p)
+			return vim.uri_from_fname(p)
+		end, pending.projects)
+
+		pcall(function()
+			client:notify("project/open", {
+				projects = project_uris,
+			})
+		end)
+
+		notify("[DEFERRED] Sent project/open for " .. #pending.projects .. " project(s)", vim.log.levels.DEBUG)
+
+		-- Trigger diagnostic refresh
+		vim.defer_fn(function()
+			if client.is_stopped and client.is_stopped() then
+				return
+			end
+			local diag_mod = get_diagnostics_mod()
+			if diag_mod and diag_mod.request_visible_diagnostics then
+				diag_mod.request_visible_diagnostics(client_id)
+			end
+		end, 2000)
+	end, delay)
+end
+
+--- Setup deferred loading autocmd for a client
+---@param client_id number
+---@param root string
+local function setup_deferred_loading_autocmd(client_id)
+	vim.api.nvim_create_autocmd("BufEnter", {
+		group = vim.api.nvim_create_augroup("RoslynFilewatch_Deferred_" .. client_id, { clear = true }),
+		pattern = "*.cs",
+		callback = function()
+			trigger_deferred_loading(client_id)
+			-- Remove this autocmd after triggering
+			if deferred_triggered[client_id] then
+				pcall(function()
+					vim.api.nvim_del_augroup_by_name("RoslynFilewatch_Deferred_" .. client_id)
+				end)
 			end
 		end,
 	})
