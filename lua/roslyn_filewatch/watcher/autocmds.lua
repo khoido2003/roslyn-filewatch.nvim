@@ -117,7 +117,9 @@ function M.start(client, root, snapshots, deps)
 							local found = {}
 							while true do
 								local name, typ = uv.fs_scandir_next(scanner)
-								if not name then break end
+								if not name then
+									break
+								end
 								if typ == "file" and name:match("%.csproj$") then
 									table.insert(found, normalize_path(dir .. "/" .. name))
 								end
@@ -125,7 +127,7 @@ function M.start(client, root, snapshots, deps)
 							callback(found)
 						end)
 					end
-					
+
 					local function search_up_for_csproj(dir)
 						if not dir or dir == "" or not utils.path_starts_with(dir, root) then
 							return -- Reached root or invalid, stop searching
@@ -149,7 +151,7 @@ function M.start(client, root, snapshots, deps)
 							end
 						end)
 					end
-					
+
 					local dir = npath:match("^(.+)/[^/]+$")
 					search_up_for_csproj(dir)
 				end

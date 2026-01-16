@@ -29,7 +29,7 @@ local notify_roslyn_renames = notify_mod.roslyn_renames
 ---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
 local function scan_csproj_async(root, callback)
 	root = normalize_path(root)
-	
+
 	-- Use async scandir
 	uv.fs_scandir(root, function(err, scanner)
 		if err or not scanner then
@@ -38,29 +38,31 @@ local function scan_csproj_async(root, callback)
 			end)
 			return
 		end
-		
+
 		-- Collect csproj files
 		local csproj_paths = {}
 		while true do
 			local name, typ = uv.fs_scandir_next(scanner)
-			if not name then break end
-			
+			if not name then
+				break
+			end
+
 			if typ == "file" and name:match("%.csproj$") then
 				table.insert(csproj_paths, normalize_path(root .. "/" .. name))
 			end
 		end
-		
+
 		if #csproj_paths == 0 then
 			vim.schedule(function()
 				callback({})
 			end)
 			return
 		end
-		
+
 		-- Async stat each csproj file
 		local results = {}
 		local pending = #csproj_paths
-		
+
 		for _, path in ipairs(csproj_paths) do
 			uv.fs_stat(path, function(stat_err, stat)
 				if not stat_err and stat then
@@ -68,7 +70,7 @@ local function scan_csproj_async(root, callback)
 				else
 					results[path] = 0
 				end
-				
+
 				pending = pending - 1
 				if pending == 0 then
 					vim.schedule(function()
@@ -645,9 +647,9 @@ function M.start(client)
 				sln_mtimes[client.id] = {
 					path = sln_info.path,
 					mtime = sln_info.mtime,
-					csproj_files = nil,  -- Will be populated async
+					csproj_files = nil, -- Will be populated async
 				}
-				
+
 				-- Async scan csproj files (non-blocking)
 				scan_csproj_async(root, function(initial_csproj)
 					if sln_mtimes[client.id] then
@@ -707,8 +709,8 @@ function M.start(client)
 
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
-		scan_tree_async = snapshot_mod.scan_tree_async,  -- NEW: Async non-blocking scan
-		is_scanning = snapshot_mod.is_scanning,          -- NEW: Check scan in progress
+		scan_tree_async = snapshot_mod.scan_tree_async, -- NEW: Async non-blocking scan
+		is_scanning = snapshot_mod.is_scanning, -- NEW: Check scan in progress
 		partial_scan = snapshot_mod.partial_scan,
 		get_dirty_dirs = get_and_clear_dirty_dirs,
 		should_full_scan = should_full_scan,
@@ -773,7 +775,7 @@ function M.start(client)
 
 					-- Calculate mtime in nanoseconds for precision
 					local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
-					
+
 					-- Check if mtime changed
 					if current_mtime == cached.mtime then
 						return -- No change, skip
@@ -781,10 +783,10 @@ function M.start(client)
 
 					-- Update cached mtime (preserve csproj_files)
 					local old_csproj = cached.csproj_files
-					sln_mtimes[client.id] = { 
-						path = cached.path, 
-						mtime = current_mtime, 
-						csproj_files = old_csproj 
+					sln_mtimes[client.id] = {
+						path = cached.path,
+						mtime = current_mtime,
+						csproj_files = old_csproj,
 					}
 
 					-- Solution changed! Trigger async project scan
@@ -816,15 +818,17 @@ function M.start(client)
 
 							for internal_path, current_mtime_sec in pairs(collected_mtimes) do
 								current_csproj_set[internal_path] = current_mtime_sec
-								
+
 								local old_mtime_sec = previous_csproj[internal_path]
-								if sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
+								if
+									sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec)
+								then
 									local roslyn_path = to_roslyn_path(internal_path)
 									table.insert(new_projects_list, roslyn_path)
 									new_projects_count = new_projects_count + 1
 								end
 							end
-							
+
 							-- Init check - first time populating csproj_files
 							if not sln_info.csproj_files then
 								if sln_mtimes[client.id] then
@@ -832,7 +836,7 @@ function M.start(client)
 								end
 								return
 							end
-							
+
 							-- Update tracking set
 							if sln_mtimes[client.id] then
 								sln_mtimes[client.id].csproj_files = current_csproj_set
@@ -852,17 +856,25 @@ function M.start(client)
 												projects = project_uris,
 											})
 										end)
-										
+
 										-- Trigger diagnostic refresh
 										vim.defer_fn(function()
-											if c.is_stopped and c.is_stopped() then return end
+											if c.is_stopped and c.is_stopped() then
+												return
+											end
 											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
 											for _, buf in ipairs(attached_bufs or {}) do
-												if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+												if
+													vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)
+												then
 													pcall(function()
 														c:request(
 															vim.lsp.protocol.Methods.textDocument_diagnostic,
-															{ textDocument = vim.lsp.util.make_text_document_params(buf) },
+															{
+																textDocument = vim.lsp.util.make_text_document_params(
+																	buf
+																),
+															},
 															nil,
 															buf
 														)

@@ -308,7 +308,7 @@ function M.start(client, root, snapshots, deps)
 			end
 
 			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
-			
+
 			-- Use async fs_stat
 			uv.fs_stat(fullpath, function(err, st)
 				vim.schedule(function()
@@ -353,7 +353,11 @@ function M.start(client, root, snapshots, deps)
 									rename_window_ms = rename_window_ms,
 								})
 								if not ok then
-									pcall(notify_fn, "rename_mod.on_delete error: " .. tostring(res), vim.log.levels.ERROR)
+									pcall(
+										notify_fn,
+										"rename_mod.on_delete error: " .. tostring(res),
+										vim.log.levels.ERROR
+									)
 								else
 									buffered = res and true or false
 								end
@@ -368,7 +372,7 @@ function M.start(client, root, snapshots, deps)
 							end
 						end
 					end
-					
+
 					on_done()
 				end)
 			end)

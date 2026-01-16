@@ -86,14 +86,14 @@ function M.start(client, root, snapshots, deps)
 			local current_time = os.time()
 			local time_since_last_event = current_time - last_event_time
 			local activity_quiet_period = deps.activity_quiet_period or 5 -- Default 5 seconds
-			
+
 			-- If we just processed events recently, skip this cycle to let things settle
 			-- This is critical for Unity regeneration which produces many events
 			if time_since_last_event < activity_quiet_period then
 				-- High activity detected - skip this poll cycle
 				return
 			end
-			
+
 			-- Also skip if an async scan is already in progress
 			if deps.is_scanning and deps.is_scanning(root) then
 				return
@@ -148,7 +148,7 @@ function M.start(client, root, snapshots, deps)
 						local async_old_map = snapshots[client.id] or {}
 						local async_evs = {}
 						local async_rename_pairs = {}
-						
+
 						-- Build old identity map
 						local async_old_id_map = {}
 						for path, entry in pairs(async_old_map) do
@@ -157,9 +157,9 @@ function M.start(client, root, snapshots, deps)
 								async_old_id_map[id] = path
 							end
 						end
-						
+
 						local async_processed_old = {}
-						
+
 						-- Detect creates / renames / changes
 						for path, mt in pairs(async_new_map) do
 							local old_mt = async_old_map[path]
@@ -173,12 +173,19 @@ function M.start(client, root, snapshots, deps)
 								else
 									table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 1 })
 								end
-							elseif not (deps.same_file_info and deps.same_file_info(async_old_map[path], async_new_map[path])) then
+							elseif
+								not (
+									deps.same_file_info and deps.same_file_info(
+										async_old_map[path],
+										async_new_map[path]
+									)
+								)
+							then
 								table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 2 })
 							end
 							async_processed_old[path] = true
 						end
-						
+
 						-- Remaining old_map entries are deletes
 						for path, _ in pairs(async_old_map) do
 							if not async_processed_old[path] and async_new_map[path] == nil then
@@ -188,23 +195,27 @@ function M.start(client, root, snapshots, deps)
 								table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 3 })
 							end
 						end
-						
+
 						-- Send renames
 						if #async_rename_pairs > 0 then
 							if deps.notify then
-								pcall(deps.notify, "Async scan detected " .. #async_rename_pairs .. " rename(s)", vim.log.levels.DEBUG)
+								pcall(
+									deps.notify,
+									"Async scan detected " .. #async_rename_pairs .. " rename(s)",
+									vim.log.levels.DEBUG
+								)
 							end
 							if deps.notify_roslyn_renames then
 								pcall(deps.notify_roslyn_renames, async_rename_pairs)
 							end
 						end
-						
+
 						-- Update snapshot and queue events
 						snapshots[client.id] = async_new_map
 						if #async_evs > 0 and deps.queue_events then
 							pcall(deps.queue_events, client.id, async_evs)
 						end
-						
+
 						-- Update last event time
 						if deps.last_events then
 							deps.last_events[client.id] = os.time()
@@ -213,7 +224,7 @@ function M.start(client, root, snapshots, deps)
 					-- Return early - async callback will handle the rest
 					return
 				end
-				
+
 				-- Fallback: synchronous scan (if async not available)
 				new_map = {}
 				local scan_ok, scan_err = pcall(function()
