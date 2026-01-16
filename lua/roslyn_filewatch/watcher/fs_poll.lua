@@ -3,6 +3,8 @@
 
 ---@class roslyn_filewatch.FsPollDeps
 ---@field scan_tree fun(root: string, out_map: table<string, roslyn_filewatch.SnapshotEntry>)
+---@field scan_tree_async fun(root: string, callback: fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>), on_progress?: fun(scanned: number))|nil
+---@field is_scanning fun(root: string): boolean|nil Check if async scan is in progress
 ---@field partial_scan fun(dirs: string[], existing_map: table<string, roslyn_filewatch.SnapshotEntry>, root: string)|nil
 ---@field get_dirty_dirs fun(client_id: number): string[]|nil
 ---@field should_full_scan fun(client_id: number): boolean|nil
@@ -16,6 +18,7 @@
 ---@field last_events table<number, number>
 ---@field poll_interval number
 ---@field poller_restart_threshold number
+---@field activity_quiet_period number|nil Seconds of quiet before allowing full scan (default 5)
 ---@field check_sln_changed fun(client_id: number, root: string): boolean|nil Check if solution file changed since last poll
 ---@field on_sln_changed fun(client_id: number, sln_path: string)|nil Called when solution file change is detected
 
@@ -74,6 +77,28 @@ function M.start(client, root, snapshots, deps)
 			-- Store last_event BEFORE updating it, so threshold comparison works
 			local last_event_time = (deps.last_events and deps.last_events[client.id]) or 0
 
+			-- ============================================
+			-- ACTIVITY-BASED THROTTLING (VS Code-like behavior)
+			-- Skip expensive scans during heavy file activity
+			-- Unity regeneration can last 5-30 seconds, so we need
+			-- a longer quiet period before triggering scans
+			-- ============================================
+			local current_time = os.time()
+			local time_since_last_event = current_time - last_event_time
+			local activity_quiet_period = deps.activity_quiet_period or 5 -- Default 5 seconds
+			
+			-- If we just processed events recently, skip this cycle to let things settle
+			-- This is critical for Unity regeneration which produces many events
+			if time_since_last_event < activity_quiet_period then
+				-- High activity detected - skip this poll cycle
+				return
+			end
+			
+			-- Also skip if an async scan is already in progress
+			if deps.is_scanning and deps.is_scanning(root) then
+				return
+			end
+
 			-- Incremental scanning: check if we need full scan or partial scan
 			local do_full_scan = true
 			local dirty_dir_list = nil
@@ -115,7 +140,81 @@ function M.start(client, root, snapshots, deps)
 			local old_map = snapshots[client.id] or {}
 
 			if do_full_scan then
-				-- Full scan: build new map from scratch
+				-- Full scan: prefer async scanning if available (prevents UI freeze)
+				if deps.scan_tree_async then
+					-- Use async scanning - callback will process results
+					deps.scan_tree_async(root, function(async_new_map)
+						-- Process the async scan results
+						local async_old_map = snapshots[client.id] or {}
+						local async_evs = {}
+						local async_rename_pairs = {}
+						
+						-- Build old identity map
+						local async_old_id_map = {}
+						for path, entry in pairs(async_old_map) do
+							local id = deps.identity_from_stat and deps.identity_from_stat(entry) or nil
+							if id then
+								async_old_id_map[id] = path
+							end
+						end
+						
+						local async_processed_old = {}
+						
+						-- Detect creates / renames / changes
+						for path, mt in pairs(async_new_map) do
+							local old_mt = async_old_map[path]
+							if not old_mt then
+								local id = deps.identity_from_stat and deps.identity_from_stat(mt) or nil
+								local oldpath = id and async_old_id_map[id]
+								if oldpath then
+									table.insert(async_rename_pairs, { old = oldpath, ["new"] = path })
+									async_processed_old[oldpath] = true
+									async_old_id_map[id] = nil
+								else
+									table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 1 })
+								end
+							elseif not (deps.same_file_info and deps.same_file_info(async_old_map[path], async_new_map[path])) then
+								table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 2 })
+							end
+							async_processed_old[path] = true
+						end
+						
+						-- Remaining old_map entries are deletes
+						for path, _ in pairs(async_old_map) do
+							if not async_processed_old[path] and async_new_map[path] == nil then
+								if deps.close_deleted_buffers then
+									pcall(deps.close_deleted_buffers, path)
+								end
+								table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 3 })
+							end
+						end
+						
+						-- Send renames
+						if #async_rename_pairs > 0 then
+							if deps.notify then
+								pcall(deps.notify, "Async scan detected " .. #async_rename_pairs .. " rename(s)", vim.log.levels.DEBUG)
+							end
+							if deps.notify_roslyn_renames then
+								pcall(deps.notify_roslyn_renames, async_rename_pairs)
+							end
+						end
+						
+						-- Update snapshot and queue events
+						snapshots[client.id] = async_new_map
+						if #async_evs > 0 and deps.queue_events then
+							pcall(deps.queue_events, client.id, async_evs)
+						end
+						
+						-- Update last event time
+						if deps.last_events then
+							deps.last_events[client.id] = os.time()
+						end
+					end)
+					-- Return early - async callback will handle the rest
+					return
+				end
+				
+				-- Fallback: synchronous scan (if async not available)
 				new_map = {}
 				local scan_ok, scan_err = pcall(function()
 					deps.scan_tree(root, new_map)

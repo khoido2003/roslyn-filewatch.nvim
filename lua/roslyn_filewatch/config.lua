@@ -17,6 +17,7 @@
 ---@field force_polling? boolean Force polling mode (disable fs_event)
 ---@field solution_aware? boolean Parse .sln/.slnx/.slnf to limit watch scope (default: true)
 ---@field respect_gitignore? boolean Respect .gitignore patterns (default: true)
+---@field activity_quiet_period? number Seconds of quiet before allowing scans (default: 5)
 
 ---@class roslyn_filewatch.BatchingOptions
 ---@field enabled? boolean Enable event batching
@@ -28,25 +29,39 @@ local M = {}
 M.options = {
 	batching = {
 		enabled = true,
-		interval = 150, -- Fast batching for VS Code-like experience
+		interval = 300, -- coalesce events over 300ms
 	},
 
 	ignore_dirs = {
+		-- Unity-specific
 		"Library",
 		"Temp",
 		"Logs",
-		"Obj",
-		"Bin",
-		".git",
-		".idea",
-		".vs",
-		"Build",
-		"Builds",
 		"UserSettings",
 		"MemoryCaptures",
 		"CrashReports",
-		"node_modules",
+		"ScriptAssemblies",
+		"bee_backend",
+		"StateCache",
+		"ShaderCache",
+		"AssetBundleCache",
+		"Recorder",
+		"TextMesh Pro",
+		-- .NET / Build
+		"Obj",
+		"obj",
+		"Bin",
+		"bin",
+		"Build",
+		"Builds",
 		"packages",
+		"TestResults",
+		-- General
+		".git",
+		".idea",
+		".vs",
+		".vscode",
+		"node_modules",
 	},
 
 	--- Glob patterns to exclude files/directories (gitignore-style)
@@ -77,7 +92,7 @@ M.options = {
 	client_names = { "roslyn", "roslyn_ls" },
 
 	--- Poller interval in ms (used for fallback resync scan)
-	poll_interval = 3000,
+	poll_interval = 5000, -- VS Code-like: poll less frequently for better performance
 
 	--- If poller detects changes while fs_event was quiet for this many seconds,
 	--- we restart the watcher (heals silent-death cases).
@@ -90,7 +105,8 @@ M.options = {
 	rename_detection_ms = 200, -- Faster rename detection
 
 	--- Debounce (ms) used to aggregate high-frequency fs events before processing.
-	processing_debounce_ms = 50, -- Faster debounce for VS Code-like experience
+	--- Higher values coalesce more events (better for Unity regeneration).
+	processing_debounce_ms = 150,
 
 	--- Logging level for plugin notifications (controls what gets passed to vim.notify).
 	--- Default: WARN (show only warnings and errors). Set to vim.log.levels.INFO or DEBUG
@@ -117,6 +133,11 @@ M.options = {
 	--- Respect .gitignore patterns when scanning files.
 	--- Automatically skips files matching .gitignore rules.
 	respect_gitignore = true,
+
+	--- Seconds of quiet time required after last file event before triggering scans.
+	--- Higher values prevent freezes during heavy file operations (Unity regeneration).
+	--- Default: 5 seconds (Unity regeneration can take 5-30+ seconds)
+	activity_quiet_period = 5,
 }
 
 --- Setup the configuration with user options

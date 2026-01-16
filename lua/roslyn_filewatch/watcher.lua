@@ -23,6 +23,63 @@ local notify = notify_mod.user
 local notify_roslyn = notify_mod.roslyn_changes
 local notify_roslyn_renames = notify_mod.roslyn_renames
 
+--- Async helper: scan root directory for .csproj files and get their mtimes
+--- This replaces blocking vim.fn.glob() calls
+---@param root string Root directory to scan
+---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
+local function scan_csproj_async(root, callback)
+	root = normalize_path(root)
+	
+	-- Use async scandir
+	uv.fs_scandir(root, function(err, scanner)
+		if err or not scanner then
+			vim.schedule(function()
+				callback({})
+			end)
+			return
+		end
+		
+		-- Collect csproj files
+		local csproj_paths = {}
+		while true do
+			local name, typ = uv.fs_scandir_next(scanner)
+			if not name then break end
+			
+			if typ == "file" and name:match("%.csproj$") then
+				table.insert(csproj_paths, normalize_path(root .. "/" .. name))
+			end
+		end
+		
+		if #csproj_paths == 0 then
+			vim.schedule(function()
+				callback({})
+			end)
+			return
+		end
+		
+		-- Async stat each csproj file
+		local results = {}
+		local pending = #csproj_paths
+		
+		for _, path in ipairs(csproj_paths) do
+			uv.fs_stat(path, function(stat_err, stat)
+				if not stat_err and stat then
+					results[path] = stat.mtime.sec
+				else
+					results[path] = 0
+				end
+				
+				pending = pending - 1
+				if pending == 0 then
+					vim.schedule(function()
+						callback(results)
+					end)
+				end
+			end)
+		end
+	end)
+end
+
 local M = {}
 
 ---@type table<number, uv_fs_event_t>
@@ -409,10 +466,11 @@ function M.start(client)
 	end
 
 	-- Tunables
-	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 3000
+	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 5000 -- VS Code-like: poll less frequently
 	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2
 	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60
 	local RENAME_WINDOW_MS = (config.options and config.options.rename_detection_ms) or 300
+	local ACTIVITY_QUIET_PERIOD = (config.options and config.options.activity_quiet_period) or 5
 
 	local root = client.config and client.config.root_dir
 	if not root then
@@ -583,20 +641,19 @@ function M.start(client)
 		if ok and sln_parser and sln_parser.get_sln_info then
 			local sln_info = sln_parser.get_sln_info(root)
 			if sln_info then
-				-- Capture initial list of csproj files
-				local initial_csproj = {}
-				local csproj_files = vim.fn.glob(root .. "/*.csproj", false, true)
-				for _, csproj in ipairs(csproj_files or {}) do
-					local p = normalize_path(csproj)
-					local st = uv.fs_stat(p)
-					initial_csproj[p] = st and st.mtime.sec or 0
-				end
-
+				-- Initialize with empty csproj_files, then populate asynchronously
 				sln_mtimes[client.id] = {
 					path = sln_info.path,
 					mtime = sln_info.mtime,
-					csproj_files = initial_csproj,
+					csproj_files = nil,  -- Will be populated async
 				}
+				
+				-- Async scan csproj files (non-blocking)
+				scan_csproj_async(root, function(initial_csproj)
+					if sln_mtimes[client.id] then
+						sln_mtimes[client.id].csproj_files = initial_csproj
+					end
+				end)
 			else
 				vim.schedule(function()
 					vim.notify("[roslyn-filewatch] No solution file found in: " .. root, vim.log.levels.WARN)
@@ -650,6 +707,8 @@ function M.start(client)
 
 	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
 		scan_tree = scan_tree,
+		scan_tree_async = snapshot_mod.scan_tree_async,  -- NEW: Async non-blocking scan
+		is_scanning = snapshot_mod.is_scanning,          -- NEW: Check scan in progress
 		partial_scan = snapshot_mod.partial_scan,
 		get_dirty_dirs = get_and_clear_dirty_dirs,
 		should_full_scan = should_full_scan,
@@ -663,6 +722,7 @@ function M.start(client)
 		last_events = last_events,
 		poll_interval = POLL_INTERVAL,
 		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
+		activity_quiet_period = ACTIVITY_QUIET_PERIOD,
 		-- check_sln_changed = check_sln_changed, -- Disabled to prevent full scan freezes
 	})
 
@@ -746,98 +806,74 @@ function M.start(client)
 							return p
 						end
 
-						-- Scan csproj files (glob is fast for root-level files)
-						local csproj_files = vim.fn.glob(root .. "/*.csproj", false, true)
 						local previous_csproj = sln_info.csproj_files or {}
 
-						-- Async Collection State
-						local pending = 0
-						local collected_mtimes = {}
-						
-						-- Completion Handler
-						local function check_done()
-							if pending == 0 then
-								vim.schedule(function()
-									local new_projects_list = {}
-									local current_csproj_set = {}
-									local new_projects_count = 0
+						-- Use async csproj scanning (non-blocking)
+						scan_csproj_async(root, function(collected_mtimes)
+							local new_projects_list = {}
+							local current_csproj_set = {}
+							local new_projects_count = 0
 
-									for internal_path, current_mtime_sec in pairs(collected_mtimes) do
-										current_csproj_set[internal_path] = current_mtime_sec
-										
-										local old_mtime_sec = previous_csproj[internal_path]
-										if sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
-											local roslyn_path = to_roslyn_path(internal_path)
-											table.insert(new_projects_list, roslyn_path)
-											new_projects_count = new_projects_count + 1
-										end
-									end
-									
-									-- Init check
-									if not sln_info.csproj_files then
-										sln_mtimes[client.id].csproj_files = current_csproj_set
-										return
-									end
-									
-									-- Update tracking set
-									sln_mtimes[client.id].csproj_files = current_csproj_set
-
-									-- Notify Roslyn if needed
-									if new_projects_count > 0 then
-										local clients_list = vim.lsp.get_clients()
-										for _, c in ipairs(clients_list) do
-											if vim.tbl_contains(config.options.client_names, c.name) then
-												local project_uris = vim.tbl_map(function(p)
-													return vim.uri_from_fname(p)
-												end, new_projects_list)
-
-												pcall(function()
-													c:notify("project/open", {
-														projects = project_uris,
-													})
-												end)
-												
-												-- Trigger diagnostic refresh
-												vim.defer_fn(function()
-													if c.is_stopped and c.is_stopped() then return end
-													local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
-													for _, buf in ipairs(attached_bufs or {}) do
-														if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
-															pcall(function()
-																c:request(
-																	vim.lsp.protocol.Methods.textDocument_diagnostic,
-																	{ textDocument = vim.lsp.util.make_text_document_params(buf) },
-																	nil,
-																	buf
-																)
-															end)
-														end
-													end
-												end, 2000)
-											end
-										end
-									end
-								end)
-							end
-						end
-
-						-- Launch Async Stats for csproj files
-						for _, csproj in ipairs(csproj_files or {}) do
-							local internal_path = normalize_path(csproj)
-							pending = pending + 1
-							uv.fs_stat(internal_path, function(csproj_err, csproj_st)
-								if not csproj_err and csproj_st then
-									collected_mtimes[internal_path] = csproj_st.mtime.sec
-								else
-									collected_mtimes[internal_path] = 0
+							for internal_path, current_mtime_sec in pairs(collected_mtimes) do
+								current_csproj_set[internal_path] = current_mtime_sec
+								
+								local old_mtime_sec = previous_csproj[internal_path]
+								if sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
+									local roslyn_path = to_roslyn_path(internal_path)
+									table.insert(new_projects_list, roslyn_path)
+									new_projects_count = new_projects_count + 1
 								end
-								pending = pending - 1
-								check_done()
-							end)
-						end
-						
-						-- Handle empty list case
-						check_done()
+							end
+							
+							-- Init check - first time populating csproj_files
+							if not sln_info.csproj_files then
+								if sln_mtimes[client.id] then
+									sln_mtimes[client.id].csproj_files = current_csproj_set
+								end
+								return
+							end
+							
+							-- Update tracking set
+							if sln_mtimes[client.id] then
+								sln_mtimes[client.id].csproj_files = current_csproj_set
+							end
+
+							-- Notify Roslyn if needed
+							if new_projects_count > 0 then
+								local clients_list = vim.lsp.get_clients()
+								for _, c in ipairs(clients_list) do
+									if vim.tbl_contains(config.options.client_names, c.name) then
+										local project_uris = vim.tbl_map(function(p)
+											return vim.uri_from_fname(p)
+										end, new_projects_list)
+
+										pcall(function()
+											c:notify("project/open", {
+												projects = project_uris,
+											})
+										end)
+										
+										-- Trigger diagnostic refresh
+										vim.defer_fn(function()
+											if c.is_stopped and c.is_stopped() then return end
+											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
+											for _, buf in ipairs(attached_bufs or {}) do
+												if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+													pcall(function()
+														c:request(
+															vim.lsp.protocol.Methods.textDocument_diagnostic,
+															{ textDocument = vim.lsp.util.make_text_document_params(buf) },
+															nil,
+															buf
+														)
+													end)
+												end
+											end
+										end, 2000)
+									end
+								end
+							end
+						end)
 					end)
 				end)
 			end)

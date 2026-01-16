@@ -106,22 +106,52 @@ function M.start(client, root, snapshots, deps)
 				local events = { { uri = vim.uri_from_fname(npath), type = 1 } }
 
 				-- For .cs files, also notify about the nearest .csproj to trigger project refresh
+				-- Use async scanning to avoid blocking
 				if npath:match("%.cs$") then
-					local dir = npath:match("^(.+)/[^/]+$")
-					while dir and dir ~= "" and utils.path_starts_with(dir, root) do
-						local csproj_pattern = dir .. "/*.csproj"
-						local csproj_files = vim.fn.glob(csproj_pattern, false, true)
-						if csproj_files and #csproj_files > 0 then
-							for _, csproj in ipairs(csproj_files) do
-								local csproj_norm = normalize_path(csproj)
-								-- Send a "changed" event for csproj to trigger Roslyn project refresh
-								table.insert(events, { uri = vim.uri_from_fname(csproj_norm), type = 2 })
+					local function find_csproj_in_dir_async(dir, callback)
+						uv.fs_scandir(dir, function(err, scanner)
+							if err or not scanner then
+								callback({})
+								return
 							end
-							break
-						end
-						-- Move up one directory
-						dir = dir:match("^(.+)/[^/]+$")
+							local found = {}
+							while true do
+								local name, typ = uv.fs_scandir_next(scanner)
+								if not name then break end
+								if typ == "file" and name:match("%.csproj$") then
+									table.insert(found, normalize_path(dir .. "/" .. name))
+								end
+							end
+							callback(found)
+						end)
 					end
+					
+					local function search_up_for_csproj(dir)
+						if not dir or dir == "" or not utils.path_starts_with(dir, root) then
+							return -- Reached root or invalid, stop searching
+						end
+						find_csproj_in_dir_async(dir, function(csproj_files)
+							if #csproj_files > 0 then
+								-- Found csproj files, queue events
+								local csproj_events = {}
+								for _, csproj in ipairs(csproj_files) do
+									table.insert(csproj_events, { uri = vim.uri_from_fname(csproj), type = 2 })
+								end
+								if deps.queue_events then
+									vim.schedule(function()
+										pcall(deps.queue_events, client.id, csproj_events)
+									end)
+								end
+							else
+								-- Not found, search parent directory
+								local parent = dir:match("^(.+)/[^/]+$")
+								search_up_for_csproj(parent)
+							end
+						end)
+					end
+					
+					local dir = npath:match("^(.+)/[^/]+$")
+					search_up_for_csproj(dir)
 				end
 
 				if deps.queue_events then

@@ -5,6 +5,29 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.4] - 2026-01-16
+
+### Fixed
+- **Critical Performance Fix**: Eliminated all UI freezes during Unity index file regeneration
+- **Async Tree Scanning**: Full tree scans use chunked processing with `vim.defer_fn`, yielding every ~30 files
+- **Async Event Flushing**: `fs_event` file changes use async `uv.fs_stat` with callbacks and chunked processing
+- **Async CSPROJ Scanning**: All `vim.fn.glob()` calls replaced with async `uv.fs_scandir` (watcher.lua, autocmds.lua)
+- **Enhanced Activity Throttling**: Increased quiet period from 2s to 5s (configurable)
+
+### Added
+- **`activity_quiet_period`**: New config option to control seconds of quiet time before full scans (default: 5)
+- **`scan_tree_async()`**: Async scanning function in `snapshot.lua` that prevents UI blocking
+- **`scan_csproj_async()`**: Async csproj discovery function in `watcher.lua`
+- **`is_scanning()`**: Function to check if async scan is in progress (prevents duplicates)
+
+### Changed
+- **Event Processing Debounce**: Increased from 50ms to 150ms to coalesce more events during heavy activity
+- **100% Async I/O**: All file system operations in hot paths now use async callbacks
+- Full scans now prefer async mode with callback-based processing
+- Poller skips cycles when async scan is in progress
+
+---
+
 ## [v0.2.3] - 2026-01-16
 
 ### Fixed
@@ -12,8 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Detection**: Fixed issue where adding new files to existing projects (e.g. Unity `.asmdef` assemblies) was ignored by the watcher.
 
 ### Changed
-
-
+- **VS Code-like Performance**: Async solution file checking, activity-based throttling, and longer poll intervals for smooth Unity workflows.
+- **Poll Interval**: Default increased from 3s to 5s for lighter CPU load.
+- **Batching Interval**: Increased from 150ms to 300ms for better event coalescing.
+- **Unity Ignore Dirs**: Added more Unity-specific directories to ignore list (ScriptAssemblies, ShaderCache, etc.).
 ---
 
 ## [v0.2.2] - 2026-01-08

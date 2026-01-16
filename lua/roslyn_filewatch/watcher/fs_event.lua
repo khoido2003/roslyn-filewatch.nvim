@@ -80,7 +80,13 @@ function M.clear(client_id)
 end
 
 -- Default debounce for processing fs_event bursts (ms)
-local DEFAULT_PROCESSING_DEBOUNCE_MS = 80
+-- Higher values coalesce more events (better for Unity regeneration)
+local DEFAULT_PROCESSING_DEBOUNCE_MS = 150
+
+-- Async flush processing chunk size (files per chunk)
+local FLUSH_CHUNK_SIZE = 10
+-- Delay between chunks (ms) - allows UI to remain responsive
+local FLUSH_CHUNK_DELAY_MS = 1
 
 -- Error/resync throttle knobs
 local ERROR_WINDOW_SEC = 2
@@ -256,7 +262,8 @@ function M.start(client, root, snapshots, deps)
 		return nil, err or "uv.new_fs_event failed"
 	end
 
-	--- Flush buffered events for client
+	--- Flush buffered events for client - ASYNC CHUNKED VERSION
+	--- Processes files in chunks to prevent UI freezes during heavy activity
 	---@param client_id number
 	local function flush_client_buffer(client_id)
 		local buf = event_buffers[client_id]
@@ -276,87 +283,125 @@ function M.start(client, root, snapshots, deps)
 			buf.timer = nil
 		end
 
-		---@type roslyn_filewatch.FileChange[]
-		local evs = {}
+		-- If no paths, nothing to do
+		if #paths == 0 then
+			return
+		end
 
-		for _, fullpath in ipairs(paths) do
+		-- Accumulated events (shared across async chunks)
+		---@type roslyn_filewatch.FileChange[]
+		local all_evs = {}
+		local current_index = 1
+
+		--- Process a single file asynchronously
+		---@param fullpath string
+		---@param on_done fun()
+		local function process_file_async(fullpath, on_done)
 			-- Mark directory as dirty for incremental scanning
 			if mark_dirty_dir then
 				pcall(mark_dirty_dir, client_id, fullpath)
 			end
 
 			if not should_watch_path(fullpath, cfg) then
-				goto continue_path
+				on_done()
+				return
 			end
 
 			local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
-			local ok_st, st = pcall(function()
-				return uv.fs_stat(fullpath)
-			end)
+			
+			-- Use async fs_stat
+			uv.fs_stat(fullpath, function(err, st)
+				vim.schedule(function()
+					if not err and st then
+						local mt = mtime_ns(st)
+						---@type roslyn_filewatch.SnapshotEntry
+						local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
 
-			if ok_st and st then
-				local mt = mtime_ns(st)
-				---@type roslyn_filewatch.SnapshotEntry
-				local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
+						local matched = false
+						if rename_m and rename_m.on_create then
+							local ok, res = pcall(rename_m.on_create, client.id, fullpath, st, snapshots, {
+								notify = notify_fn,
+								notify_roslyn_renames = notify_roslyn_renames,
+							})
+							if not ok then
+								pcall(notify_fn, "rename_mod.on_create error: " .. tostring(res), vim.log.levels.ERROR)
+							else
+								if res then
+									matched = true
+								end
+							end
+						end
 
-				local matched = false
-				if rename_m and rename_m.on_create then
-					local ok, res = pcall(rename_m.on_create, client.id, fullpath, st, snapshots, {
-						notify = notify_fn,
-						notify_roslyn_renames = notify_roslyn_renames,
-					})
-					if not ok then
-						pcall(notify_fn, "rename_mod.on_create error: " .. tostring(res), vim.log.levels.ERROR)
+						if not matched then
+							snapshots[client.id] = snapshots[client.id] or {}
+							snapshots[client.id][fullpath] = new_entry
+							if not prev_mt then
+								table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
+							elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
+								table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
+							end
+						end
 					else
-						if res then
-							matched = true
+						-- Missing -> possible delete
+						if prev_mt then
+							local buffered = false
+							if rename_m and rename_m.on_delete then
+								local ok, res = pcall(rename_m.on_delete, client.id, fullpath, prev_mt, snapshots, {
+									queue_events = queue_events,
+									close_deleted_buffers = close_deleted_buffers,
+									notify = notify_fn,
+									rename_window_ms = rename_window_ms,
+								})
+								if not ok then
+									pcall(notify_fn, "rename_mod.on_delete error: " .. tostring(res), vim.log.levels.ERROR)
+								else
+									buffered = res and true or false
+								end
+							end
+
+							if not buffered then
+								if snapshots[client.id] then
+									snapshots[client.id][fullpath] = nil
+								end
+								pcall(close_deleted_buffers, fullpath)
+								table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
+							end
 						end
 					end
-				end
+					
+					on_done()
+				end)
+			end)
+		end
 
-				if not matched then
-					snapshots[client.id] = snapshots[client.id] or {}
-					snapshots[client.id][fullpath] = new_entry
-					if not prev_mt then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-					elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
-					end
-				end
-			else
-				-- Missing -> possible delete
-				if prev_mt then
-					local buffered = false
-					if rename_m and rename_m.on_delete then
-						local ok, res = pcall(rename_m.on_delete, client.id, fullpath, prev_mt, snapshots, {
-							queue_events = queue_events,
-							close_deleted_buffers = close_deleted_buffers,
-							notify = notify_fn,
-							rename_window_ms = rename_window_ms,
-						})
-						if not ok then
-							pcall(notify_fn, "rename_mod.on_delete error: " .. tostring(res), vim.log.levels.ERROR)
+		--- Process a chunk of files and schedule next chunk
+		local function process_chunk()
+			local chunk_end = math.min(current_index + FLUSH_CHUNK_SIZE - 1, #paths)
+			local pending = chunk_end - current_index + 1
+			local completed = 0
+
+			for i = current_index, chunk_end do
+				process_file_async(paths[i], function()
+					completed = completed + 1
+					if completed == pending then
+						-- All files in chunk completed
+						current_index = chunk_end + 1
+						if current_index <= #paths then
+							-- More files to process - schedule next chunk with small delay
+							vim.defer_fn(process_chunk, FLUSH_CHUNK_DELAY_MS)
 						else
-							buffered = res and true or false
+							-- All done - send accumulated events
+							if #all_evs > 0 then
+								pcall(queue_events, client.id, all_evs)
+							end
 						end
 					end
-
-					if not buffered then
-						if snapshots[client.id] then
-							snapshots[client.id][fullpath] = nil
-						end
-						pcall(close_deleted_buffers, fullpath)
-						table.insert(evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
-					end
-				end
+				end)
 			end
-
-			::continue_path::
 		end
 
-		if #evs > 0 then
-			pcall(queue_events, client.id, evs)
-		end
+		-- Start processing first chunk
+		process_chunk()
 	end
 
 	--- Schedule a flush after debounce

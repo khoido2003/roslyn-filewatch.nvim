@@ -22,6 +22,207 @@ local should_watch_path = utils.should_watch_path
 
 local M = {}
 
+-- Async scanning state per-root to prevent duplicate scans
+---@type table<string, boolean>
+local scanning_in_progress = {}
+
+-- Chunk size for async scanning (files between yields)
+local ASYNC_SCAN_CHUNK_SIZE = 30
+
+--- Cancel any in-progress async scan for a root
+---@param root string
+function M.cancel_async_scan(root)
+	scanning_in_progress[normalize_path(root)] = nil
+end
+
+--- Check if async scan is in progress for a root
+---@param root string
+---@return boolean
+function M.is_scanning(root)
+	return scanning_in_progress[normalize_path(root)] == true
+end
+
+--- Async directory scan that yields to event loop periodically
+--- This prevents UI freezes during large scans (Unity regeneration)
+---@param root string Root directory to scan
+---@param callback fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>) Called when scan completes
+---@param on_progress? fun(scanned: number) Optional progress callback
+function M.scan_tree_async(root, callback, on_progress)
+	root = normalize_path(root)
+
+	-- Prevent duplicate concurrent scans
+	if scanning_in_progress[root] then
+		return
+	end
+	scanning_in_progress[root] = true
+
+	local ignore_dirs = config.options.ignore_dirs or {}
+	local watch_extensions = config.options.watch_extensions or {}
+	local is_win = utils.is_windows()
+
+	-- Pre-compute lowercase ignore dirs on Windows
+	local ignore_dirs_lower = {}
+	if is_win then
+		for _, dir in ipairs(ignore_dirs) do
+			table.insert(ignore_dirs_lower, dir:lower())
+		end
+	end
+
+	-- Cache gitignore module and matcher
+	local gitignore_mod = nil
+	local gitignore_matcher = nil
+	if config.options.respect_gitignore ~= false then
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and mod then
+			gitignore_mod = mod
+			gitignore_matcher = mod.load(root)
+		end
+	end
+
+	---@type table<string, roslyn_filewatch.SnapshotEntry>
+	local out_map = {}
+	local files_scanned = 0
+
+	-- Queue of directories to scan (breadth-first to allow chunking)
+	---@type string[]
+	local dir_queue = {}
+
+	-- Determine starting directories based on solution-aware setting
+	if config.options.solution_aware then
+		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
+		if ok and sln_parser then
+			local project_dirs = sln_parser.get_watch_dirs(root)
+			if project_dirs and #project_dirs > 0 then
+				for _, project_dir in ipairs(project_dirs) do
+					local stat = uv.fs_stat(project_dir)
+					if stat and stat.type == "directory" then
+						table.insert(dir_queue, project_dir)
+					end
+				end
+			end
+		end
+	end
+
+	-- Fallback: start from root if no project dirs found
+	if #dir_queue == 0 then
+		table.insert(dir_queue, root)
+	end
+
+	--- Check if directory should be skipped
+	---@param name string Directory name
+	---@param fullpath string Full path
+	---@return boolean
+	local function should_skip_dir(name, fullpath)
+		local cmp_name = is_win and name:lower() or name
+		local cmp_fullpath = is_win and fullpath:lower() or fullpath
+		local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
+
+		for _, dir in ipairs(dirs_to_check) do
+			if cmp_name == dir then
+				return true
+			end
+			if cmp_fullpath:find("/" .. dir .. "/", 1, true) or cmp_fullpath:match("/" .. dir .. "$") then
+				return true
+			end
+		end
+		return false
+	end
+
+	--- Process a single directory (non-recursive, adds subdirs to queue)
+	---@param path string
+	---@return number files_processed Number of files processed in this call
+	local function process_single_dir(path)
+		local fd = uv.fs_scandir(path)
+		if not fd then
+			return 0
+		end
+
+		local processed = 0
+
+		while true do
+			local name, typ = uv.fs_scandir_next(fd)
+			if not name then
+				break
+			end
+
+			local fullpath = normalize_path(path .. "/" .. name)
+
+			-- Check gitignore
+			if gitignore_matcher and gitignore_mod then
+				if gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+					goto continue
+				end
+			end
+
+			if typ == "directory" then
+				if not should_skip_dir(name, fullpath) then
+					-- Add to queue for later processing (breadth-first)
+					table.insert(dir_queue, fullpath)
+				end
+			elseif typ == "file" then
+				if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
+					local st = uv.fs_stat(fullpath)
+					if st then
+						out_map[fullpath] = {
+							mtime = mtime_ns(st),
+							size = st.size,
+							ino = st.ino,
+							dev = st.dev,
+						}
+						processed = processed + 1
+					end
+				end
+			end
+
+			::continue::
+		end
+
+		return processed
+	end
+
+	--- Process chunk of directories and schedule next chunk
+	local function process_chunk()
+		-- Check if scan was cancelled
+		if not scanning_in_progress[root] then
+			return
+		end
+
+		local chunk_files = 0
+		local dirs_this_chunk = 0
+		local MAX_DIRS_PER_CHUNK = 5 -- Process up to 5 directories per chunk
+
+		while #dir_queue > 0 and dirs_this_chunk < MAX_DIRS_PER_CHUNK and chunk_files < ASYNC_SCAN_CHUNK_SIZE do
+			local dir = table.remove(dir_queue, 1)
+			local processed = process_single_dir(dir)
+			chunk_files = chunk_files + processed
+			files_scanned = files_scanned + processed
+			dirs_this_chunk = dirs_this_chunk + 1
+		end
+
+		-- Report progress if callback provided
+		if on_progress then
+			pcall(on_progress, files_scanned)
+		end
+
+		-- Continue or finish
+		if #dir_queue > 0 then
+			-- More directories to process - yield and continue
+			vim.defer_fn(process_chunk, 0)
+		else
+			-- Done! Clean up and callback
+			scanning_in_progress[root] = nil
+			if callback then
+				vim.schedule(function()
+					pcall(callback, out_map)
+				end)
+			end
+		end
+	end
+
+	-- Start processing
+	vim.defer_fn(process_chunk, 0)
+end
+
 --- Directory scan (for poller snapshot) — writes normalized paths into out_map
 --- If solution_aware is enabled, only scans project directories from .sln
 ---@param root string
