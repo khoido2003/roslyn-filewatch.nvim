@@ -868,16 +868,9 @@ function M.start(client)
 													vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)
 												then
 													pcall(function()
-														c:request(
-															vim.lsp.protocol.Methods.textDocument_diagnostic,
-															{
-																textDocument = vim.lsp.util.make_text_document_params(
-																	buf
-																),
-															},
-															nil,
-															buf
-														)
+														c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
+															textDocument = vim.lsp.util.make_text_document_params(buf),
+														}, nil, buf)
 													end)
 												end
 											end

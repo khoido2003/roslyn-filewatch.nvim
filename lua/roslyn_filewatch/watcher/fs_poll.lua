@@ -175,10 +175,8 @@ function M.start(client, root, snapshots, deps)
 								end
 							elseif
 								not (
-									deps.same_file_info and deps.same_file_info(
-										async_old_map[path],
-										async_new_map[path]
-									)
+									deps.same_file_info
+									and deps.same_file_info(async_old_map[path], async_new_map[path])
 								)
 							then
 								table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 2 })
