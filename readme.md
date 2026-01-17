@@ -129,15 +129,38 @@ require("roslyn_filewatch").setup({
 | Command | Description |
 |---------|-------------|
 | `:RoslynFilewatchStatus` | Show watcher & solution status |
-| `:RoslynExplorer` | Open solution browser |
+| `:RoslynExplorer` | Open solution browser (works even before LSP loads) |
+| `:RoslynFiles` | Quick file finder for all C# files in solution |
 | `:RoslynReload` | Reload all project files |
+
+---
+
+## 🎮 Game Engine Support
+
+The plugin auto-detects and optimizes settings for these C# game engines:
+
+| Engine | Detection | Preset |
+|--------|-----------|--------|
+| **Unity** | `Assets/`, `ProjectSettings/` folders | `unity` |
+| **Godot 4.x** | `project.godot` file or `.godot/` folder | `godot` |
+| **Stride** | `.sdpkg` package files | `stride` |
+| **MonoGame** | `Content.mgcb` pipeline files | `monogame` |
+| **FNA** | `fnalibs/` folder | `fna` |
+
+### Manual Preset Selection
+
+```lua
+require("roslyn_filewatch").setup({
+  preset = "unity",  -- or "godot", "stride", "monogame", "fna", "large", "console"
+})
+```
 
 ---
 
 ## 🐛 Troubleshooting
 
 - Watchdog auto-restarts watchers on dropped events.
-- Use Unity preset for large repos.
+- Use `preset = "unity"` or `preset = "large"` for big repos to prevent freezing.
 
 - **The plugin doesn’t seem to do anything?**
   - Run `:LspInfo` and make sure the active LSP name matches one of the entries in `client_names`.

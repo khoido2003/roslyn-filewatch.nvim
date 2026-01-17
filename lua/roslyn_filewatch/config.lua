@@ -98,7 +98,7 @@ M.options = {
 	},
 
 	--- Which LSP client names should trigger watching
-	client_names = { "roslyn", "roslyn_ls" },
+	client_names = { "roslyn", "roslyn_ls", "roslyn_lsp" },
 
 	--- Poller interval in ms (used for fallback resync scan)
 	poll_interval = 5000, -- VS Code-like: poll less frequently for better performance

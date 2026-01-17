@@ -5,6 +5,42 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1] - 2026-01-17
+
+### Fixed
+- **RoslynExplorer/RoslynFiles Commands**: Fixed commands failing when Roslyn LSP is still loading
+  - Added fallback project root detection from current working directory  
+  - Commands now work even before LSP attaches by searching for `.sln`/`.csproj` files
+  - Improved error messages to help users understand project detection
+
+- **CRITICAL: Explorer Performance**: Completely rewrote explorer to prevent freezing
+  - **Lazy Loading**: Projects display instantly (no file scanning until needed)
+  - **Async File Scanning**: Files load in background with chunked processing
+  - **No UI Blocking**: Large projects (Unity, Godot) no longer freeze Neovim
+  - Each project's files are only scanned when user selects that project
+
+### Added
+- **Game Engine Presets**: Full C# game development support with optimized settings
+  - `godot` - Godot 4.x C# projects (detects `project.godot` and `.godot` folder)
+  - `stride` - Stride engine projects (detects `.sdpkg` package files)
+  - `monogame` - MonoGame framework (detects `Content.mgcb` pipeline)
+  - `fna` - FNA framework (detects `fnalibs` folder)
+  
+- **Improved Auto-Detection**: Presets system now detects all major C# game engines automatically
+
+### Changed
+- **Unity Preset Overhaul**: More aggressive settings to prevent any freezing during index rebuilds
+  - `poll_interval`: 10s → 15s
+  - `batching.interval`: 500ms → 800ms
+  - `processing_debounce_ms`: 300ms → 500ms
+  - `activity_quiet_period`: 10s → 15s
+  - `diagnostic_throttling.debounce_ms`: 1000ms → 1500ms
+  - Added more ignore dirs: `PackageCache`, `il2cpp_cache`, platform folders
+- Extended default `client_names` to include `roslyn_lsp` variant
+- Preset detection runs in priority order: Unity → Godot → Stride → FNA → MonoGame → Large → Console
+
+---
+
 ## [v0.3.0] - 2026-01-17
 
 ### Added
