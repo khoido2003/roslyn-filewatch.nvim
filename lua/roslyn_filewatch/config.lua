@@ -56,6 +56,10 @@ M.options = {
 		"AssetBundleCache",
 		"Recorder",
 		"TextMesh Pro",
+		-- Godot-specific
+		".godot",
+		".mono",
+		".import",
 		-- .NET / Build
 		"Obj",
 		"obj",
@@ -84,21 +88,53 @@ M.options = {
 	ignore_patterns = {},
 
 	watch_extensions = {
+		-- C# Code Files
 		".cs",
+		".csx", -- C# script files
+		
+		-- F# Code Files
+		".fs", -- F# source files
+		".fsx", -- F# script files
+		".fsi", -- F# signature files
+		
+		-- Project Files
 		".csproj",
+		".fsproj", -- F# project files
+		
+		-- Solution Files
 		".sln",
-		".slnx",
-		".slnf",
-		".props",
-		".targets",
+		".slnx", -- XML solution files
+		".slnf", -- Solution filter files
+		
+		-- MSBuild Files (critical only)
+		".props", -- MSBuild property files
+		".targets", -- MSBuild target files
+		
+		-- Configuration Files (essential)
 		".editorconfig",
-		".razor",
-		".config",
-		".json",
+		".config", -- App.config, Web.config
+		
+		-- Web Code Files (essential for web projects)
+		".razor", -- Blazor components
+		".cshtml", -- Razor views
 	},
 
 	--- Which LSP client names should trigger watching
-	client_names = { "roslyn", "roslyn_ls", "roslyn_lsp" },
+	--- C# LSP clients: Roslyn-based servers
+	--- F# LSP clients: FsAutoComplete/Ionide
+	client_names = {
+		-- C# / Roslyn
+		"roslyn",
+		"roslyn_ls",
+		"roslyn_lsp",
+		"csharp_ls",
+		"omnisharp",
+
+		-- F# / FsAutoComplete
+		"fsautocomplete",
+		"ionide",
+		"fsharp",
+	},
 
 	--- Poller interval in ms (used for fallback resync scan)
 	poll_interval = 5000, -- VS Code-like: poll less frequently for better performance

@@ -237,6 +237,11 @@ function M.setup(opts)
 		local snippets = require("roslyn_filewatch.snippets")
 		snippets.setup_luasnip()
 	end, { desc = "Load snippets into LuaSnip" })
+
+	vim.api.nvim_create_user_command("RoslynReloadProjects", function()
+		M.reload()
+		vim.notify("[roslyn-filewatch] Reloading all projects...", vim.log.levels.INFO)
+	end, { desc = "Force reload all project files" })
 end
 
 --- Show current watcher status

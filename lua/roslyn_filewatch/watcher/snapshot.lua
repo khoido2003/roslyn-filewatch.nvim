@@ -447,98 +447,98 @@ function M.partial_scan(dirs, existing_map, root)
 	end
 end
 
---- Resync snapshot for a specific client.
+--- Resync snapshot for a specific client (ASYNC VERSION).
 --- Compares current filesystem state with stored snapshot and emits appropriate events.
+--- Uses async scanning to prevent UI freezes during large scans (Unity regeneration).
 ---@param client_id number Numeric id of client
 ---@param root string Normalized root path
 ---@param snapshots table<number, table<string, roslyn_filewatch.SnapshotEntry>> Shared snapshots table
 ---@param helpers roslyn_filewatch.Helpers Helper functions
 function M.resync_snapshot_for(client_id, root, snapshots, helpers)
-	local new_map = {}
-	M.scan_tree(root, new_map)
-
-	if not snapshots[client_id] then
-		snapshots[client_id] = {}
-	end
-
-	-- Instead of deepcopy, iterate by reference and track deletions separately
-	local old_map = snapshots[client_id]
-
-	---@type roslyn_filewatch.FileChange[]
-	local evs = {}
-	local saw_delete = false
-	---@type roslyn_filewatch.RenameEntry[]
-	local rename_pairs = {}
-	---@type table<string, boolean>
-	local processed_old_paths = {}
-
-	-- Build old identity map for quick lookup
-	---@type table<string, string>
-	local old_id_map = {}
-	for path, entry in pairs(old_map) do
-		local id = identity_from_stat(entry)
-		if id then
-			old_id_map[id] = path
+	-- Use async scanning to prevent UI freeze
+	M.scan_tree_async(root, function(new_map)
+		if not snapshots[client_id] then
+			snapshots[client_id] = {}
 		end
-	end
 
-	-- Detect creates / renames / changes
-	for path, mt in pairs(new_map) do
-		local old_entry = old_map[path]
-		if old_entry == nil then
-			-- Possible create OR rename (match by identity)
-			local id = identity_from_stat(mt)
-			local oldpath = id and old_id_map[id]
-			if oldpath then
-				-- Rename detected: remember it, mark old path as processed
-				table.insert(rename_pairs, { old = oldpath, ["new"] = path })
-				processed_old_paths[oldpath] = true
-				old_id_map[id] = nil
-			else
-				table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+		-- Instead of deepcopy, iterate by reference and track deletions separately
+		local old_map = snapshots[client_id]
+
+		---@type roslyn_filewatch.FileChange[]
+		local evs = {}
+		local saw_delete = false
+		---@type roslyn_filewatch.RenameEntry[]
+		local rename_pairs = {}
+		---@type table<string, boolean>
+		local processed_old_paths = {}
+
+		-- Build old identity map for quick lookup
+		---@type table<string, string>
+		local old_id_map = {}
+		for path, entry in pairs(old_map) do
+			local id = identity_from_stat(entry)
+			if id then
+				old_id_map[id] = path
 			end
-		elseif not same_file_info(old_entry, mt) then
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 		end
-		-- Mark this path as still existing
-		processed_old_paths[path] = true
-	end
 
-	-- Detect deletes (entries in old_map that aren't in new_map and weren't renamed)
-	for path, _ in pairs(old_map) do
-		if not processed_old_paths[path] and new_map[path] == nil then
-			saw_delete = true
-			if helpers.close_deleted_buffers then
-				pcall(helpers.close_deleted_buffers, path)
+		-- Detect creates / renames / changes
+		for path, mt in pairs(new_map) do
+			local old_entry = old_map[path]
+			if old_entry == nil then
+				-- Possible create OR rename (match by identity)
+				local id = identity_from_stat(mt)
+				local oldpath = id and old_id_map[id]
+				if oldpath then
+					-- Rename detected: remember it, mark old path as processed
+					table.insert(rename_pairs, { old = oldpath, ["new"] = path })
+					processed_old_paths[oldpath] = true
+					old_id_map[id] = nil
+				else
+					table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+				end
+			elseif not same_file_info(old_entry, mt) then
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
 			end
-			table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+			-- Mark this path as still existing
+			processed_old_paths[path] = true
 		end
-	end
 
-	-- Send rename notifications first (if any)
-	if #rename_pairs > 0 then
-		if helpers.notify then
-			pcall(helpers.notify, "Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
+		-- Detect deletes (entries in old_map that aren't in new_map and weren't renamed)
+		for path, _ in pairs(old_map) do
+			if not processed_old_paths[path] and new_map[path] == nil then
+				saw_delete = true
+				if helpers.close_deleted_buffers then
+					pcall(helpers.close_deleted_buffers, path)
+				end
+				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
+			end
 		end
-		if helpers.notify_roslyn_renames then
-			pcall(helpers.notify_roslyn_renames, rename_pairs)
-		end
-	end
 
-	if #evs > 0 then
-		if helpers.notify then
-			pcall(helpers.notify, "Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
+		-- Send rename notifications first (if any)
+		if #rename_pairs > 0 then
+			if helpers.notify then
+				pcall(helpers.notify, "Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
+			end
+			if helpers.notify_roslyn_renames then
+				pcall(helpers.notify_roslyn_renames, rename_pairs)			end
 		end
-		if helpers.queue_events then
-			pcall(helpers.queue_events, client_id, evs)
-		end
-	end
 
-	-- Replace snapshot
-	snapshots[client_id] = new_map
-	if helpers.last_events then
-		helpers.last_events[client_id] = os.time()
-	end
+		if #evs > 0 then
+			if helpers.notify then
+				pcall(helpers.notify, "Resynced " .. #evs .. " changes from snapshot", vim.log.levels.DEBUG)
+			end
+			if helpers.queue_events then
+				pcall(helpers.queue_events, client_id, evs)
+			end
+		end
+
+		-- Replace snapshot
+		snapshots[client_id] = new_map
+		if helpers.last_events then
+			helpers.last_events[client_id] = os.time()
+		end
+	end)
 end
 
 return M

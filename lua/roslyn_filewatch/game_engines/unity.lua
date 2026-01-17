@@ -249,4 +249,85 @@ function M.get_assembly_for_file(file_path, asmdefs)
 	end
 end
 
+--- Unity asset file extensions
+M.asset_extensions = {
+	".unity", -- Scenes
+	".prefab", -- Prefabs
+	".asset", -- ScriptableObjects and other assets
+	".mat", -- Materials
+	".controller", -- Animator controllers
+	".anim", -- Animation clips
+	".meta", -- Unity metadata files
+}
+
+--- Check if a file is a Unity asset that might need LSP attention
+---@param path string File path
+---@return boolean is_important_asset
+function M.is_important_asset(path)
+	path = normalize_path(path)
+
+	-- .meta files are important (track dependencies)
+	if path:match("%.meta$") then
+		return true
+	end
+
+	-- ScriptableObject .asset files (contain code references)
+	if path:match("%.asset$") then
+		return true
+	end
+
+	-- Other assets generally don't need LSP notifications
+	return false
+end
+
+--- Check if a path is in a Unity generated folder that should be ignored
+---@param path string File path
+---@return boolean should_ignore
+function M.should_ignore_path(path)
+	path = normalize_path(path)
+
+	local ignore_patterns = {
+		"/Library/",
+		"/Temp/",
+		"/Logs/",
+		"/obj/",
+		"/bin/",
+		"/Build/",
+		"/Builds/",
+	}
+
+	for _, pattern in ipairs(ignore_patterns) do
+		if path:find(pattern, 1, true) then
+			return true
+		end
+	end
+
+	return false
+end
+
+--- Detect if Unity is currently recompiling (assembly reload in progress)
+---@param root string Project root
+---@return boolean is_recompiling
+function M.is_assembly_reloading(root)
+	root = normalize_path(root)
+	if not root:match("/$") then
+		root = root .. "/"
+	end
+
+	-- Check for Unity lock files that indicate compilation
+	local lock_files = {
+		root .. "Library/ScriptAssemblies/BuiltInAssemblies.stamp",
+		root .. "Library/SourceAssetDB.lock",
+	}
+
+	for _, lock_file in ipairs(lock_files) do
+		local stat = uv.fs_stat(lock_file)
+		if stat then
+			return true
+		end
+	end
+
+	return false
+end
+
 return M

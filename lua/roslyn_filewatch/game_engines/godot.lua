@@ -145,4 +145,56 @@ function M.setup_analyzers(client)
 	end
 end
 
+--- Godot asset file extensions
+M.asset_extensions = {
+	".tscn", -- Text scene files
+	".scn", -- Binary scene files
+	".tres", -- Text resource files
+	".res", -- Binary resource files
+	".import", -- Import files (similar to Unity .meta)
+}
+
+--- Check if a file is a Godot scene/resource that may need attention
+---@param path string File path
+---@return boolean is_important_asset
+function M.is_important_asset(path)
+	path = normalize_path(path)
+
+	-- .import files track dependencies
+	if path:match("%.import$") then
+		return true
+	end
+
+	-- Resource files may contain code references
+	if path:match("%.tres$") or path:match("%.res$") then
+		return true
+	end
+
+	-- Scene files generally don't need LSP notifications
+	return false
+end
+
+--- Check if a path should be ignored (Godot generated folders)
+---@param path string File path
+---@return boolean should_ignore
+function M.should_ignore_path(path)
+	path = normalize_path(path)
+
+	local ignore_patterns = {
+		"/.godot/",
+		"/.mono/",
+		"/.import/",
+		"/bin/",
+		"/obj/",
+	}
+
+	for _, pattern in ipairs(ignore_patterns) do
+		if path:find(pattern, 1, true) then
+			return true
+		end
+	end
+
+	return false
+end
+
 return M
