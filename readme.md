@@ -24,6 +24,26 @@ This plugin adds a robust **cross-platform file watcher** plus new project-sync 
 - Solution-aware watching:
   - Parses `.sln`, `.slnx`, `.slnf` to scope watch area to project folders
 
+### 🆕 New in v0.3.2
+
+#### 🚀 Project Warm-up
+Sends `workspace/projectInitializationComplete` notification to speed up Roslyn initialization without blocking UI.
+
+#### 🎮 Game Engine Context
+Auto-detects **Unity, Godot, Stride, MonoGame, FNA** and applies engine-specific settings:
+- Unity: Parses `.asmdef` files, configures Unity Roslyn Analyzers (UNT0001-UNT0014)
+- Godot: Parses `project.godot`, applies naming conventions
+
+#### ⚙️ Dotnet CLI Integration
+Full `dotnet` command suite with **interactive options**:
+- Build, run, clean, watch commands
+- NuGet package management
+- Project creation with template selection
+- **💡 No arguments needed!** Commands prompt for options when called without args
+
+#### 📝 Code Snippets
+150+ snippets for Unity, Godot, ASP.NET, and general C#. Load with `:RoslynLoadSnippets`.
+
 ### 🆕 New in v0.3.0
 
 #### ⏳ Deferred Project Loading
@@ -126,12 +146,46 @@ require("roslyn_filewatch").setup({
 
 ## 🧭 Commands
 
+> **💡 Interactive Mode**: Most commands support interactive selection when called without arguments.  
+> Simply run the command (e.g., `:RoslynBuild`) and choose from a menu—no need to memorize arguments!
+
+### Core Commands
 | Command | Description |
 |---------|-------------|
 | `:RoslynFilewatchStatus` | Show watcher & solution status |
-| `:RoslynExplorer` | Open solution browser (works even before LSP loads) |
-| `:RoslynFiles` | Quick file finder for all C# files in solution |
+| `:RoslynExplorer` | Open solution browser |
+| `:RoslynFiles` | Find C# files in solution |
 | `:RoslynReload` | Reload all project files |
+
+### Build & Run
+| Command | Description |
+|---------|-------------|
+| `:RoslynBuild [config]` | Build solution (optional: Release/Debug) |
+| `:RoslynRun [config]` | Run project |
+| `:RoslynWatch` | Run with hot reload (`dotnet watch`) |
+| `:RoslynClean` | Clean build outputs |
+
+### NuGet Package Management
+| Command | Description |
+|---------|-------------|
+| `:RoslynRestore` | Restore all packages |
+| `:RoslynNuget [package]` | Add NuGet package (interactive prompt if no arg) |
+| `:RoslynNugetRemove [package]` | Remove NuGet package (select from installed) |
+
+### Project Management
+| Command | Description |
+|---------|-------------|
+| `:RoslynNewProject [template] [name]` | Create new project (interactive template selection) |
+| `:RoslynTemplates` | List available templates |
+| `:RoslynOpenCsproj` | Open nearest .csproj |
+| `:RoslynOpenSln` | Open solution file |
+
+### Snippets & Game Dev
+| Command | Description |
+|---------|-------------|
+| `:RoslynSnippets` | Show all available snippets |
+| `:RoslynLoadSnippets` | Load snippets into LuaSnip |
+| `:RoslynEngineInfo` | Show detected game engine |
 
 ---
 
@@ -147,6 +201,13 @@ The plugin auto-detects and optimizes settings for these C# game engines:
 | **MonoGame** | `Content.mgcb` pipeline files | `monogame` |
 | **FNA** | `fnalibs/` folder | `fna` |
 
+### C# Dev Kit-Like Features
+
+- **Project Warm-up**: Speeds up Roslyn initialization
+- **Unity Analyzers**: Auto-configures UNT0001-UNT0014 diagnostic rules
+- **Assembly Definitions**: Parses `.asmdef` files for project structure
+- **Godot Context**: Applies naming conventions
+
 ### Manual Preset Selection
 
 ```lua
@@ -154,6 +215,47 @@ require("roslyn_filewatch").setup({
   preset = "unity",  -- or "godot", "stride", "monogame", "fna", "large", "console"
 })
 ```
+
+---
+
+## 📝 Code Snippets
+
+Run `:RoslynLoadSnippets` to load into LuaSnip, or `:RoslynSnippets` to view.
+
+### Unity Snippets
+| Trigger | Description |
+|---------|-------------|
+| `mono` | MonoBehaviour class |
+| `start` | Start() method |
+| `update` | Update() method |
+| `serialize` | [SerializeField] field |
+| `coroutine` | Coroutine method |
+| `singleton` | Unity singleton pattern |
+
+### Godot Snippets
+| Trigger | Description |
+|---------|-------------|
+| `node` | Node script class |
+| `ready` | _Ready() method |
+| `process` | _Process() method |
+| `export` | [Export] property |
+| `signal` | Signal declaration |
+
+### ASP.NET Snippets
+| Trigger | Description |
+|---------|-------------|
+| `controller` | API Controller class |
+| `action` | Action method |
+| `minimal` | Minimal API endpoint |
+
+### General C#
+| Trigger | Description |
+|---------|-------------|
+| `prop` | Auto-property |
+| `ctor` | Constructor |
+| `class` | Class with namespace |
+| `async` | Async method |
+| `foreach` | Foreach loop |
 
 ---
 

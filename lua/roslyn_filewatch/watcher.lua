@@ -1123,6 +1123,18 @@ function M.start(client)
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
+	-- NEW: Project warm-up for faster Roslyn initialization
+	local ok_warmup, warmup_mod = pcall(require, "roslyn_filewatch.project_warmup")
+	if ok_warmup and warmup_mod and warmup_mod.warmup then
+		warmup_mod.warmup(client)
+	end
+
+	-- NEW: Game engine context setup (Unity analyzers, Godot settings, etc.)
+	local ok_context, context_mod = pcall(require, "roslyn_filewatch.game_context")
+	if ok_context and context_mod and context_mod.setup then
+		context_mod.setup(client)
+	end
+
 	vim.api.nvim_create_autocmd("LspDetach", {
 		callback = function(args)
 			if args.data.client_id == client.id then
@@ -1143,6 +1155,11 @@ function M.start(client)
 				local diag_mod = get_diagnostics_mod()
 				if diag_mod and diag_mod.clear_client then
 					pcall(diag_mod.clear_client, client.id)
+				end
+				-- Clear project warmup state
+				local ok_warmup, warmup_mod = pcall(require, "roslyn_filewatch.project_warmup")
+				if ok_warmup and warmup_mod and warmup_mod.clear_client then
+					pcall(warmup_mod.clear_client, client.id)
 				end
 				-- Cleanup handles & timers
 				cleanup_client(client.id)

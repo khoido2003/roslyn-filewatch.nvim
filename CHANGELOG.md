@@ -5,6 +5,59 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.2] - 2026-01-18
+
+### Added - C# Dev Kit-Like Features
+
+- **Project Warm-up** (`project_warmup.lua`)
+  - Sends `workspace/projectInitializationComplete` notification to speed up Roslyn initialization
+  - Lightweight implementation that doesn't block UI
+
+- **Game Engine Context** (`game_context.lua`)
+  - Auto-detects Unity, Godot, Stride, MonoGame, FNA game engines
+  - Applies engine-specific Roslyn Analyzer settings
+
+- **Unity Integration** (`game_engines/unity.lua`)
+  - Parses Assembly Definition files (`.asmdef`) for better project structure
+  - Auto-configures Unity Roslyn Analyzer rules (UNT0001-UNT0014)
+
+- **Godot Integration** (`game_engines/godot.lua`)
+  - Parses `project.godot` for project settings
+  - Applies Godot naming convention hints
+
+- **Dotnet CLI Integration** (`dotnet_cli.lua`)
+  - Build, run, clean, and watch commands
+  - NuGet package management (add, remove, restore)
+  - Project creation and solution management
+
+- **Code Snippets** (`snippets.lua`)
+  - Unity snippets: `mono`, `start`, `update`, `serialize`, `coroutine`, `singleton`
+  - Godot snippets: `node`, `ready`, `process`, `export`, `signal`
+  - ASP.NET snippets: `controller`, `action`, `minimal`
+  - General C#: `prop`, `ctor`, `class`, `async`, `try`, `foreach`
+  - LuaSnip integration
+
+### New Commands
+
+| Command | Description |
+|---------|-------------|
+| `:RoslynBuild [config]` | Build solution/project |
+| `:RoslynRun [config]` | Run project |
+| `:RoslynWatch` | Run with hot reload |
+| `:RoslynClean` | Clean build outputs |
+| `:RoslynRestore` | Restore NuGet packages |
+| `:RoslynNuget <package>` | Add NuGet package |
+| `:RoslynNugetRemove <package>` | Remove NuGet package |
+| `:RoslynNewProject <template> [name]` | Create new project |
+| `:RoslynTemplates` | List available templates |
+| `:RoslynOpenCsproj` | Open nearest .csproj |
+| `:RoslynOpenSln` | Open solution file |
+| `:RoslynSnippets` | Show available snippets |
+| `:RoslynLoadSnippets` | Load snippets into LuaSnip |
+| `:RoslynEngineInfo` | Show game engine info |
+
+---
+
 ## [v0.3.1] - 2026-01-17
 
 ### Fixed
