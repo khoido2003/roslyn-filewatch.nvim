@@ -269,9 +269,9 @@ function M.get_project_dirs(sln_path, sln_type)
 	end
 end
 
---- Find .csproj files in the given root directory
+--- Find .csproj and .vbproj files in the given root directory
 ---@param root string Root directory path
----@return string[] csproj_paths List of paths to .csproj files
+---@return string[] project_paths List of paths to project files
 function M.find_csproj_files(root)
 	if not root or root == "" then
 		return {}
@@ -279,9 +279,9 @@ function M.find_csproj_files(root)
 
 	root = utils.normalize_path(root)
 
-	-- Use vim.fs.find to search for .csproj files
-	local csproj_files = vim.fs.find(function(name, _)
-		return name:match("%.csproj$")
+	-- Use vim.fs.find to search for .csproj and .vbproj files
+	local project_files = vim.fs.find(function(name, _)
+		return name:match("%.csproj$") or name:match("%.vbproj$")
 	end, {
 		path = root,
 		limit = 50, -- reasonable limit to avoid scanning huge monorepos
@@ -289,7 +289,7 @@ function M.find_csproj_files(root)
 	})
 
 	local result = {}
-	for _, path in ipairs(csproj_files or {}) do
+	for _, path in ipairs(project_files or {}) do
 		table.insert(result, utils.normalize_path(path))
 	end
 

@@ -46,6 +46,9 @@ M.presets = {
 			"AndroidPlayer",
 			"iOSPlayer",
 			"WebGLPlayer",
+			"ScriptTemplates", -- Unity script templates
+			"ProjectTemplates", -- Unity project templates
+			"Recordings", -- Unity Recorder output
 			-- .NET / Build
 			"Obj",
 			"obj",
@@ -124,6 +127,8 @@ M.presets = {
 			".import",
 			"addons",
 			".mono",
+			"export", -- Godot export output
+			"android", -- Android build output
 			-- .NET / Build
 			"Obj",
 			"obj",

@@ -56,10 +56,14 @@ M.options = {
 		"AssetBundleCache",
 		"Recorder",
 		"TextMesh Pro",
+		"ScriptTemplates",
+		"ProjectTemplates",
+		"Recordings",
 		-- Godot-specific
 		".godot",
 		".mono",
 		".import",
+		"export",
 		-- .NET / Build
 		"Obj",
 		"obj",
@@ -91,49 +95,54 @@ M.options = {
 		-- C# Code Files
 		".cs",
 		".csx", -- C# script files
-		
-		-- F# Code Files
-		".fs", -- F# source files
-		".fsx", -- F# script files
-		".fsi", -- F# signature files
-		
+
+		-- Visual Basic (VB.NET) Code Files
+		".vb", -- VB source files
+
 		-- Project Files
 		".csproj",
-		".fsproj", -- F# project files
-		
+		".vbproj", -- VB project files
+
 		-- Solution Files
 		".sln",
 		".slnx", -- XML solution files
 		".slnf", -- Solution filter files
-		
-		-- MSBuild Files (critical only)
+
+		-- MSBuild Files
 		".props", -- MSBuild property files
 		".targets", -- MSBuild target files
-		
-		-- Configuration Files (essential)
+
+		-- Configuration Files
 		".editorconfig",
 		".config", -- App.config, Web.config
-		
-		-- Web Code Files (essential for web projects)
+		".globalconfig", -- Global analyzer config
+		".ruleset", -- Code analysis rulesets
+
+		-- Web Code Files (Blazor, Razor, ASP.NET)
 		".razor", -- Blazor components
 		".cshtml", -- Razor views
+
+		-- XAML Files (WPF, MAUI, Avalonia, UWP)
+		".xaml", -- WPF/MAUI/UWP XAML
+		".axaml", -- Avalonia XAML
+
+		-- Resource Files
+		".resx", -- .NET resource files
+
+		-- Unity-specific Files
+		".asmdef", -- Assembly definitions
+		".asmref", -- Assembly references
+		".inputactions", -- Input System actions
+		".uxml", -- UI Toolkit layouts
+		".uss", -- UI Toolkit stylesheets
 	},
 
 	--- Which LSP client names should trigger watching
 	--- C# LSP clients: Roslyn-based servers
-	--- F# LSP clients: FsAutoComplete/Ionide
 	client_names = {
-		-- C# / Roslyn
 		"roslyn",
 		"roslyn_ls",
 		"roslyn_lsp",
-		"csharp_ls",
-		"omnisharp",
-
-		-- F# / FsAutoComplete
-		"fsautocomplete",
-		"ionide",
-		"fsharp",
 	},
 
 	--- Poller interval in ms (used for fallback resync scan)

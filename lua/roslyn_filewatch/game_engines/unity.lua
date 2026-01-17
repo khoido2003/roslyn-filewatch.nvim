@@ -258,6 +258,11 @@ M.asset_extensions = {
 	".controller", -- Animator controllers
 	".anim", -- Animation clips
 	".meta", -- Unity metadata files
+	".asmdef", -- Assembly definitions
+	".asmref", -- Assembly references
+	".inputactions", -- Input System actions
+	".uxml", -- UI Toolkit layouts
+	".uss", -- UI Toolkit stylesheets
 }
 
 --- Check if a file is a Unity asset that might need LSP attention
@@ -273,6 +278,16 @@ function M.is_important_asset(path)
 
 	-- ScriptableObject .asset files (contain code references)
 	if path:match("%.asset$") then
+		return true
+	end
+
+	-- Assembly definition files (affect project structure)
+	if path:match("%.asmdef$") or path:match("%.asmref$") then
+		return true
+	end
+
+	-- Input System actions (contain action references)
+	if path:match("%.inputactions$") then
 		return true
 	end
 
