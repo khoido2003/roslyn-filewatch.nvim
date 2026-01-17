@@ -521,7 +521,8 @@ function M.resync_snapshot_for(client_id, root, snapshots, helpers)
 				pcall(helpers.notify, "Resynced and detected " .. #rename_pairs .. " renames", vim.log.levels.DEBUG)
 			end
 			if helpers.notify_roslyn_renames then
-				pcall(helpers.notify_roslyn_renames, rename_pairs)			end
+				pcall(helpers.notify_roslyn_renames, rename_pairs)
+			end
 		end
 
 		if #evs > 0 then
