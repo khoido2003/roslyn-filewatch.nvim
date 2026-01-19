@@ -11,7 +11,7 @@ jobs:
     name: Check Lua formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Stylua
         uses: JohnnyMorganz/stylua-action@v4
         with:
