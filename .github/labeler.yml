@@ -1,0 +1,16 @@
+lua:
+  - changed-files:
+    - any-glob-to-any-file: 
+      - '*.lua'
+      - 'lua/**/*.lua'
+
+docs:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'README.md'
+      - 'doc/**'
+
+ci:
+  - changed-files:
+    - any-glob-to-any-file:
+      - '.github/workflows/**'

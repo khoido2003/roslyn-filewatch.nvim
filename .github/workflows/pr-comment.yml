@@ -1,0 +1,25 @@
+name: Auto PR Comment
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add PR comment
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          message: |
+            👋 Thanks for the PR!
+            
+            CI will automatically:
+            - Run **Stylua** to check code formatting
+            - Auto-label the PR based on files changed
+            - Regenerate docs if needed
+            
+            Please make sure your PR follows the style guidelines.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
