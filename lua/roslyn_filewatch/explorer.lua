@@ -203,18 +203,16 @@ local function scan_project_files_async(project_dir, callback)
 					local lower_name = name:lower()
 					-- Check against config.ignore_dirs (exact match)
 					-- Also keep hardcoded safety ignores for .git/.vs if not covered
-					if
-						name ~= ".git"
-						and name ~= ".vs"
-						and not config.is_ignored_dir(name)
-					then
+					if name ~= ".git" and name ~= ".vs" and not config.is_ignored_dir(name) then
 						-- Check against ignore_patterns
 						if not utils.matches_any_pattern(full_path, config.options.ignore_patterns) then
 							table.insert(dirs_to_scan, { path = full_path, depth = depth + 1 })
 						end
 					end
 				elseif typ == "file" then
-					if utils.should_watch_path(full_path, config.options.ignore_dirs, config.options.watch_extensions) then
+					if
+						utils.should_watch_path(full_path, config.options.ignore_dirs, config.options.watch_extensions)
+					then
 						table.insert(files, full_path)
 					end
 				end
