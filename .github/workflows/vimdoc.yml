@@ -3,7 +3,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'readme.md'
+      - 'README.md'
       - 'lua/**'
 
 permissions:
@@ -13,7 +13,7 @@ jobs:
   vimdoc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           
@@ -22,7 +22,7 @@ jobs:
         with:
           vimdoc: roslyn-filewatch
           description: "File watcher for Roslyn LSP in Neovim (C#) "
-          pandoc: "readme.md"
+          pandoc: "README.md"
           toc: true
           treesitter: true
           
