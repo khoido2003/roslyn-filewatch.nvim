@@ -38,6 +38,7 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 Enable these features in your config to get a full C# IDE experience:
 - **Dotnet CLI**: Build, Run, Watch, Clean, and create Projects directly from Neovim.
 - **NuGet**: Manage packages (Add/Remove/Restore) interactively.
+- **Auto-Restore**: Automatically runs `dotnet restore` when `.csproj` files are modified (opt-in).
 - **Snippets**: A collection of 150+ snippets for Unity, Godot, and ASP.NET (requires LuaSnip).
 - **Solution Explorer**: A tree-view picker to navigate your solution (`:RoslynExplorer`).
 
@@ -163,6 +164,9 @@ require("roslyn_filewatch").setup({
   
   -- Enable NuGet package management commands
   enable_nuget_commands = false,
+
+  -- Enable auto-restore of NuGet packages on .csproj change
+  enable_autorestore = false,
   
   -- Enable C# snippets (requires LuaSnip)
   enable_snippets = false,

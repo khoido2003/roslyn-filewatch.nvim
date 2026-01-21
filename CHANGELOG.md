@@ -5,6 +5,15 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.4] - 2026-01-22
+
+### Added
+- **Auto-Restore for NuGet Packages**: Automatically runs `dotnet restore` when `.csproj` files are modified.
+  - **Zero Lag**: Implemented with a sequential Job Queue to prevent CPU spikes ("Thundering Herd") during Unity project regeneration.
+  - **Smart Notifications**: Aggregates status updates to prevent spam (one "Start" and one "End" notification per batch).
+  - **Opt-in**: Enable via `enable_autorestore = true` in config (default: `false`).
+  - **Robustness**: Detects changes from any source (Unity, Git, Manual edits) in both solution and CSPROJ modes.
+
 ## [v0.3.3] - 2026-01-21
 
 ### Added
