@@ -11,6 +11,7 @@ local M = {}
 
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
+local utils = require("roslyn_filewatch.watcher.utils")
 
 -- Cache for project files to avoid re-scanning
 local _file_cache = {}
@@ -200,18 +201,22 @@ local function scan_project_files_async(project_dir, callback)
 
 				if typ == "directory" then
 					local lower_name = name:lower()
-					-- Skip common ignore dirs
+					-- Check against config.ignore_dirs (exact match)
+					-- Also keep hardcoded safety ignores for .git/.vs if not covered
 					if
-						lower_name ~= "obj"
-						and lower_name ~= "bin"
-						and lower_name ~= ".git"
-						and lower_name ~= ".vs"
-						and not name:match("^%.")
+						name ~= ".git"
+						and name ~= ".vs"
+						and not config.is_ignored_dir(name)
 					then
-						table.insert(dirs_to_scan, { path = full_path, depth = depth + 1 })
+						-- Check against ignore_patterns
+						if not utils.matches_any_pattern(full_path, config.options.ignore_patterns) then
+							table.insert(dirs_to_scan, { path = full_path, depth = depth + 1 })
+						end
 					end
-				elseif typ == "file" and name:match("%.cs$") then
-					table.insert(files, full_path)
+				elseif typ == "file" then
+					if utils.should_watch_path(full_path, config.options.ignore_dirs, config.options.watch_extensions) then
+						table.insert(files, full_path)
+					end
 				end
 
 				count = count + 1
