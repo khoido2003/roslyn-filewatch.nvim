@@ -58,185 +58,193 @@ function M.setup(opts)
 
 	-- ===== DOTNET CLI COMMANDS =====
 
-	-- Build commands
-	vim.api.nvim_create_user_command("RoslynBuild", function(opts)
-		local cli = require("roslyn_filewatch.dotnet_cli")
+	if config.options.enable_dotnet_commands then
+		-- Build commands
+		vim.api.nvim_create_user_command("RoslynBuild", function(opts)
+			local cli = require("roslyn_filewatch.dotnet_cli")
 
-		if opts.args ~= "" then
-			-- Direct argument provided
-			cli.build({ configuration = opts.args })
-		else
-			-- Show interactive selection
-			vim.ui.select({ "Debug", "Release" }, {
-				prompt = "Select build configuration:",
-				format_item = function(item)
-					return item
-				end,
-			}, function(choice)
-				if choice then
-					cli.build({ configuration = choice })
-				end
-			end)
-		end
-	end, { desc = "Build solution/project", nargs = "?" })
+			if opts.args ~= "" then
+				-- Direct argument provided
+				cli.build({ configuration = opts.args })
+			else
+				-- Show interactive selection
+				vim.ui.select({ "Debug", "Release" }, {
+					prompt = "Select build configuration:",
+					format_item = function(item)
+						return item
+					end,
+				}, function(choice)
+					if choice then
+						cli.build({ configuration = choice })
+					end
+				end)
+			end
+		end, { desc = "Build solution/project", nargs = "?" })
 
-	vim.api.nvim_create_user_command("RoslynRun", function(opts)
-		local cli = require("roslyn_filewatch.dotnet_cli")
+		vim.api.nvim_create_user_command("RoslynRun", function(opts)
+			local cli = require("roslyn_filewatch.dotnet_cli")
 
-		if opts.args ~= "" then
-			-- Direct argument provided
-			cli.run({ configuration = opts.args })
-		else
-			-- Show interactive selection
-			vim.ui.select({ "Debug", "Release" }, {
-				prompt = "Select run configuration:",
-				format_item = function(item)
-					return item
-				end,
-			}, function(choice)
-				if choice then
-					cli.run({ configuration = choice })
-				end
-			end)
-		end
-	end, { desc = "Run project", nargs = "?" })
+			if opts.args ~= "" then
+				-- Direct argument provided
+				cli.run({ configuration = opts.args })
+			else
+				-- Show interactive selection
+				vim.ui.select({ "Debug", "Release" }, {
+					prompt = "Select run configuration:",
+					format_item = function(item)
+						return item
+					end,
+				}, function(choice)
+					if choice then
+						cli.run({ configuration = choice })
+					end
+				end)
+			end
+		end, { desc = "Run project", nargs = "?" })
 
-	vim.api.nvim_create_user_command("RoslynWatch", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.watch()
-	end, { desc = "Run with hot reload (dotnet watch)" })
+		vim.api.nvim_create_user_command("RoslynWatch", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.watch()
+		end, { desc = "Run with hot reload (dotnet watch)" })
 
-	vim.api.nvim_create_user_command("RoslynClean", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.clean()
-	end, { desc = "Clean build outputs" })
+		vim.api.nvim_create_user_command("RoslynClean", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.clean()
+		end, { desc = "Clean build outputs" })
+	end
 
 	-- NuGet commands
-	vim.api.nvim_create_user_command("RoslynRestore", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.restore()
-	end, { desc = "Restore NuGet packages" })
+	if config.options.enable_nuget_commands then
+		vim.api.nvim_create_user_command("RoslynRestore", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.restore()
+		end, { desc = "Restore NuGet packages" })
 
-	vim.api.nvim_create_user_command("RoslynNuget", function(opts)
-		local cli = require("roslyn_filewatch.dotnet_cli")
+		vim.api.nvim_create_user_command("RoslynNuget", function(opts)
+			local cli = require("roslyn_filewatch.dotnet_cli")
 
-		if opts.args ~= "" then
-			-- Direct argument provided
-			cli.nuget_add(opts.args)
-		else
-			-- Show interactive input
-			vim.ui.input({ prompt = "Enter NuGet package name: " }, function(package_name)
-				if package_name and package_name ~= "" then
-					cli.nuget_add(package_name)
-				end
-			end)
-		end
-	end, { desc = "Add NuGet package", nargs = "?" })
-
-	vim.api.nvim_create_user_command("RoslynNugetRemove", function(opts)
-		local cli = require("roslyn_filewatch.dotnet_cli")
-
-		if opts.args ~= "" then
-			-- Direct argument provided
-			cli.nuget_remove(opts.args)
-		else
-			-- Find nearest csproj and show installed packages
-			local csproj_files = vim.fs.find(function(name, _)
-				return name:match("%.csproj$")
-			end, {
-				path = vim.fn.expand("%:p:h"),
-				upward = true,
-				type = "file",
-				limit = 1,
-			})
-
-			if #csproj_files == 0 then
-				vim.notify("[roslyn-filewatch] No .csproj found", vim.log.levels.WARN)
-				return
+			if opts.args ~= "" then
+				-- Direct argument provided
+				cli.nuget_add(opts.args)
+			else
+				-- Show interactive input
+				vim.ui.input({ prompt = "Enter NuGet package name: " }, function(package_name)
+					if package_name and package_name ~= "" then
+						cli.nuget_add(package_name)
+					end
+				end)
 			end
+		end, { desc = "Add NuGet package", nargs = "?" })
 
-			local packages = cli.get_installed_packages(csproj_files[1])
+		vim.api.nvim_create_user_command("RoslynNugetRemove", function(opts)
+			local cli = require("roslyn_filewatch.dotnet_cli")
 
-			if #packages == 0 then
-				vim.notify("[roslyn-filewatch] No packages installed", vim.log.levels.INFO)
-				return
-			end
+			if opts.args ~= "" then
+				-- Direct argument provided
+				cli.nuget_remove(opts.args)
+			else
+				-- Find nearest csproj and show installed packages
+				local csproj_files = vim.fs.find(function(name, _)
+					return name:match("%.csproj$")
+				end, {
+					path = vim.fn.expand("%:p:h"),
+					upward = true,
+					type = "file",
+					limit = 1,
+				})
 
-			vim.ui.select(packages, {
-				prompt = "Select package to remove:",
-				format_item = function(item)
-					return item
-				end,
-			}, function(choice)
-				if choice then
-					cli.nuget_remove(choice)
-				end
-			end)
-		end
-	end, { desc = "Remove NuGet package", nargs = "?" })
-
-	-- Project commands
-	vim.api.nvim_create_user_command("RoslynNewProject", function(opts)
-		local cli = require("roslyn_filewatch.dotnet_cli")
-
-		if opts.args ~= "" then
-			-- Direct arguments provided
-			local args = vim.split(opts.args, " ")
-			cli.new_project(args[1], args[2])
-		else
-			-- Show interactive template selection
-			local templates = cli.get_common_templates()
-			local template_items = vim.tbl_map(function(t)
-				return string.format("%s (%s) - %s", t.name, t.short, t.desc)
-			end, templates)
-
-			vim.ui.select(template_items, {
-				prompt = "Select project template:",
-				format_item = function(item)
-					return item
-				end,
-			}, function(choice, idx)
-				if not choice then
+				if #csproj_files == 0 then
+					vim.notify("[roslyn-filewatch] No .csproj found", vim.log.levels.WARN)
 					return
 				end
 
-				local selected_template = templates[idx]
+				local packages = cli.get_installed_packages(csproj_files[1])
 
-				-- Now prompt for project name
-				vim.ui.input({
-					prompt = "Enter project name (optional): ",
-				}, function(project_name)
-					cli.new_project(selected_template.short, project_name)
+				if #packages == 0 then
+					vim.notify("[roslyn-filewatch] No packages installed", vim.log.levels.INFO)
+					return
+				end
+
+				vim.ui.select(packages, {
+					prompt = "Select package to remove:",
+					format_item = function(item)
+						return item
+					end,
+				}, function(choice)
+					if choice then
+						cli.nuget_remove(choice)
+					end
 				end)
-			end)
-		end
-	end, { desc = "Create new project (template [name])", nargs = "*" })
+			end
+		end, { desc = "Remove NuGet package", nargs = "?" })
+	end
 
-	vim.api.nvim_create_user_command("RoslynTemplates", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.list_templates()
-	end, { desc = "List available project templates" })
+	-- Project commands
+	if config.options.enable_dotnet_commands then
+		vim.api.nvim_create_user_command("RoslynNewProject", function(opts)
+			local cli = require("roslyn_filewatch.dotnet_cli")
 
-	vim.api.nvim_create_user_command("RoslynOpenCsproj", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.open_csproj()
-	end, { desc = "Open nearest .csproj file" })
+			if opts.args ~= "" then
+				-- Direct arguments provided
+				local args = vim.split(opts.args, " ")
+				cli.new_project(args[1], args[2])
+			else
+				-- Show interactive template selection
+				local templates = cli.get_common_templates()
+				local template_items = vim.tbl_map(function(t)
+					return string.format("%s (%s) - %s", t.name, t.short, t.desc)
+				end, templates)
 
-	vim.api.nvim_create_user_command("RoslynOpenSln", function()
-		local cli = require("roslyn_filewatch.dotnet_cli")
-		cli.open_sln()
-	end, { desc = "Open solution file" })
+				vim.ui.select(template_items, {
+					prompt = "Select project template:",
+					format_item = function(item)
+						return item
+					end,
+				}, function(choice, idx)
+					if not choice then
+						return
+					end
+
+					local selected_template = templates[idx]
+
+					-- Now prompt for project name
+					vim.ui.input({
+						prompt = "Enter project name (optional): ",
+					}, function(project_name)
+						cli.new_project(selected_template.short, project_name)
+					end)
+				end)
+			end
+		end, { desc = "Create new project (template [name])", nargs = "*" })
+
+		vim.api.nvim_create_user_command("RoslynTemplates", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.list_templates()
+		end, { desc = "List available project templates" })
+
+		vim.api.nvim_create_user_command("RoslynOpenCsproj", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.open_csproj()
+		end, { desc = "Open nearest .csproj file" })
+
+		vim.api.nvim_create_user_command("RoslynOpenSln", function()
+			local cli = require("roslyn_filewatch.dotnet_cli")
+			cli.open_sln()
+		end, { desc = "Open solution file" })
+	end
 
 	-- Snippet commands
-	vim.api.nvim_create_user_command("RoslynSnippets", function()
-		local snippets = require("roslyn_filewatch.snippets")
-		snippets.show_snippets()
-	end, { desc = "Show available C# snippets" })
+	if config.options.enable_snippets then
+		vim.api.nvim_create_user_command("RoslynSnippets", function()
+			local snippets = require("roslyn_filewatch.snippets")
+			snippets.show_snippets()
+		end, { desc = "Show available C# snippets" })
 
-	vim.api.nvim_create_user_command("RoslynLoadSnippets", function()
-		local snippets = require("roslyn_filewatch.snippets")
-		snippets.setup_luasnip()
-	end, { desc = "Load snippets into LuaSnip" })
+		vim.api.nvim_create_user_command("RoslynLoadSnippets", function()
+			local snippets = require("roslyn_filewatch.snippets")
+			snippets.setup_luasnip()
+		end, { desc = "Load snippets into LuaSnip" })
+	end
 
 	vim.api.nvim_create_user_command("RoslynReloadProjects", function()
 		M.reload()

@@ -35,6 +35,8 @@ Auto-detects **Unity, Godot, Stride, MonoGame, FNA** and applies engine-specific
 - Godot: Parses `project.godot`, applies naming conventions
 
 #### ⚙️ Dotnet CLI Integration
+*(Requires `enable_dotnet_commands = true`)*
+
 Full `dotnet` command suite with **interactive options**:
 - Build, run, clean, watch commands
 - NuGet package management
@@ -42,6 +44,8 @@ Full `dotnet` command suite with **interactive options**:
 - **💡 No arguments needed!** Commands prompt for options when called without args
 
 #### 📝 Code Snippets
+*(Requires `enable_snippets = true`)*
+
 150+ snippets for Unity, Godot, ASP.NET, and general C#. Load with `:RoslynLoadSnippets`.
 
 ### 🆕 New in v0.3.0
@@ -139,8 +143,23 @@ require("roslyn_filewatch").setup({
   },
 
   log_level = vim.log.levels.WARN,
+  
+  -- Enable/Disable features (default: false)
+  enable_dotnet_commands = false, -- Enable dotnet CLI commands
+  enable_nuget_commands = false,  -- Enable NuGet commands
+  enable_snippets = false,        -- Enable C# snippets
 })
 ```
+
+### 🎚️ Feature Toggles
+
+To keep the plugin lightweight and avoid cluttering your command list, the following features are **disabled by default**:
+
+- `enable_dotnet_commands`: Enables `RoslynBuild`, `RoslynRun`, `RoslynWatch`, etc.
+- `enable_nuget_commands`: Enables `RoslynNuget`, `RoslynRestore`, `RoslynNugetRemove`.
+- `enable_snippets`: Enables C# snippets and `RoslynSnippets` command.
+
+Set these to `true` in your setup config to enable them.
 
 ---
 
