@@ -3,7 +3,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'README.md'
+      - 'readme.md'
       - 'lua/**'
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
         with:
           vimdoc: roslyn-filewatch
           description: "File watcher for Roslyn LSP in Neovim (C#) "
-          pandoc: "README.md"
+          pandoc: "readme.md"
           toc: true
           treesitter: true
           
