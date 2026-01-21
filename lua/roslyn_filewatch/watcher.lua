@@ -12,6 +12,7 @@ local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
 local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
 local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
 local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
+local restore_mod = require("roslyn_filewatch.restore")
 
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
@@ -279,6 +280,18 @@ end
 local function queue_events(client_id, evs)
 	if not evs or #evs == 0 then
 		return
+	end
+
+	-- AUTO-RESTORE: Check for .csproj changes in the event stream
+	-- This catches ALL changes (fs_event, fs_poll) regardless of solution state
+	if config.options.enable_autorestore then
+		for _, ev in ipairs(evs) do
+			local uri = ev.uri
+			if uri and (uri:match("%.csproj$") or uri:match("%.vbproj$") or uri:match("%.fsproj$")) then
+				local path = vim.uri_to_fname(uri)
+				pcall(restore_mod.schedule_restore, path)
+			end
+		end
 	end
 
 	if config.options.batching and config.options.batching.enabled then
@@ -909,6 +922,11 @@ function M.start(client)
 								local roslyn_path = to_roslyn_path(internal_path)
 								table.insert(new_projects_list, roslyn_path)
 								new_projects_count = new_projects_count + 1
+
+								-- AUTO-RESTORE: If existing project changed, trigger restore
+								if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
+									pcall(restore_mod.schedule_restore, internal_path)
+								end
 							end
 						end
 
@@ -1016,6 +1034,11 @@ function M.start(client)
 									local roslyn_path = to_roslyn_path(internal_path)
 									table.insert(new_projects_list, roslyn_path)
 									new_projects_count = new_projects_count + 1
+
+									-- AUTO-RESTORE: If existing project changed, trigger restore
+									if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
+										pcall(restore_mod.schedule_restore, internal_path)
+									end
 								end
 							end
 

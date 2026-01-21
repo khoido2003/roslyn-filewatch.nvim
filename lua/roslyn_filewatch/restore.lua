@@ -1,0 +1,140 @@
+---@class roslyn_filewatch.restore
+---@field schedule_restore fun(project_path: string)
+---@field is_restoring fun(project_path: string): boolean
+
+local config = require("roslyn_filewatch.config")
+local uv = vim.uv or vim.loop
+
+local M = {}
+
+-- Queue state
+local restore_queue = {} -- List of project paths to restore
+local queued_set = {} -- Set for O(1) deduplication
+local processing_active = false -- Only one restore at a time (Sequential)
+local total_batch_active = false -- Tracks if we are in a "batch" of restores (for notifications)
+
+---@type table<string, uv_timer_t>
+local debounce_timers = {}
+
+--- Notify user about batch status
+---@param status "start" | "end"
+local function notify_batch(status)
+	if status == "start" then
+		if not total_batch_active then
+			total_batch_active = true
+			vim.notify("[roslyn-filewatch] Restoring dependencies...", vim.log.levels.INFO)
+		end
+	elseif status == "end" then
+		-- Only notify end if queue is empty and nothing is processing
+		if #restore_queue == 0 and not processing_active then
+			total_batch_active = false
+			vim.notify("[roslyn-filewatch] All dependencies restored.", vim.log.levels.INFO)
+		end
+	end
+end
+
+--- Process the next item in the queue
+local function process_next()
+	if #restore_queue == 0 then
+		processing_active = false
+		notify_batch("end")
+		return
+	end
+
+	processing_active = true
+	local project_path = table.remove(restore_queue, 1)
+	queued_set[project_path] = nil
+	local project_name = project_path:match("([^/]+)$") or project_path
+
+	notify_batch("start")
+
+	local function on_complete(code, err_msg)
+		-- Always notify errors immediately
+		if code ~= 0 then
+			local msg = err_msg or "Unknown error"
+			vim.schedule(function()
+				vim.notify(
+					"[roslyn-filewatch] Restore failed for " .. project_name .. "\n" .. msg,
+					vim.log.levels.ERROR
+				)
+			end)
+		end
+
+		-- Continue to next item regardless of success/failure
+		vim.schedule(process_next)
+	end
+
+	-- Run dotnet restore
+	if vim.system then
+		vim.system({ "dotnet", "restore", project_path }, { text = true }, function(out)
+			on_complete(out.code, out.stderr or out.stdout)
+		end)
+	else
+		vim.fn.jobstart({ "dotnet", "restore", project_path }, {
+			on_exit = function(_, code)
+				on_complete(code, nil)
+			end,
+		})
+	end
+end
+
+--- Schedule a restore with debounce
+---@param project_path string
+function M.schedule_restore(project_path)
+	if not config.options.enable_autorestore then
+		return
+	end
+
+	-- Normalize path
+	project_path = project_path:gsub("\\", "/")
+
+	-- Cancel existing debounce timer for this file
+	if debounce_timers[project_path] then
+		pcall(function()
+			if not debounce_timers[project_path]:is_closing() then
+				debounce_timers[project_path]:stop()
+				debounce_timers[project_path]:close()
+			end
+		end)
+		debounce_timers[project_path] = nil
+	end
+
+	local t = uv.new_timer()
+	if not t then
+		return
+	end
+	debounce_timers[project_path] = t
+
+	-- Debounce for 2 seconds
+	t:start(2000, 0, function()
+		debounce_timers[project_path] = nil
+		pcall(function()
+			if not t:is_closing() then
+				t:stop()
+				t:close()
+			end
+		end)
+
+		vim.schedule(function()
+			-- Add to queue if not already there
+			if not queued_set[project_path] then
+				table.insert(restore_queue, project_path)
+				queued_set[project_path] = true
+			end
+
+			-- Kick off processing if idle
+			if not processing_active then
+				process_next()
+			end
+		end)
+	end)
+end
+
+--- Check if restore is in progress (in queue or processing)
+---@param project_path string
+---@return boolean
+function M.is_restoring(project_path)
+	return queued_set[project_path] == true or (processing_active and total_batch_active)
+end
+
+return M

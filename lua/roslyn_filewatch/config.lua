@@ -226,6 +226,9 @@ M.options = {
 
 	--- Enable snippets (Unity, Godot, etc.)
 	enable_snippets = false,
+
+	--- Enable auto-restore of NuGet packages on .csproj change (default: true)
+	enable_autorestore = true,
 }
 
 -- Track detected root for preset application
