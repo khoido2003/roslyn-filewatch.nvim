@@ -83,7 +83,7 @@ This section covers how to configure and use the plugin effectively in your dail
 
 ### 1. Configuration
 
-The defaults are sane, but the following settings are commonly adjusted:
+The following settings are commonly adjusted:
 
 ```lua
 require("roslyn_filewatch").setup({
@@ -166,7 +166,7 @@ require("roslyn_filewatch").setup({
   enable_nuget_commands = false,
 
   -- Enable auto-restore of NuGet packages on .csproj change
-  enable_autorestore = false,
+  enable_autorestore = true,
   
   -- Enable C# snippets (requires LuaSnip)
   enable_snippets = false,
@@ -242,6 +242,24 @@ For developers contributing to `roslyn-filewatch.nvim`, this section details the
 
 ### 🗺️ The Code Map
 
+#### Project Structure
+
+```
+lua/roslyn_filewatch/
+├── watcher.lua        # Core orchestrator, starts/stops subsystems per client
+├── watcher/
+│   ├── fs_event.lua   # Low-level uv.fs_event handling
+│   ├── fs_poll.lua    # Polling fallback for platforms with weak fs_event
+│   ├── watchdog.lua   # Periodic resync & restart if no events received
+│   ├── autocmds.lua   # Neovim autocmd integration (BufWrite, BufDelete, etc.)
+│   ├── rename.lua     # Rename detection (Deleted+Created → didRenameFiles)
+│   ├── snapshot.lua   # Snapshot tracking of file tree state
+│   ├── sln_parser.lua # Solution file parser for solution-aware watching
+│   ├── gitignore.lua  # Gitignore pattern parser and matcher
+│   ├── notify.lua     # Thin wrapper for LSP + user notifications
+│   └── utils.lua      # Path normalization, stat helpers, etc.
+```
+---
 *   `lua/roslyn_filewatch/`
     *   **Core Logic**:
         *   `init.lua`: The entry point. Handles setup and command registration.
@@ -255,6 +273,42 @@ For developers contributing to `roslyn-filewatch.nvim`, this section details the
     *   **Engine Support**:
         *   `presets.lua`: Registry of game engines.
         *   `game_engines/`: Individual logic for Unity, Godot, etc. detection.
+---
+
+This plugin keeps Roslyn aware of **file system changes**:
+
+1. **fs_event** (`uv.fs_event`)  
+   - Listens for low-level file changes.  
+   - Fast and efficient where supported.  
+
+2. **fs_poll** (`uv.fs_poll`)  
+   - Polls periodically as a fallback.  
+   - Detects missed events and validates file integrity.  
+
+3. **Snapshots** (`snapshot.lua`)  
+   - Keeps an in-memory map of files and their metadata (mtime, inode, size).  
+   - Allows diffing to detect *created*, *deleted*, or *changed* files.  
+
+4. **Rename detection** (`rename.lua`)  
+   - If a file is deleted and a new one created within a short window → treat as **rename**.  
+   - Sends Roslyn `workspace/didRenameFiles` instead of separate delete/create.  
+
+5. **Batching**  
+   - Groups multiple events into a single LSP notification to reduce traffic.  
+
+6. **Watchdog**  
+   - Restarts the watcher if no events are seen for too long (e.g. Unity reload).  
+   - Ensures resilience against dropped events.  
+
+7. **Autocmds**  
+   - Hooks into Neovim’s buffer lifecycle (`BufWritePost`, `BufDelete`, etc.).  
+   - Keeps open buffers and file state in sync.  
+
+8. **Notifications**  
+   - Translates events into Roslyn-compatible LSP notifications:  
+     - `workspace/didChangeWatchedFiles`  
+     - `workspace/didRenameFiles`
+
 
 ### ⚙️ The Watch Cycle (How it actually works)
 
