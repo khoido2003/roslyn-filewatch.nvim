@@ -92,7 +92,9 @@ LAZY.NVIM ~
 >lua
     {
       "khoido2003/roslyn-filewatch.nvim",
-      config = true, -- calls require('roslyn_filewatch').setup()
+      config = function()
+        require("roslyn_filewatch").setup()
+      end,
     }
 <
 
@@ -122,38 +124,86 @@ The defaults are sane, but the following settings are commonly adjusted:
 
 >lua
     require("roslyn_filewatch").setup({
-      -- === The Essentials ===
-      -- The plugin hooks into these LSP client names. 
-      -- If you use nvim-lspconfig, add "roslyn_ls" here.
+      -- === Core Settings ===
+      -- List of LSP client names to hook into (required)
       client_names = { "roslyn_ls", "roslyn", "roslyn_lsp" },
       
-      -- === Optimization ===
-      -- "deferred_loading": If true, project loading is deferred until a 
-      -- .cs file is opened. This improves startup time, but Intellisense 
-      -- might take a second to wake up on the first file.
-      deferred_loading = true,
+      -- Project preset: "auto", "unity", "console", "large", "none"
+      -- "auto" detects Unity/Godot/Large projects and applies optimized settings
+      preset = "auto", 
       
-      -- "diagnostic_throttling": During heavy git operations or branch switching, 
-      -- Roslyn can spam diagnostics, lagging the UI. This throttles them.
+      -- Logging level: vim.log.levels.WARN, INFO, DEBUG, TRACE
+      log_level = vim.log.levels.WARN,
+    
+      -- === Performance & Loading ===
+      -- Defer project loading until first C# file is opened
+      deferred_loading = true,
+      deferred_loading_delay_ms = 500,
+      
+      -- Diagnostic throttling reduces UI lag during heavy file changes
       diagnostic_throttling = {
         enabled = true,
-        debounce_ms = 150, -- Wait 150ms before asking for errors
-        visible_only = true, -- Don't lint files hidden in background buffers
+        debounce_ms = 500,  -- Wait 500ms before requesting diagnostics
+        visible_only = true, -- Only request diagnostics for visible buffers
       },
     
-      -- === File Watching Tweaks ===
-      -- Directories to completely ignore. Adding folders here saves CPU.
-      ignore_dirs = { "Library", "Temp", "Obj", "Bin", ".git", ".idea" },
+      -- === File Watching Configuration ===
+      -- Directories to completely ignore (exact case-insensitive match)
+      ignore_dirs = { 
+        "Library", "Temp", "Obj", "Bin", ".git", ".idea", ".vs", 
+        ".godot", ".mono", "node_modules" 
+      },
       
-      -- "solution_aware": If true, parses the .sln file and ONLY watches 
-      -- the folders listed inside it. This improves performance on monorepos.
+      -- Glob patterns to exclude (follows gitignore syntax)
+      -- Example: { "*.generated.cs", "**/foo/**" }
+      ignore_patterns = {},
+      
+      -- List of extensions to watch
+      watch_extensions = { 
+        ".cs", ".csproj", ".sln", ".slnx", ".slnf", 
+        ".props", ".targets", ".razor", ".cshtml", ".xaml" 
+      },
+    
+      -- Parse .sln/.slnx/.slnf to limit watch scope to project folders
+      -- Highly recommended for performance on monorepos
       solution_aware = true, 
       
-      -- === Enabling IDE Features ===
-      -- By default, only file watching is enabled. Toggle these for the full experience.
-      enable_dotnet_commands = true, -- Adds :RoslynBuild, :RoslynRun, etc.
-      enable_nuget_commands = true,  -- Adds :RoslynNuget, :RoslynRestore
-      enable_snippets = true,        -- Adds :RoslynLoadSnippets
+      -- Respect standard .gitignore files
+      respect_gitignore = true,
+    
+      -- === Event Processing ===
+      -- Batch multiple events into single notifications
+      batching = {
+        enabled = true,
+        interval = 300, -- Window to coalesce events (ms)
+      },
+      
+      -- Debounce time for processing file system events
+      processing_debounce_ms = 150,
+      
+      -- Quiet period (seconds) required after activity before triggering full scans
+      -- Helps prevents freezing during massive changes (e.g. Unity re-import)
+      activity_quiet_period = 5,
+      
+      -- Rename detection window (ms) to merge delete+create into rename
+      rename_detection_ms = 200,
+    
+      -- === Advanced / Fallback ===
+      -- Polling interval (ms) for fallback watcher and resilience checks
+      poll_interval = 5000, 
+      
+      -- Force non-native polling mode (not recommended unless fs_event fails)
+      force_polling = false,
+      
+      -- === Optional Features (Default: false) ===
+      -- Enable built-in Dotnet CLI commands (:RoslynBuild, :RoslynRun, etc.)
+      enable_dotnet_commands = false,
+      
+      -- Enable NuGet package management commands
+      enable_nuget_commands = false,
+      
+      -- Enable C# snippets (requires LuaSnip)
+      enable_snippets = false,
     })
 <
 
