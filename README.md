@@ -245,22 +245,8 @@ For developers contributing to `roslyn-filewatch.nvim`, this section details the
 
 #### Project Structure
 
-```
-lua/roslyn_filewatch/
-├── watcher.lua        # Core orchestrator, starts/stops subsystems per client
-├── watcher/
-│   ├── fs_event.lua   # Low-level uv.fs_event handling
-│   ├── fs_poll.lua    # Polling fallback for platforms with weak fs_event
-│   ├── watchdog.lua   # Periodic resync & restart if no events received
-│   ├── autocmds.lua   # Neovim autocmd integration (BufWrite, BufDelete, etc.)
-│   ├── rename.lua     # Rename detection (Deleted+Created → didRenameFiles)
-│   ├── snapshot.lua   # Snapshot tracking of file tree state
-│   ├── sln_parser.lua # Solution file parser for solution-aware watching
-│   ├── gitignore.lua  # Gitignore pattern parser and matcher
-│   ├── notify.lua     # Thin wrapper for LSP + user notifications
-│   └── utils.lua      # Path normalization, stat helpers, etc.
-```
----
+This plugin keeps Roslyn aware of **file system changes**:
+
 *   `lua/roslyn_filewatch/`
     *   **Core Logic**:
         *   `init.lua`: The entry point. Handles setup and command registration.
@@ -274,9 +260,6 @@ lua/roslyn_filewatch/
     *   **Engine Support**:
         *   `presets.lua`: Registry of game engines.
         *   `game_engines/`: Individual logic for Unity, Godot, etc. detection.
----
-
-This plugin keeps Roslyn aware of **file system changes**:
 
 1. **fs_event** (`uv.fs_event`)  
    - Listens for low-level file changes.  
