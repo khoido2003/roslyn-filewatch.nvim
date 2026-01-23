@@ -46,6 +46,7 @@ to make C# development in Neovim feel like a full IDE.
 - **Smart Detection**: Handles create, delete, change, and **detects renames** (merging delete+create pairs).
 - **Optimization**: Batches events, throttles diagnostics, and avoids watching ignored files (ignores `.git`, `bin`, `obj`, etc.).
 - **Solution-Aware**: Parses `.sln`, `.slnx`, or `.slnf` files to strictly limit watching to relevant project folders.
+- **csproj-only Support**: Fully supports projects without solution files - automatically detects and watches all `.csproj` files recursively, ensuring new files are immediately recognized by the LSP.
 
 
 🚀 PERFORMANCE & SMART LOADING ~
@@ -121,7 +122,7 @@ daily workflow.
 
 1. CONFIGURATION ~
 
-The defaults are sane, but the following settings are commonly adjusted:
+The following settings are commonly adjusted:
 
 >lua
     require("roslyn_filewatch").setup({
@@ -204,7 +205,7 @@ The defaults are sane, but the following settings are commonly adjusted:
       enable_nuget_commands = false,
     
       -- Enable auto-restore of NuGet packages on .csproj change
-      enable_autorestore = false,
+      enable_autorestore = true,
       
       -- Enable C# snippets (requires LuaSnip)
       enable_snippets = false,
@@ -323,6 +324,11 @@ the architecture.
 
 🗺️ THE CODE MAP ~
 
+
+PROJECT STRUCTURE
+
+This plugin keeps Roslyn aware of **file system changes**:
+
 - `lua/roslyn_filewatch/`
     - **Core Logic**:
         - `init.lua`: The entry point. Handles setup and command registration.
@@ -336,6 +342,39 @@ the architecture.
     - **Engine Support**:
         - `presets.lua`: Registry of game engines.
         - `game_engines/`: Individual logic for Unity, Godot, etc. detection.
+
+1. **fs_event** (`uv.fs_event`)- Listens for low-level file changes.
+- Fast and efficient where supported.
+
+
+2. **fs_poll** (`uv.fs_poll`)- Polls periodically as a fallback.
+- Detects missed events and validates file integrity.
+
+
+3. **Snapshots** (`snapshot.lua`)- Keeps an in-memory map of files and their metadata (mtime, inode, size).
+- Allows diffing to detect _created_, _deleted_, or _changed_ files.
+
+
+4. **Rename detection** (`rename.lua`)- If a file is deleted and a new one created within a short window → treat as **rename**.
+- Sends Roslyn `workspace/didRenameFiles` instead of separate delete/create.
+
+
+5. **Batching**- Groups multiple events into a single LSP notification to reduce traffic.
+
+
+6. **Watchdog**- Restarts the watcher if no events are seen for too long (e.g. Unity reload).
+- Ensures resilience against dropped events.
+
+
+7. **Autocmds**- Hooks into Neovim’s buffer lifecycle (`BufWritePost`, `BufDelete`, etc.).
+- Keeps open buffers and file state in sync.
+
+
+8. **Notifications**- Translates events into Roslyn-compatible LSP notifications:
+    - `workspace/didChangeWatchedFiles`
+    - `workspace/didRenameFiles`
+
+
 
 
 ⚙️ THE WATCH CYCLE (HOW IT ACTUALLY WORKS) ~
@@ -407,6 +446,16 @@ Ensure `ignore_dirs` includes your build artifacts (`bin`, `obj`).
 
 4. **External Changes (Git/Unity)**- **Issue**: Mass changes from outside Neovim (like `git checkout` or Unity re-importing assets) triggers thousands of events.
 - **Mitigation**: Automatically throttle these bursts using `processing_debounce_ms` and `activity_quiet_period`, so Neovim stays responsive, but Roslyn might take a few seconds to catch up.
+
+
+5. **csproj-only Projects (Fixed in v0.3.5)**- **Previously**: Projects without `.sln`/`.slnx` files had issues with new files not being recognized by the LSP.
+- **Now Fixed**: The plugin automatically:
+    - Recursively scans for all `.csproj` files in the project
+    - Sends `project/open` notifications when new source files are created or opened
+    - Triggers Roslyn project reload via csproj CHANGE events (same as opening old files)
+    - Automatically restores dependencies when needed (if `enable_autorestore = true`)
+    - Debounces notifications to prevent constant restores and reduce lag
+- **Note**: For best results with csproj-only projects, ensure `enable_autorestore = true` is set in your config.
 
 
 
