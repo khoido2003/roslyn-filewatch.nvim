@@ -6,6 +6,8 @@
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field normalize_path fun(path: string): string
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])|nil
+---@field sln_mtimes? table<number, { path: string|nil, mtime: number, csproj_files: table<string, number>|nil, csproj_only?: boolean }>|nil Solution/project tracking data
+---@field restore_mod? roslyn_filewatch.restore|nil Restore module for triggering project restore
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -107,7 +109,128 @@ function M.start(client, root, snapshots, deps)
 
 				-- For .cs files, also notify about the nearest .csproj to trigger project refresh
 				-- Use async scanning to avoid blocking
-				if npath:match("%.cs$") then
+				if npath:match("%.cs$") or npath:match("%.vb$") or npath:match("%.fs$") then
+					-- For csproj-only projects: Ensure project is opened when a new source file is opened
+					local config = require("roslyn_filewatch.config")
+					if config.options.solution_aware and deps.sln_mtimes then
+						local sln_info = deps.sln_mtimes[client.id]
+						if sln_info and sln_info.csproj_only and sln_info.csproj_files then
+							-- This is a csproj-only project and a new source file is being opened
+							vim.schedule(function()
+								local clients_list = vim.lsp.get_clients()
+								for _, c in ipairs(clients_list) do
+									if vim.tbl_contains(config.options.client_names, c.name) and c.id == client.id then
+										-- HELPER: Ensure path is canonical for Roslyn on Windows
+										local function to_roslyn_path(p)
+											p = normalize_path(p)
+											if vim.loop.os_uname().sysname == "Windows_NT" then
+												p = p:gsub("^(%a):", function(l)
+													return l:upper() .. ":"
+												end)
+												p = p:gsub("/", "\\")
+											end
+											return p
+										end
+
+										-- Collect all csproj paths
+										local project_paths = {}
+										for csproj_path, _ in pairs(sln_info.csproj_files) do
+											table.insert(project_paths, to_roslyn_path(csproj_path))
+										end
+
+										if #project_paths > 0 then
+											-- Function to send project/open notification
+											local function send_project_open()
+												local project_uris = vim.tbl_map(function(p)
+													return vim.uri_from_fname(p)
+												end, project_paths)
+
+												pcall(function()
+													c:notify("project/open", {
+														projects = project_uris,
+													})
+												end)
+
+												if deps.notify then
+													pcall(
+														deps.notify,
+														"[CSPROJ] Sent project/open when opening new file ("
+															.. #project_paths
+															.. " csproj file(s))",
+														vim.log.levels.DEBUG
+													)
+												end
+											end
+
+											-- CRITICAL FIX: Send project/open IMMEDIATELY when new file is opened
+											-- This ensures Roslyn knows about the project before restore
+											send_project_open()
+
+											-- Then trigger restore if enabled, and send project/open AGAIN after restore completes
+											-- This forces Roslyn to reload the project after restore
+											if config.options.enable_autorestore and deps.restore_mod then
+												-- Track how many restores we're waiting for
+												local restore_count = 0
+												local completed_count = 0
+												local function on_restore_complete(restored_path)
+													completed_count = completed_count + 1
+													-- When all restores complete, send project/open AGAIN to force reload
+													if completed_count >= restore_count then
+														-- Wait a bit more for restore to fully settle, then send project/open again
+														vim.defer_fn(function()
+															send_project_open()
+															-- Also request diagnostics refresh for attached buffers
+															vim.defer_fn(function()
+																if c.is_stopped and c.is_stopped() then
+																	return
+																end
+																local attached_bufs =
+																	vim.lsp.get_buffers_by_client_id(c.id)
+																for _, buf in ipairs(attached_bufs or {}) do
+																	if
+																		vim.api.nvim_buf_is_valid(buf)
+																		and vim.api.nvim_buf_is_loaded(buf)
+																	then
+																		pcall(function()
+																			c:request(
+																				vim.lsp.protocol.Methods.textDocument_diagnostic,
+																				{
+																					textDocument = vim.lsp.util.make_text_document_params(
+																						buf
+																					),
+																				},
+																				nil,
+																				buf
+																			)
+																		end)
+																	end
+																end
+															end, 1000)
+														end, 1000)
+													end
+												end
+
+												-- Schedule restore for each csproj
+												for _, csproj_path in ipairs(project_paths) do
+													restore_count = restore_count + 1
+													pcall(
+														deps.restore_mod.schedule_restore,
+														csproj_path,
+														on_restore_complete
+													)
+												end
+
+												-- If no restores were scheduled, we already sent project/open above
+											end
+										end
+										break
+									end
+								end
+							end)
+						end
+					end
+
+					-- Also notify about the nearest .csproj to trigger project refresh (existing behavior)
 					local function find_csproj_in_dir_async(dir, callback)
 						uv.fs_scandir(dir, function(err, scanner)
 							if err or not scanner then

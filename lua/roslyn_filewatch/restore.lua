@@ -1,5 +1,5 @@
 ---@class roslyn_filewatch.restore
----@field schedule_restore fun(project_path: string)
+---@field schedule_restore fun(project_path: string, on_complete?: fun(project_path: string))
 ---@field is_restoring fun(project_path: string): boolean
 
 local config = require("roslyn_filewatch.config")
@@ -8,13 +8,15 @@ local uv = vim.uv or vim.loop
 local M = {}
 
 -- Queue state
-local restore_queue = {} -- List of project paths to restore
+local restore_queue = {} -- List of { path: string, on_complete?: fun } entries
 local queued_set = {} -- Set for O(1) deduplication
 local processing_active = false -- Only one restore at a time (Sequential)
 local total_batch_active = false -- Tracks if we are in a "batch" of restores (for notifications)
 
 ---@type table<string, uv_timer_t>
 local debounce_timers = {}
+---@type table<string, fun(string)[]> Callbacks to call when restore completes for a project
+local restore_callbacks = {}
 
 --- Notify user about batch status
 ---@param status "start" | "end"
@@ -42,7 +44,9 @@ local function process_next()
 	end
 
 	processing_active = true
-	local project_path = table.remove(restore_queue, 1)
+	local queue_item = table.remove(restore_queue, 1)
+	local project_path = queue_item.path
+	local on_complete_callback = queue_item.on_complete
 	queued_set[project_path] = nil
 	local project_name = project_path:match("([^/]+)$") or project_path
 
@@ -58,6 +62,24 @@ local function process_next()
 					vim.log.levels.ERROR
 				)
 			end)
+		else
+			-- Restore succeeded - call registered callbacks
+			local callbacks = restore_callbacks[project_path]
+			if callbacks then
+				vim.schedule(function()
+					for _, callback in ipairs(callbacks) do
+						pcall(callback, project_path)
+					end
+					restore_callbacks[project_path] = nil
+				end)
+			end
+
+			-- Call the per-restore callback if provided
+			if on_complete_callback then
+				vim.schedule(function()
+					pcall(on_complete_callback, project_path)
+				end)
+			end
 		end
 
 		-- Continue to next item regardless of success/failure
@@ -80,8 +102,15 @@ end
 
 --- Schedule a restore with debounce
 ---@param project_path string
-function M.schedule_restore(project_path)
+---@param on_complete? fun(project_path: string) Callback called when restore completes (success or failure)
+function M.schedule_restore(project_path, on_complete)
 	if not config.options.enable_autorestore then
+		-- If autorestore is disabled, call callback immediately
+		if on_complete then
+			vim.schedule(function()
+				pcall(on_complete, project_path)
+			end)
+		end
 		return
 	end
 
@@ -116,16 +145,26 @@ function M.schedule_restore(project_path)
 		end)
 
 		vim.schedule(function()
-			-- Add to queue if not already there
-			if not queued_set[project_path] then
-				table.insert(restore_queue, project_path)
-				queued_set[project_path] = true
+			-- Store callback even if project is already queued
+			-- (so we can notify when the existing restore completes)
+			if on_complete then
+				if not restore_callbacks[project_path] then
+					restore_callbacks[project_path] = {}
+				end
+				table.insert(restore_callbacks[project_path], on_complete)
 			end
 
-			-- Kick off processing if idle
-			if not processing_active then
-				process_next()
+			-- Add to queue if not already there
+			if not queued_set[project_path] then
+				table.insert(restore_queue, { path = project_path, on_complete = nil })
+				queued_set[project_path] = true
+
+				-- Kick off processing if idle
+				if not processing_active then
+					process_next()
+				end
 			end
+			-- If already queued, the callback will be called when the existing restore completes
 		end)
 	end)
 end

@@ -5,6 +5,32 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.5] - 2026-01-24
+
+### Fixed
+- **CRITICAL: csproj-only projects now work correctly**
+  - Fixed issue where projects without `.sln`/`.slnx` files were not properly watched
+  - New files created in csproj-only projects are now immediately recognized by the LSP
+  - Fixed `scan_csproj_async()` to scan recursively (was only scanning root directory)
+  - Fixed `get_watch_dirs()` to always return `nil` for csproj-only projects, triggering full recursive scan
+  - Ensured full recursive file watching for csproj-only projects (not limited to csproj directories)
+
+### Added
+- **Automatic project reload for csproj-only projects**
+  - Sends `project/open` notifications immediately when new source files are created or opened
+  - Sends csproj CHANGE events to trigger Roslyn project reload (same behavior as opening old files)
+  - Automatically triggers restore and project reload after restore completes
+  - Debounced notifications (500ms) to batch multiple file creations and prevent constant restores
+  - Proper callback mechanism in restore module to notify when restore completes
+
+### Improved
+- **Performance optimizations for csproj-only projects**
+  - Debounced csproj reload notifications (500ms) to reduce lag and batch file creations
+  - Single restore per batch of file creations (not per csproj file)
+  - Proper cleanup of debounce timers when clients stop (prevents memory leaks)
+  - Reduced duplicate notifications by tracking pending reloads
+  - Optimized restore callback system to handle multiple concurrent restores
+
 ## [v0.3.4] - 2026-01-22
 
 ### Added

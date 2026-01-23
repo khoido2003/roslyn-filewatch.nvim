@@ -362,15 +362,19 @@ function M.get_watch_dirs(root)
 			table.insert(csproj_dirs, root)
 		end
 
+		-- For csproj-only projects (no solution file), always use full recursive scan
+		-- This ensures all source files are properly watched regardless of directory structure.
+		-- Solution-aware scanning can miss files in subdirectories when csproj files are at root.
 		-- Unity-style fix: If all csproj files are at root level (only root in list),
 		-- return nil to trigger full recursive scan instead of solution-aware scan.
-		-- This ensures Unity projects where source files are in Assets/ subdirectories
-		-- get properly scanned.
 		if #csproj_dirs == 1 and csproj_dirs[1] == root then
-			return nil -- Full scan for Unity-style projects
+			return nil -- Full scan for projects with csproj at root
 		end
 
-		return csproj_dirs
+		-- Even if csproj files are in subdirectories, for csproj-only projects we should
+		-- use full scan to ensure all source files are watched (csproj-only projects
+		-- don't have solution files to limit scope, so we need to watch everything)
+		return nil -- Always use full scan for csproj-only projects
 	end
 
 	return nil -- No .sln/.slnx or .csproj found, use full scan

@@ -24,63 +24,63 @@ local notify = notify_mod.user
 local notify_roslyn = notify_mod.roslyn_changes
 local notify_roslyn_renames = notify_mod.roslyn_renames
 
---- Async helper: scan root directory for .csproj files and get their mtimes
+--- Async helper: scan root directory recursively for .csproj files and get their mtimes
 --- This replaces blocking vim.fn.glob() calls
 ---@param root string Root directory to scan
 ---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
 local function scan_csproj_async(root, callback)
 	root = normalize_path(root)
 
-	-- Use async scandir
-	uv.fs_scandir(root, function(err, scanner)
-		if err or not scanner then
-			vim.schedule(function()
-				callback({})
-			end)
-			return
-		end
+	-- Use vim.fs.find for recursive search (more reliable than manual recursion)
+	-- This matches the approach used in sln_parser.find_csproj_files
+	local csproj_files = vim.fs.find(function(name, _)
+		return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
+	end, {
+		path = root,
+		limit = 50, -- reasonable limit to avoid scanning huge monorepos
+		type = "file",
+	})
 
-		-- Collect csproj files
-		local csproj_paths = {}
-		while true do
-			local name, typ = uv.fs_scandir_next(scanner)
-			if not name then
-				break
+	if not csproj_files or #csproj_files == 0 then
+		vim.schedule(function()
+			callback({})
+		end)
+		return
+	end
+
+	-- Normalize paths
+	local csproj_paths = {}
+	for _, path in ipairs(csproj_files) do
+		table.insert(csproj_paths, normalize_path(path))
+	end
+
+	-- Async stat each csproj file
+	local results = {}
+	local pending = #csproj_paths
+
+	if pending == 0 then
+		vim.schedule(function()
+			callback({})
+		end)
+		return
+	end
+
+	for _, path in ipairs(csproj_paths) do
+		uv.fs_stat(path, function(stat_err, stat)
+			if not stat_err and stat then
+				results[path] = stat.mtime.sec
+			else
+				results[path] = 0
 			end
 
-			if typ == "file" and name:match("%.csproj$") then
-				table.insert(csproj_paths, normalize_path(root .. "/" .. name))
+			pending = pending - 1
+			if pending == 0 then
+				vim.schedule(function()
+					callback(results)
+				end)
 			end
-		end
-
-		if #csproj_paths == 0 then
-			vim.schedule(function()
-				callback({})
-			end)
-			return
-		end
-
-		-- Async stat each csproj file
-		local results = {}
-		local pending = #csproj_paths
-
-		for _, path in ipairs(csproj_paths) do
-			uv.fs_stat(path, function(stat_err, stat)
-				if not stat_err and stat then
-					results[path] = stat.mtime.sec
-				else
-					results[path] = 0
-				end
-
-				pending = pending - 1
-				if pending == 0 then
-					vim.schedule(function()
-						callback(results)
-					end)
-				end
-			end)
-		end
-	end)
+		end)
+	end
 end
 
 local M = {}
@@ -121,6 +121,9 @@ local sln_mtimes = {}
 -- Timer for polling solution file changes (separate from fs_poll)
 ---@type table<number, uv_timer_t>
 local sln_poll_timers = {}
+-- Track pending csproj reload notifications per client to avoid duplicates
+---@type table<number, { timer: uv_timer_t|nil, pending: boolean }>
+local csproj_reload_pending = {}
 
 -- Deferred loading state: pending project/open notifications
 ---@type table<number, { projects: string[], root: string }>
@@ -294,6 +297,175 @@ local function queue_events(client_id, evs)
 		end
 	end
 
+	-- For csproj-only projects: Ensure project is opened when new .cs files are created
+	-- This ensures the LSP recognizes new files even if project wasn't opened yet
+	if config.options.solution_aware then
+		local sln_info = sln_mtimes[client_id]
+		if sln_info and sln_info.csproj_only and sln_info.csproj_files then
+			local has_new_cs_file = false
+			for _, ev in ipairs(evs) do
+				local uri = ev.uri
+				if uri and ev.type == 1 then -- Created file
+					local path = vim.uri_to_fname(uri)
+					if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+						has_new_cs_file = true
+						break
+					end
+				end
+			end
+
+			if has_new_cs_file then
+				-- Debounce csproj reload notifications to avoid constant restores
+				-- Only trigger reload once per batch of file creations
+				if not csproj_reload_pending[client_id] then
+					csproj_reload_pending[client_id] = { timer = nil, pending = false }
+				end
+				local pending_state = csproj_reload_pending[client_id]
+
+				-- Cancel existing timer if any
+				if pending_state.timer then
+					pcall(function()
+						if not pending_state.timer:is_closing() then
+							pending_state.timer:stop()
+							pending_state.timer:close()
+						end
+					end)
+					pending_state.timer = nil
+				end
+
+				-- Mark as pending
+				pending_state.pending = true
+
+				-- Create debounced timer (500ms debounce to batch multiple file creations)
+				local timer = uv.new_timer()
+				pending_state.timer = timer
+				timer:start(500, 0, function()
+					pending_state.timer = nil
+					pending_state.pending = false
+
+					vim.schedule(function()
+						local clients_list = vim.lsp.get_clients()
+						for _, c in ipairs(clients_list) do
+							if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
+								-- HELPER: Ensure path is canonical for Roslyn on Windows
+								local function to_roslyn_path(p)
+									p = normalize_path(p)
+									if vim.loop.os_uname().sysname == "Windows_NT" then
+										p = p:gsub("^(%a):", function(l)
+											return l:upper() .. ":"
+										end)
+										p = p:gsub("/", "\\")
+									end
+									return p
+								end
+
+								-- Collect all csproj paths
+								local project_paths = {}
+								for csproj_path, _ in pairs(sln_info.csproj_files) do
+									table.insert(project_paths, to_roslyn_path(csproj_path))
+								end
+
+								if #project_paths > 0 then
+									-- Function to send project/open notification
+									local function send_project_open()
+										local project_uris = vim.tbl_map(function(p)
+											return vim.uri_from_fname(p)
+										end, project_paths)
+
+										pcall(function()
+											c:notify("project/open", {
+												projects = project_uris,
+											})
+										end)
+
+										notify(
+											"[CSPROJ] Sent project/open (" .. #project_paths .. " csproj file(s))",
+											vim.log.levels.DEBUG
+										)
+									end
+
+									-- Send csproj CHANGE events to trigger Roslyn project reload
+									-- This is what happens when an old file is opened
+									local csproj_change_events = {}
+									for _, csproj_path in ipairs(project_paths) do
+										table.insert(csproj_change_events, {
+											uri = vim.uri_from_fname(csproj_path),
+											type = 2, -- Changed
+										})
+									end
+
+									-- Send csproj change events and project/open
+									if #csproj_change_events > 0 then
+										pcall(notify_roslyn, csproj_change_events)
+										notify(
+											"[CSPROJ] Sent csproj change events to trigger project reload ("
+												.. #csproj_change_events
+												.. " csproj file(s))",
+											vim.log.levels.DEBUG
+										)
+									end
+									send_project_open()
+
+									-- Trigger restore if enabled (restore is already debounced internally)
+									if config.options.enable_autorestore then
+										-- Only restore once, even if multiple files are created
+										local restore_triggered = false
+										for _, csproj_path in ipairs(project_paths) do
+											if not restore_triggered then
+												restore_triggered = true
+												-- Schedule restore with callback to send reload after completion
+												pcall(restore_mod.schedule_restore, csproj_path, function(restored_path)
+													-- After restore completes, send reload notifications
+													vim.defer_fn(function()
+														if c.is_stopped and c.is_stopped() then
+															return
+														end
+														-- Send csproj change events again to force reload
+														if #csproj_change_events > 0 then
+															pcall(notify_roslyn, csproj_change_events)
+														end
+														send_project_open()
+														-- Request diagnostics refresh
+														vim.defer_fn(function()
+															if c.is_stopped and c.is_stopped() then
+																return
+															end
+															local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
+															for _, buf in ipairs(attached_bufs or {}) do
+																if
+																	vim.api.nvim_buf_is_valid(buf)
+																	and vim.api.nvim_buf_is_loaded(buf)
+																then
+																	pcall(function()
+																		c:request(
+																			vim.lsp.protocol.Methods.textDocument_diagnostic,
+																			{
+																				textDocument = vim.lsp.util.make_text_document_params(
+																					buf
+																				),
+																			},
+																			nil,
+																			buf
+																		)
+																	end)
+																end
+															end
+														end, 500)
+													end, 500)
+												end)
+											end
+										end
+									end
+								end
+								break
+							end
+						end
+					end)
+				end)
+			end
+		end
+	end
+
 	if config.options.batching and config.options.batching.enabled then
 		if not batch_queues[client_id] then
 			batch_queues[client_id] = { events = {}, timer = nil }
@@ -445,6 +617,18 @@ function M.stop(client)
 	-- Clear incremental scanning state
 	dirty_dirs[cid] = nil
 	needs_full_scan[cid] = nil
+	-- Clear csproj reload pending state
+	if csproj_reload_pending[cid] then
+		if csproj_reload_pending[cid].timer then
+			pcall(function()
+				if not csproj_reload_pending[cid].timer:is_closing() then
+					csproj_reload_pending[cid].timer:stop()
+					csproj_reload_pending[cid].timer:close()
+				end
+			end)
+		end
+		csproj_reload_pending[cid] = nil
+	end
 	-- Cleanup handles/timers
 	cleanup_client(cid)
 	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
@@ -1141,6 +1325,8 @@ function M.start(client)
 		restart_watcher = restart_watcher,
 		normalize_path = normalize_path,
 		queue_events = queue_events,
+		sln_mtimes = sln_mtimes,
+		restore_mod = restore_mod,
 	})
 	autocmds[client.id] = autocmd_ids
 

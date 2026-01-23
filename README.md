@@ -21,6 +21,7 @@ This plugin adds a robust **cross-platform file watcher** and a suite of tools t
 - **Smart Detection**: Handles create, delete, change, and **detects renames** (merging delete+create pairs).
 - **Optimization**: Batches events, throttles diagnostics, and avoids watching ignored files (ignores `.git`, `bin`, `obj`, etc.).
 - **Solution-Aware**: Parses `.sln`, `.slnx`, or `.slnf` files to strictly limit watching to relevant project folders.
+- **csproj-only Support**: Fully supports projects without solution files - automatically detects and watches all `.csproj` files recursively, ensuring new files are immediately recognized by the LSP.
 
 ### 🚀 Performance & Smart Loading
 - **Deferred Loading**: Delays project loading until you actually open a C# file to speed up startup for large solutions.
@@ -389,6 +390,16 @@ This plugin keeps Roslyn aware of **file system changes**:
 4.  **External Changes (Git/Unity)**
     *   **Issue**: Mass changes from outside Neovim (like `git checkout` or Unity re-importing assets) triggers thousands of events.
     *   **Mitigation**: Automatically throttle these bursts using `processing_debounce_ms` and `activity_quiet_period`, so Neovim stays responsive, but Roslyn might take a few seconds to catch up.
+
+5.  **csproj-only Projects (Fixed in v0.3.5)**
+    *   **Previously**: Projects without `.sln`/`.slnx` files had issues with new files not being recognized by the LSP.
+    *   **Now Fixed**: The plugin automatically:
+        *   Recursively scans for all `.csproj` files in the project
+        *   Sends `project/open` notifications when new source files are created or opened
+        *   Triggers Roslyn project reload via csproj CHANGE events (same as opening old files)
+        *   Automatically restores dependencies when needed (if `enable_autorestore = true`)
+        *   Debounces notifications to prevent constant restores and reduce lag
+    *   **Note**: For best results with csproj-only projects, ensure `enable_autorestore = true` is set in your config.
 
 ---
 
