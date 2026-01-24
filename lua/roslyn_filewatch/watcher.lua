@@ -435,6 +435,82 @@ end
 -- EVENT QUEUE AND BATCHING
 ------------------------------------------------------
 
+--- Process auto-restore logic (csproj changes + Unity fallback)
+---@param client_id number
+---@param evs roslyn_filewatch.FileChange[]
+---@param state ClientState
+local function process_auto_restore(client_id, evs, state)
+	if not config.options.enable_autorestore then
+		return
+	end
+
+	local restore_triggered = false
+
+	-- 1. Check for explicit .csproj/.vbproj/.fsproj changes
+	for _, ev in ipairs(evs) do
+		local uri = ev.uri
+		if uri and (uri:match("%.csproj$") or uri:match("%.vbproj$") or uri:match("%.fsproj$")) then
+			local path = vim.uri_to_fname(uri)
+			-- Standard delay (2s) for explicit project file changes
+			pcall(restore_mod.schedule_restore, path, 2000)
+			restore_triggered = true
+		end
+	end
+
+	-- 2. Fallback: Check for source file creation
+	-- If we didn't see a project file change, but we see a new .cs file,
+	-- it might be Unity creating a file in a new folder. Unity will eventually
+	-- regenerate the .csproj, but we might miss that event or it might be delayed.
+	-- We trigger a restore with a LONGER delay (5s) to allow Unity to finish.
+	if not restore_triggered then
+		for _, ev in ipairs(evs) do
+			if ev.type == 1 and ev.uri then -- Created
+				local path = vim.uri_to_fname(ev.uri)
+				if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+					-- Find which project this file likely belongs to
+					if state.sln_info and state.sln_info.csproj_files then
+						for csproj_path, _ in pairs(state.sln_info.csproj_files) do
+							-- Trigger restore with 5000ms delay
+							-- This prevents racing with Unity's internal generation
+							pcall(restore_mod.schedule_restore, csproj_path, 5000)
+						end
+						-- Only trigger once per batch
+						break
+					end
+				end
+			end
+		end
+	end
+end
+
+--- Process csproj-only mode reload logic
+---@param client_id number
+---@param evs roslyn_filewatch.FileChange[]
+---@param state ClientState
+local function process_csproj_only_reload(client_id, evs, state)
+	if not config.options.solution_aware or not state.sln_info or not state.sln_info.csproj_only then
+		return
+	end
+
+	for _, ev in ipairs(evs) do
+		local uri = ev.uri
+		if uri and ev.type == 1 then -- Created file
+			local path = vim.uri_to_fname(uri)
+			if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+				-- Find the client and trigger reload
+				local clients_list = vim.lsp.get_clients()
+				for _, c in ipairs(clients_list) do
+					if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
+						handle_csproj_reload(c, state.sln_info)
+						break
+					end
+				end
+				break
+			end
+		end
+	end
+end
+
 --- Queue and batch flush events
 ---@param client_id number
 ---@param evs roslyn_filewatch.FileChange[]
@@ -445,37 +521,11 @@ local function queue_events(client_id, evs)
 
 	local state = get_client_state(client_id)
 
-	-- AUTO-RESTORE: Check for .csproj changes in the event stream
-	if config.options.enable_autorestore then
-		for _, ev in ipairs(evs) do
-			local uri = ev.uri
-			if uri and (uri:match("%.csproj$") or uri:match("%.vbproj$") or uri:match("%.fsproj$")) then
-				local path = vim.uri_to_fname(uri)
-				pcall(restore_mod.schedule_restore, path)
-			end
-		end
-	end
+	-- Handle auto-restore (including Unity fallback)
+	process_auto_restore(client_id, evs, state)
 
-	-- For csproj-only projects: Handle new .cs file creation
-	if config.options.solution_aware and state.sln_info and state.sln_info.csproj_only then
-		for _, ev in ipairs(evs) do
-			local uri = ev.uri
-			if uri and ev.type == 1 then -- Created file
-				local path = vim.uri_to_fname(uri)
-				if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
-					-- Find the client and trigger reload
-					local clients_list = vim.lsp.get_clients()
-					for _, c in ipairs(clients_list) do
-						if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
-							handle_csproj_reload(c, state.sln_info)
-							break
-						end
-					end
-					break
-				end
-			end
-		end
-	end
+	-- Handle csproj-only project reload
+	process_csproj_only_reload(client_id, evs, state)
 
 	-- Batching logic
 	if config.options.batching and config.options.batching.enabled then

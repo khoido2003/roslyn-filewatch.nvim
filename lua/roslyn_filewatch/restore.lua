@@ -102,8 +102,15 @@ end
 
 --- Schedule a restore with debounce
 ---@param project_path string
----@param on_complete? fun(project_path: string) Callback called when restore completes (success or failure)
-function M.schedule_restore(project_path, on_complete)
+---@param on_complete? fun(project_path: string)|number Callback or delay_ms
+---@param delay_ms? number Delay in ms (default 2000)
+function M.schedule_restore(project_path, on_complete, delay_ms)
+	-- Handle argument overloading: schedule_restore(path, delay_ms)
+	if type(on_complete) == "number" then
+		delay_ms = on_complete
+		on_complete = nil
+	end
+
 	if not config.options.enable_autorestore then
 		-- If autorestore is disabled, call callback immediately
 		if on_complete then
@@ -134,8 +141,11 @@ function M.schedule_restore(project_path, on_complete)
 	end
 	debounce_timers[project_path] = t
 
-	-- Debounce for 2 seconds
-	t:start(2000, 0, function()
+	-- Debounce (default 2000ms, or custom delay)
+	-- For Unity, we often want a longer delay (e.g. 5000ms) to let regeneration finish
+	local delay = delay_ms or 2000
+
+	t:start(delay, 0, function()
 		debounce_timers[project_path] = nil
 		pcall(function()
 			if not t:is_closing() then
