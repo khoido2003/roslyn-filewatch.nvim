@@ -12,7 +12,16 @@
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
 
+-- Import shared utilities
+local to_roslyn_path = utils.to_roslyn_path
+local request_diagnostics_refresh = utils.request_diagnostics_refresh
+local notify_project_open = utils.notify_project_open
+
 local M = {}
+
+-- Track if initial project open was sent for each client (prevents restore on every file open)
+---@type table<number, boolean>
+local initial_project_open_sent = {}
 
 --- Start autocmds for the watcher
 --- Creates a unique autocmd group per client to prevent cross-client triggering
@@ -24,10 +33,8 @@ local M = {}
 function M.start(client, root, snapshots, deps)
 	deps = deps or {}
 	local notify = deps.notify or function() end
-	local restart_watcher = deps.restart_watcher
 	local normalize_path = deps.normalize_path or utils.normalize_path
 
-	-- BUG FIX: Create a unique autocmd group per client to prevent cross-client triggering
 	local group_name = "RoslynFilewatch_" .. client.id
 	local group = vim.api.nvim_create_augroup(group_name, { clear = true })
 
@@ -42,7 +49,6 @@ function M.start(client, root, snapshots, deps)
 			return true
 		end
 		local name = vim.api.nvim_buf_get_name(buf)
-		-- Ignore if buftype is set AND buffer has no name
 		if bt ~= "" and (not name or name == "") then
 			return true
 		end
@@ -74,26 +80,77 @@ function M.start(client, root, snapshots, deps)
 
 	--- Handle file existence check
 	---@param bufpath string
+	---@return boolean true if file vanished
 	local function handle_file_check(bufpath)
 		if not uv.fs_stat(bufpath) then
-			-- File vanished - do nothing, fs_event/fs_poll will handle it
 			return true
 		end
 		return false
 	end
 
-	--- Check if file is in snapshot - lightweight version that doesn't do full resync
-	--- Adds the file to snapshot and queues create event for LSP
-	--- Also notifies about .csproj to help Roslyn refresh project model
+	--- Collect Roslyn-formatted project paths from sln_info
+	---@param sln_info table|nil
+	---@return string[]
+	local function collect_project_paths(sln_info)
+		if not sln_info or not sln_info.csproj_files then
+			return {}
+		end
+
+		local project_paths = {}
+		for csproj_path, _ in pairs(sln_info.csproj_files) do
+			table.insert(project_paths, to_roslyn_path(csproj_path))
+		end
+		return project_paths
+	end
+
+	--- Handle csproj-only project open (called once per client, not on every file open)
+	---@param sln_info table
+	local function handle_csproj_project_open(sln_info)
+		-- Only send project/open ONCE per client session
+		if initial_project_open_sent[client.id] then
+			return
+		end
+
+		local project_paths = collect_project_paths(sln_info)
+		if #project_paths == 0 then
+			return
+		end
+
+		initial_project_open_sent[client.id] = true
+
+		-- Send project/open notification
+		notify_project_open(client, project_paths, notify)
+
+		-- Trigger restore if enabled (only once, not on every file open)
+		local config = require("roslyn_filewatch.config")
+		if config.options.enable_autorestore and deps.restore_mod then
+			-- Only restore the first csproj
+			local first_path = project_paths[1]
+			if first_path then
+				pcall(deps.restore_mod.schedule_restore, first_path, function(_)
+					-- After restore completes, send project/open again and refresh diagnostics
+					vim.defer_fn(function()
+						if client.is_stopped and client.is_stopped() then
+							return
+						end
+						notify_project_open(client, project_paths, notify)
+						request_diagnostics_refresh(client, 500)
+					end, 500)
+				end)
+			end
+		end
+	end
+
+	--- Check if file is in snapshot and handle project open for csproj-only projects
 	---@param bufpath string
 	local function ensure_in_snapshot(bufpath)
 		local npath = normalize_path(bufpath)
 		local client_snap = snapshots[client.id]
+
 		if not client_snap or client_snap[npath] == nil then
-			-- File not in snapshot - check if it exists and add it directly
+			-- File not in snapshot - check if it exists and add it
 			local st = uv.fs_stat(bufpath)
 			if st and st.type == "file" then
-				-- Add to snapshot directly
 				if not snapshots[client.id] then
 					snapshots[client.id] = {}
 				end
@@ -107,130 +164,18 @@ function M.start(client, root, snapshots, deps)
 				-- Queue create event for LSP
 				local events = { { uri = vim.uri_from_fname(npath), type = 1 } }
 
-				-- For .cs files, also notify about the nearest .csproj to trigger project refresh
-				-- Use async scanning to avoid blocking
+				-- For source files in csproj-only projects, handle project open (once)
 				if npath:match("%.cs$") or npath:match("%.vb$") or npath:match("%.fs$") then
-					-- For csproj-only projects: Ensure project is opened when a new source file is opened
 					local config = require("roslyn_filewatch.config")
 					if config.options.solution_aware and deps.sln_mtimes then
 						local sln_info = deps.sln_mtimes[client.id]
 						if sln_info and sln_info.csproj_only and sln_info.csproj_files then
-							-- This is a csproj-only project and a new source file is being opened
-							vim.schedule(function()
-								local clients_list = vim.lsp.get_clients()
-								for _, c in ipairs(clients_list) do
-									if vim.tbl_contains(config.options.client_names, c.name) and c.id == client.id then
-										-- HELPER: Ensure path is canonical for Roslyn on Windows
-										local function to_roslyn_path(p)
-											p = normalize_path(p)
-											if vim.loop.os_uname().sysname == "Windows_NT" then
-												p = p:gsub("^(%a):", function(l)
-													return l:upper() .. ":"
-												end)
-												p = p:gsub("/", "\\")
-											end
-											return p
-										end
-
-										-- Collect all csproj paths
-										local project_paths = {}
-										for csproj_path, _ in pairs(sln_info.csproj_files) do
-											table.insert(project_paths, to_roslyn_path(csproj_path))
-										end
-
-										if #project_paths > 0 then
-											-- Function to send project/open notification
-											local function send_project_open()
-												local project_uris = vim.tbl_map(function(p)
-													return vim.uri_from_fname(p)
-												end, project_paths)
-
-												pcall(function()
-													c:notify("project/open", {
-														projects = project_uris,
-													})
-												end)
-
-												if deps.notify then
-													pcall(
-														deps.notify,
-														"[CSPROJ] Sent project/open when opening new file ("
-															.. #project_paths
-															.. " csproj file(s))",
-														vim.log.levels.DEBUG
-													)
-												end
-											end
-
-											-- CRITICAL FIX: Send project/open IMMEDIATELY when new file is opened
-											-- This ensures Roslyn knows about the project before restore
-											send_project_open()
-
-											-- Then trigger restore if enabled, and send project/open AGAIN after restore completes
-											-- This forces Roslyn to reload the project after restore
-											if config.options.enable_autorestore and deps.restore_mod then
-												-- Track how many restores we're waiting for
-												local restore_count = 0
-												local completed_count = 0
-												local function on_restore_complete(restored_path)
-													completed_count = completed_count + 1
-													-- When all restores complete, send project/open AGAIN to force reload
-													if completed_count >= restore_count then
-														-- Wait a bit more for restore to fully settle, then send project/open again
-														vim.defer_fn(function()
-															send_project_open()
-															-- Also request diagnostics refresh for attached buffers
-															vim.defer_fn(function()
-																if c.is_stopped and c.is_stopped() then
-																	return
-																end
-																local attached_bufs =
-																	vim.lsp.get_buffers_by_client_id(c.id)
-																for _, buf in ipairs(attached_bufs or {}) do
-																	if
-																		vim.api.nvim_buf_is_valid(buf)
-																		and vim.api.nvim_buf_is_loaded(buf)
-																	then
-																		pcall(function()
-																			c:request(
-																				vim.lsp.protocol.Methods.textDocument_diagnostic,
-																				{
-																					textDocument = vim.lsp.util.make_text_document_params(
-																						buf
-																					),
-																				},
-																				nil,
-																				buf
-																			)
-																		end)
-																	end
-																end
-															end, 1000)
-														end, 1000)
-													end
-												end
-
-												-- Schedule restore for each csproj
-												for _, csproj_path in ipairs(project_paths) do
-													restore_count = restore_count + 1
-													pcall(
-														deps.restore_mod.schedule_restore,
-														csproj_path,
-														on_restore_complete
-													)
-												end
-
-												-- If no restores were scheduled, we already sent project/open above
-											end
-										end
-										break
-									end
-								end
-							end)
+							-- Handle project open (only once per client)
+							handle_csproj_project_open(sln_info)
 						end
 					end
 
-					-- Also notify about the nearest .csproj to trigger project refresh (existing behavior)
+					-- Also notify about the nearest .csproj
 					local function find_csproj_in_dir_async(dir, callback)
 						uv.fs_scandir(dir, function(err, scanner)
 							if err or not scanner then
@@ -253,11 +198,10 @@ function M.start(client, root, snapshots, deps)
 
 					local function search_up_for_csproj(dir)
 						if not dir or dir == "" or not utils.path_starts_with(dir, root) then
-							return -- Reached root or invalid, stop searching
+							return
 						end
 						find_csproj_in_dir_async(dir, function(csproj_files)
 							if #csproj_files > 0 then
-								-- Found csproj files, queue events
 								local csproj_events = {}
 								for _, csproj in ipairs(csproj_files) do
 									table.insert(csproj_events, { uri = vim.uri_from_fname(csproj), type = 2 })
@@ -268,7 +212,6 @@ function M.start(client, root, snapshots, deps)
 									end)
 								end
 							else
-								-- Not found, search parent directory
 								local parent = dir:match("^(.+)/[^/]+$")
 								search_up_for_csproj(parent)
 							end
@@ -299,8 +242,6 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- Only process if buffer was attached to this client
-			-- Note: On BufDelete, the buffer may already be detached, so also check path
 			local bufpath = vim.api.nvim_buf_get_name(args.buf)
 			if bufpath == "" then
 				return
@@ -310,8 +251,9 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- Check if file still exists
+			-- Check if file still exists (handled by fs_event/fs_poll)
 			if not uv.fs_stat(bufpath) then
+				-- File vanished - nothing to do here
 			end
 		end,
 	})
@@ -334,7 +276,6 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- File exists: ensure it's in snapshot
 			ensure_in_snapshot(bufpath)
 		end,
 	})
@@ -348,7 +289,6 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- Only process if buffer is attached to THIS client
 			if not is_buffer_attached_to_client(args.buf) then
 				return
 			end
@@ -362,13 +302,18 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
-			-- File exists: ensure it's in snapshot
 			ensure_in_snapshot(bufpath)
 		end,
 	})
 	table.insert(ids, id_extra)
 
 	return ids
+end
+
+--- Clear tracking state for a client (called on LspDetach)
+---@param client_id number
+function M.clear_client(client_id)
+	initial_project_open_sent[client_id] = nil
 end
 
 return M

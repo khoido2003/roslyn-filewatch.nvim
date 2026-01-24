@@ -14,30 +14,170 @@ local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
 local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
 local restore_mod = require("roslyn_filewatch.restore")
 
+-- Import shared utilities
 local mtime_ns = utils.mtime_ns
 local identity_from_stat = utils.identity_from_stat
 local same_file_info = utils.same_file_info
 local normalize_path = utils.normalize_path
+local to_roslyn_path = utils.to_roslyn_path
+local safe_close_handle = utils.safe_close_handle
+local request_diagnostics_refresh = utils.request_diagnostics_refresh
+local notify_project_open = utils.notify_project_open
 local scan_tree = snapshot_mod.scan_tree
 
 local notify = notify_mod.user
 local notify_roslyn = notify_mod.roslyn_changes
 local notify_roslyn_renames = notify_mod.roslyn_renames
 
+local M = {}
+
+------------------------------------------------------
+-- CONSOLIDATED CLIENT STATE (Phase 3)
+-- Instead of 17 separate tables, use a single structure per client
+------------------------------------------------------
+
+---@class ClientState
+---@field watcher uv_fs_event_t|nil
+---@field poller uv_fs_poll_t|nil
+---@field watchdog uv_timer_t|nil
+---@field sln_poll_timer uv_timer_t|nil
+---@field batch_queue { events: roslyn_filewatch.FileChange[], timer: uv_timer_t|nil }|nil
+---@field snapshot table<string, roslyn_filewatch.SnapshotEntry>
+---@field last_event number Last event timestamp
+---@field restart_scheduled boolean
+---@field restart_backoff_until number
+---@field fs_event_disabled_until number
+---@field dirty_dirs table<string, boolean>
+---@field needs_full_scan boolean
+---@field sln_info { path: string|nil, mtime: number, csproj_files: table<string, number>|nil, csproj_only?: boolean }|nil
+---@field csproj_reload_pending { timer: uv_timer_t|nil, pending: boolean }|nil
+---@field autocmd_ids number[]|nil
+
+---@type table<number, ClientState>
+local client_states = {}
+
+-- Threshold: if more than this many dirty dirs, do full scan instead
+local DIRTY_DIRS_THRESHOLD = 10
+
+--- Get or create client state
+---@param client_id number
+---@return ClientState
+local function get_client_state(client_id)
+	if not client_states[client_id] then
+		client_states[client_id] = {
+			watcher = nil,
+			poller = nil,
+			watchdog = nil,
+			sln_poll_timer = nil,
+			batch_queue = nil,
+			snapshot = {},
+			last_event = 0,
+			restart_scheduled = false,
+			restart_backoff_until = 0,
+			fs_event_disabled_until = 0,
+			dirty_dirs = {},
+			needs_full_scan = false,
+			sln_info = nil,
+			csproj_reload_pending = nil,
+			autocmd_ids = nil,
+		}
+	end
+	return client_states[client_id]
+end
+
+-- Diagnostics module (lazy loaded)
+local diagnostics_mod = nil
+local function get_diagnostics_mod()
+	if not diagnostics_mod then
+		local ok, mod = pcall(require, "roslyn_filewatch.diagnostics")
+		if ok then
+			diagnostics_mod = mod
+		end
+	end
+	return diagnostics_mod
+end
+
+-- Register state references with status module for RoslynFilewatchStatus command
+pcall(function()
+	local status_mod = require("roslyn_filewatch.status")
+	if status_mod and status_mod.register_refs then
+		-- Create proxy tables that read from client_states
+		local watchers_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].watcher
+			end,
+			__pairs = function()
+				local result = {}
+				for k, v in pairs(client_states) do
+					if v.watcher then
+						result[k] = v.watcher
+					end
+				end
+				return pairs(result)
+			end,
+		})
+		local pollers_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].poller
+			end,
+		})
+		local watchdogs_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].watchdog
+			end,
+		})
+		local snapshots_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].snapshot
+			end,
+			__newindex = function(_, k, v)
+				if client_states[k] then
+					client_states[k].snapshot = v
+				end
+			end,
+		})
+		local last_events_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].last_event
+			end,
+			__newindex = function(_, k, v)
+				if client_states[k] then
+					client_states[k].last_event = v
+				end
+			end,
+		})
+		local dirty_dirs_proxy = setmetatable({}, {
+			__index = function(_, k)
+				return client_states[k] and client_states[k].dirty_dirs
+			end,
+		})
+
+		status_mod.register_refs({
+			watchers = watchers_proxy,
+			pollers = pollers_proxy,
+			watchdogs = watchdogs_proxy,
+			snapshots = snapshots_proxy,
+			last_events = last_events_proxy,
+			dirty_dirs = dirty_dirs_proxy,
+		})
+	end
+end)
+
+------------------------------------------------------
+-- ASYNC HELPERS
+------------------------------------------------------
+
 --- Async helper: scan root directory recursively for .csproj files and get their mtimes
---- This replaces blocking vim.fn.glob() calls
 ---@param root string Root directory to scan
 ---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
 local function scan_csproj_async(root, callback)
 	root = normalize_path(root)
 
-	-- Use vim.fs.find for recursive search (more reliable than manual recursion)
-	-- This matches the approach used in sln_parser.find_csproj_files
 	local csproj_files = vim.fs.find(function(name, _)
 		return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
 	end, {
 		path = root,
-		limit = 50, -- reasonable limit to avoid scanning huge monorepos
+		limit = 50,
 		type = "file",
 	})
 
@@ -48,13 +188,11 @@ local function scan_csproj_async(root, callback)
 		return
 	end
 
-	-- Normalize paths
 	local csproj_paths = {}
 	for _, path in ipairs(csproj_files) do
 		table.insert(csproj_paths, normalize_path(path))
 	end
 
-	-- Async stat each csproj file
 	local results = {}
 	local pending = #csproj_paths
 
@@ -83,84 +221,8 @@ local function scan_csproj_async(root, callback)
 	end
 end
 
-local M = {}
-
----@type table<number, uv_fs_event_t>
-local watchers = {}
----@type table<number, uv_fs_poll_t>
-local pollers = {}
----@type table<number, { events: roslyn_filewatch.FileChange[], timer: uv_timer_t|nil }>
-local batch_queues = {}
----@type table<number, uv_timer_t>
-local watchdogs = {}
----@type table<number, table<string, roslyn_filewatch.SnapshotEntry>>
-local snapshots = {}
----@type table<number, number>
-local last_events = {}
----@type table<number, boolean>
-local restart_scheduled = {}
----@type table<number, number>
-local restart_backoff_until = {}
----@type table<number, number[]>
-local autocmds = {}
----@type table<number, number>
-local fs_event_disabled_until = {}
-
--- Incremental scanning: track directories that need rescanning
----@type table<number, table<string, boolean>>
-local dirty_dirs = {}
--- Force full scan on next poll (set on startup, watchdog restart, errors)
----@type table<number, boolean>
-local needs_full_scan = {}
--- Threshold: if more than this many dirty dirs, do full scan instead
-local DIRTY_DIRS_THRESHOLD = 10
-
--- Track solution file mtime per client for change detection
----@type table<number, { path: string, mtime: number }>
-local sln_mtimes = {}
--- Timer for polling solution file changes (separate from fs_poll)
----@type table<number, uv_timer_t>
-local sln_poll_timers = {}
--- Track pending csproj reload notifications per client to avoid duplicates
----@type table<number, { timer: uv_timer_t|nil, pending: boolean }>
-local csproj_reload_pending = {}
-
--- Deferred loading state: pending project/open notifications
----@type table<number, { projects: string[], root: string }>
-local deferred_projects = {}
--- Track if deferred loading has been triggered for a client
----@type table<number, boolean>
-local deferred_triggered = {}
-
--- Diagnostics module (lazy loaded)
-local diagnostics_mod = nil
-local function get_diagnostics_mod()
-	if not diagnostics_mod then
-		local ok, mod = pcall(require, "roslyn_filewatch.diagnostics")
-		if ok then
-			diagnostics_mod = mod
-		end
-	end
-	return diagnostics_mod
-end
-
--- Register state references with status module for RoslynFilewatchStatus command
-pcall(function()
-	local status_mod = require("roslyn_filewatch.status")
-	if status_mod and status_mod.register_refs then
-		status_mod.register_refs({
-			watchers = watchers,
-			pollers = pollers,
-			watchdogs = watchdogs,
-			snapshots = snapshots,
-			last_events = last_events,
-			dirty_dirs = dirty_dirs,
-		})
-	end
-end)
-
 ------------------------------------------------------
--- Incremental scanning helpers
+-- INCREMENTAL SCANNING HELPERS (Phase 4: Extracted functions)
 ------------------------------------------------------
 
 --- Mark a directory as needing rescan
@@ -171,19 +233,14 @@ local function mark_dirty_dir(client_id, path)
 		return
 	end
 
-	-- Initialize if needed
-	if not dirty_dirs[client_id] then
-		dirty_dirs[client_id] = {}
-	end
+	local state = get_client_state(client_id)
 
-	-- Get parent directory of the path
 	local normalized = normalize_path(path)
 	local parent = normalized:match("^(.+)/[^/]+$")
 	if parent then
-		dirty_dirs[client_id][parent] = true
+		state.dirty_dirs[parent] = true
 	else
-		-- Path is a root-level item, mark root
-		dirty_dirs[client_id][normalized] = true
+		state.dirty_dirs[normalized] = true
 	end
 end
 
@@ -191,13 +248,12 @@ end
 ---@param client_id number
 ---@return string[] dirs List of dirty directories
 local function get_and_clear_dirty_dirs(client_id)
+	local state = get_client_state(client_id)
 	local dirs = {}
-	if dirty_dirs[client_id] then
-		for dir, _ in pairs(dirty_dirs[client_id]) do
-			table.insert(dirs, dir)
-		end
-		dirty_dirs[client_id] = {}
+	for dir, _ in pairs(state.dirty_dirs) do
+		table.insert(dirs, dir)
 	end
+	state.dirty_dirs = {}
 	return dirs
 end
 
@@ -205,20 +261,18 @@ end
 ---@param client_id number
 ---@return boolean
 local function should_full_scan(client_id)
-	-- Check explicit flag
-	if needs_full_scan[client_id] then
-		needs_full_scan[client_id] = nil
+	local state = get_client_state(client_id)
+
+	if state.needs_full_scan then
+		state.needs_full_scan = false
 		return true
 	end
 
-	-- Check dirty dirs count threshold
-	if dirty_dirs[client_id] then
-		local count = 0
-		for _ in pairs(dirty_dirs[client_id]) do
-			count = count + 1
-			if count > DIRTY_DIRS_THRESHOLD then
-				return true
-			end
+	local count = 0
+	for _ in pairs(state.dirty_dirs) do
+		count = count + 1
+		if count > DIRTY_DIRS_THRESHOLD then
+			return true
 		end
 	end
 
@@ -228,15 +282,17 @@ end
 --- Request full scan on next poll
 ---@param client_id number
 local function request_full_scan(client_id)
-	needs_full_scan[client_id] = true
+	local state = get_client_state(client_id)
+	state.needs_full_scan = true
 end
 
+------------------------------------------------------
+-- BUFFER UTILITIES (Phase 4: Extracted functions)
 ------------------------------------------------------
 
 --- Close buffers for deleted files (safe: runs in scheduled context)
 ---@param path string
 local function close_deleted_buffers(path)
-	-- BUG FIX: Guard against empty/nil path
 	if not path or path == "" then
 		return
 	end
@@ -253,7 +309,6 @@ local function close_deleted_buffers(path)
 			return uv.fs_stat(path)
 		end)
 		if ok and st then
-			-- File exists -> nothing to do
 			return
 		end
 
@@ -276,6 +331,111 @@ local function close_deleted_buffers(path)
 end
 
 ------------------------------------------------------
+-- PROJECT NOTIFICATION HELPERS (Phase 4: Extracted functions)
+------------------------------------------------------
+
+--- Collect Roslyn-formatted paths from sln_info
+---@param sln_info { csproj_files: table<string, number>|nil }|nil
+---@return string[] project_paths
+local function collect_roslyn_project_paths(sln_info)
+	if not sln_info or not sln_info.csproj_files then
+		return {}
+	end
+
+	local project_paths = {}
+	for csproj_path, _ in pairs(sln_info.csproj_files) do
+		table.insert(project_paths, to_roslyn_path(csproj_path))
+	end
+	return project_paths
+end
+
+--- Send csproj change events to trigger Roslyn project reload
+---@param project_paths string[] List of Roslyn-formatted project paths
+local function send_csproj_change_events(project_paths)
+	if #project_paths == 0 then
+		return
+	end
+
+	local csproj_change_events = {}
+	for _, csproj_path in ipairs(project_paths) do
+		table.insert(csproj_change_events, {
+			uri = vim.uri_from_fname(csproj_path),
+			type = 2, -- Changed
+		})
+	end
+
+	pcall(notify_roslyn, csproj_change_events)
+	notify("[CSPROJ] Sent csproj change events (" .. #csproj_change_events .. " file(s))", vim.log.levels.DEBUG)
+end
+
+--- Handle csproj reload for a client (debounced)
+--- Called when new .cs files are created in csproj-only projects
+---@param client vim.lsp.Client
+---@param sln_info table
+local function handle_csproj_reload(client, sln_info)
+	local state = get_client_state(client.id)
+
+	-- Initialize pending state if needed
+	if not state.csproj_reload_pending then
+		state.csproj_reload_pending = { timer = nil, pending = false }
+	end
+	local pending_state = state.csproj_reload_pending
+
+	-- Cancel existing timer if any
+	if pending_state.timer then
+		safe_close_handle(pending_state.timer)
+		pending_state.timer = nil
+	end
+
+	pending_state.pending = true
+
+	-- Create debounced timer (500ms debounce to batch multiple file creations)
+	local timer = uv.new_timer()
+	pending_state.timer = timer
+	timer:start(500, 0, function()
+		pending_state.timer = nil
+		pending_state.pending = false
+
+		vim.schedule(function()
+			-- Check if client is still valid
+			if client.is_stopped and client.is_stopped() then
+				return
+			end
+
+			local project_paths = collect_roslyn_project_paths(sln_info)
+			if #project_paths == 0 then
+				return
+			end
+
+			-- Send csproj change events and project/open
+			send_csproj_change_events(project_paths)
+			notify_project_open(client, project_paths, notify)
+
+			-- Trigger restore if enabled
+			if config.options.enable_autorestore then
+				-- Only restore once for the first csproj
+				local first_path = project_paths[1]
+				if first_path then
+					pcall(restore_mod.schedule_restore, first_path, function(_)
+						-- After restore completes, send reload notifications again
+						vim.defer_fn(function()
+							if client.is_stopped and client.is_stopped() then
+								return
+							end
+							send_csproj_change_events(project_paths)
+							notify_project_open(client, project_paths, notify)
+							request_diagnostics_refresh(client, 500)
+						end, 500)
+					end)
+				end
+			end
+		end)
+	end)
+end
+
+------------------------------------------------------
+-- EVENT QUEUE AND BATCHING (Phase 4: Simplified)
+------------------------------------------------------
 
 --- Queue and batch flush events
 ---@param client_id number
@@ -285,8 +445,9 @@ local function queue_events(client_id, evs)
 		return
 	end
 
+	local state = get_client_state(client_id)
+
 	-- AUTO-RESTORE: Check for .csproj changes in the event stream
-	-- This catches ALL changes (fs_event, fs_poll) regardless of solution state
 	if config.options.enable_autorestore then
 		for _, ev in ipairs(evs) do
 			local uri = ev.uri
@@ -297,180 +458,33 @@ local function queue_events(client_id, evs)
 		end
 	end
 
-	-- For csproj-only projects: Ensure project is opened when new .cs files are created
-	-- This ensures the LSP recognizes new files even if project wasn't opened yet
-	if config.options.solution_aware then
-		local sln_info = sln_mtimes[client_id]
-		if sln_info and sln_info.csproj_only and sln_info.csproj_files then
-			local has_new_cs_file = false
-			for _, ev in ipairs(evs) do
-				local uri = ev.uri
-				if uri and ev.type == 1 then -- Created file
-					local path = vim.uri_to_fname(uri)
-					if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
-						has_new_cs_file = true
-						break
+	-- For csproj-only projects: Handle new .cs file creation
+	if config.options.solution_aware and state.sln_info and state.sln_info.csproj_only then
+		for _, ev in ipairs(evs) do
+			local uri = ev.uri
+			if uri and ev.type == 1 then -- Created file
+				local path = vim.uri_to_fname(uri)
+				if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+					-- Find the client and trigger reload
+					local clients_list = vim.lsp.get_clients()
+					for _, c in ipairs(clients_list) do
+						if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
+							handle_csproj_reload(c, state.sln_info)
+							break
+						end
 					end
+					break
 				end
-			end
-
-			if has_new_cs_file then
-				-- Debounce csproj reload notifications to avoid constant restores
-				-- Only trigger reload once per batch of file creations
-				if not csproj_reload_pending[client_id] then
-					csproj_reload_pending[client_id] = { timer = nil, pending = false }
-				end
-				local pending_state = csproj_reload_pending[client_id]
-
-				-- Cancel existing timer if any
-				if pending_state.timer then
-					pcall(function()
-						if not pending_state.timer:is_closing() then
-							pending_state.timer:stop()
-							pending_state.timer:close()
-						end
-					end)
-					pending_state.timer = nil
-				end
-
-				-- Mark as pending
-				pending_state.pending = true
-
-				-- Create debounced timer (500ms debounce to batch multiple file creations)
-				local timer = uv.new_timer()
-				pending_state.timer = timer
-				timer:start(500, 0, function()
-					pending_state.timer = nil
-					pending_state.pending = false
-
-					vim.schedule(function()
-						local clients_list = vim.lsp.get_clients()
-						for _, c in ipairs(clients_list) do
-							if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
-								-- HELPER: Ensure path is canonical for Roslyn on Windows
-								local function to_roslyn_path(p)
-									p = normalize_path(p)
-									if vim.loop.os_uname().sysname == "Windows_NT" then
-										p = p:gsub("^(%a):", function(l)
-											return l:upper() .. ":"
-										end)
-										p = p:gsub("/", "\\")
-									end
-									return p
-								end
-
-								-- Collect all csproj paths
-								local project_paths = {}
-								for csproj_path, _ in pairs(sln_info.csproj_files) do
-									table.insert(project_paths, to_roslyn_path(csproj_path))
-								end
-
-								if #project_paths > 0 then
-									-- Function to send project/open notification
-									local function send_project_open()
-										local project_uris = vim.tbl_map(function(p)
-											return vim.uri_from_fname(p)
-										end, project_paths)
-
-										pcall(function()
-											c:notify("project/open", {
-												projects = project_uris,
-											})
-										end)
-
-										notify(
-											"[CSPROJ] Sent project/open (" .. #project_paths .. " csproj file(s))",
-											vim.log.levels.DEBUG
-										)
-									end
-
-									-- Send csproj CHANGE events to trigger Roslyn project reload
-									-- This is what happens when an old file is opened
-									local csproj_change_events = {}
-									for _, csproj_path in ipairs(project_paths) do
-										table.insert(csproj_change_events, {
-											uri = vim.uri_from_fname(csproj_path),
-											type = 2, -- Changed
-										})
-									end
-
-									-- Send csproj change events and project/open
-									if #csproj_change_events > 0 then
-										pcall(notify_roslyn, csproj_change_events)
-										notify(
-											"[CSPROJ] Sent csproj change events to trigger project reload ("
-												.. #csproj_change_events
-												.. " csproj file(s))",
-											vim.log.levels.DEBUG
-										)
-									end
-									send_project_open()
-
-									-- Trigger restore if enabled (restore is already debounced internally)
-									if config.options.enable_autorestore then
-										-- Only restore once, even if multiple files are created
-										local restore_triggered = false
-										for _, csproj_path in ipairs(project_paths) do
-											if not restore_triggered then
-												restore_triggered = true
-												-- Schedule restore with callback to send reload after completion
-												pcall(restore_mod.schedule_restore, csproj_path, function(restored_path)
-													-- After restore completes, send reload notifications
-													vim.defer_fn(function()
-														if c.is_stopped and c.is_stopped() then
-															return
-														end
-														-- Send csproj change events again to force reload
-														if #csproj_change_events > 0 then
-															pcall(notify_roslyn, csproj_change_events)
-														end
-														send_project_open()
-														-- Request diagnostics refresh
-														vim.defer_fn(function()
-															if c.is_stopped and c.is_stopped() then
-																return
-															end
-															local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
-															for _, buf in ipairs(attached_bufs or {}) do
-																if
-																	vim.api.nvim_buf_is_valid(buf)
-																	and vim.api.nvim_buf_is_loaded(buf)
-																then
-																	pcall(function()
-																		c:request(
-																			vim.lsp.protocol.Methods.textDocument_diagnostic,
-																			{
-																				textDocument = vim.lsp.util.make_text_document_params(
-																					buf
-																				),
-																			},
-																			nil,
-																			buf
-																		)
-																	end)
-																end
-															end
-														end, 500)
-													end, 500)
-												end)
-											end
-										end
-									end
-								end
-								break
-							end
-						end
-					end)
-				end)
 			end
 		end
 	end
 
+	-- Batching logic
 	if config.options.batching and config.options.batching.enabled then
-		if not batch_queues[client_id] then
-			batch_queues[client_id] = { events = {}, timer = nil }
+		if not state.batch_queue then
+			state.batch_queue = { events = {}, timer = nil }
 		end
-		local queue = batch_queues[client_id]
+		local queue = state.batch_queue
 		vim.list_extend(queue.events, evs)
 
 		if not queue.timer then
@@ -479,12 +493,7 @@ local function queue_events(client_id, evs)
 			t:start((config.options.batching.interval or 300), 0, function()
 				local changes = queue.events
 				queue.events = {}
-				pcall(function()
-					if queue.timer and not queue.timer:is_closing() then
-						queue.timer:stop()
-						queue.timer:close()
-					end
-				end)
+				safe_close_handle(queue.timer)
 				queue.timer = nil
 				if #changes > 0 then
 					vim.schedule(function()
@@ -500,85 +509,48 @@ local function queue_events(client_id, evs)
 	end
 end
 
--------------------------------------------------
+------------------------------------------------------
+-- CLIENT CLEANUP (Phase 4: Consolidated)
+------------------------------------------------------
 
 --- Cleanup all resources for a client
 ---@param client_id number
 local function cleanup_client(client_id)
-	-- Clear fs_event internal timers for this client (if any)
+	local state = client_states[client_id]
+	if not state then
+		return
+	end
+
+	-- Clear fs_event internal timers
 	pcall(function()
 		if fs_event_mod and fs_event_mod.clear then
-			pcall(fs_event_mod.clear, client_id)
+			fs_event_mod.clear(client_id)
 		end
 	end)
 
-	if watchers[client_id] then
-		pcall(function()
-			local h = watchers[client_id]
-			pcall(function()
-				if h and not (h.is_closing and h:is_closing()) then
-					if h.stop then
-						pcall(h.stop, h)
-					end
-					if h.close then
-						pcall(h.close, h)
-					end
-				end
-			end)
-		end)
-		watchers[client_id] = nil
+	-- Close all handles
+	safe_close_handle(state.watcher)
+	state.watcher = nil
+
+	safe_close_handle(state.poller)
+	state.poller = nil
+
+	safe_close_handle(state.watchdog)
+	state.watchdog = nil
+
+	safe_close_handle(state.sln_poll_timer)
+	state.sln_poll_timer = nil
+
+	-- Close batch queue timer
+	if state.batch_queue and state.batch_queue.timer then
+		safe_close_handle(state.batch_queue.timer)
+		state.batch_queue = nil
 	end
 
-	if pollers[client_id] then
-		pcall(function()
-			local p = pollers[client_id]
-			if p then
-				if p.stop then
-					pcall(p.stop, p)
-				end
-				if p.close then
-					pcall(p.close, p)
-				end
-			end
-		end)
-		pollers[client_id] = nil
-	end
-
-	if watchdogs[client_id] then
-		pcall(function()
-			local w = watchdogs[client_id]
-			if w and not (w.is_closing and w:is_closing()) then
-				pcall(function()
-					w:stop()
-					w:close()
-				end)
-			end
-		end)
-		watchdogs[client_id] = nil
-	end
-
-	if batch_queues[client_id] then
-		if batch_queues[client_id].timer then
-			pcall(function()
-				if not batch_queues[client_id].timer:is_closing() then
-					batch_queues[client_id].timer:stop()
-					batch_queues[client_id].timer:close()
-				end
-			end)
-		end
-		batch_queues[client_id] = nil
-	end
-
-	-- Stop solution file poll timer
-	if sln_poll_timers[client_id] then
-		pcall(function()
-			local t = sln_poll_timers[client_id]
-			if t and not (t.is_closing and t:is_closing()) then
-				t:stop()
-				t:close()
-			end
-		end)
-		sln_poll_timers[client_id] = nil
+	-- Close csproj reload timer
+	if state.csproj_reload_pending and state.csproj_reload_pending.timer then
+		safe_close_handle(state.csproj_reload_pending.timer)
+		state.csproj_reload_pending = nil
 	end
 
 	-- Clear rename buffers
@@ -586,18 +558,18 @@ local function cleanup_client(client_id)
 		rename_mod.clear(client_id)
 	end)
 
-	-- Clear autocmds (the augroup will be auto-cleared when recreated)
-	if autocmds[client_id] then
-		-- Also try to delete the augroup
+	-- Clear autocmds
+	if state.autocmd_ids then
 		pcall(function()
 			vim.api.nvim_del_augroup_by_name("RoslynFilewatch_" .. client_id)
 		end)
-		autocmds[client_id] = nil
+		state.autocmd_ids = nil
 	end
 end
 
--- //////////////////////////////////////////////////
--- /////////////////////////////////////////////////
+------------------------------------------------------
+-- PUBLIC API
+------------------------------------------------------
 
 --- Stop watcher for a client
 ---@param client vim.lsp.Client
@@ -605,52 +577,26 @@ function M.stop(client)
 	if not client then
 		return
 	end
+
 	local cid = client.id
-	-- Clear snapshot & restart state
-	snapshots[cid] = nil
-	restart_scheduled[cid] = nil
-	restart_backoff_until[cid] = nil
-	fs_event_disabled_until[cid] = nil
-	last_events[cid] = nil
-	sln_mtimes[cid] = nil
-	sln_poll_timers[cid] = nil
-	-- Clear incremental scanning state
-	dirty_dirs[cid] = nil
-	needs_full_scan[cid] = nil
-	-- Clear csproj reload pending state
-	if csproj_reload_pending[cid] then
-		if csproj_reload_pending[cid].timer then
-			pcall(function()
-				if not csproj_reload_pending[cid].timer:is_closing() then
-					csproj_reload_pending[cid].timer:stop()
-					csproj_reload_pending[cid].timer:close()
-				end
-			end)
-		end
-		csproj_reload_pending[cid] = nil
-	end
-	-- Cleanup handles/timers
 	cleanup_client(cid)
+	client_states[cid] = nil
+
 	notify("Watcher stopped for client " .. (client.name or "<unknown>"), vim.log.levels.DEBUG)
 end
 
 --- Force resync for all active clients
---- Clears snapshots and sets needs_full_scan flag for next poll cycle
 function M.resync()
 	local clients = vim.lsp.get_clients()
 	local resynced = 0
 
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
-			local cid = client.id
-			-- Clear snapshot to force full scan
-			snapshots[cid] = {}
-			-- Set full scan flag
-			needs_full_scan[cid] = true
-			-- Clear dirty dirs
-			dirty_dirs[cid] = {}
-			-- Update last event time
-			last_events[cid] = os.time()
+			local state = get_client_state(client.id)
+			state.snapshot = {}
+			state.needs_full_scan = true
+			state.dirty_dirs = {}
+			state.last_event = os.time()
 			resynced = resynced + 1
 			notify("Resync triggered for client " .. client.name, vim.log.levels.INFO)
 		end
@@ -663,8 +609,9 @@ function M.resync()
 	end
 end
 
--- /////////////////////////////////////////////////
--- /////////////////////////////////////////////////
+------------------------------------------------------
+-- WATCHER START (Phase 4: Refactored with extracted functions)
+------------------------------------------------------
 
 --- Start watcher for a client
 ---@param client vim.lsp.Client
@@ -673,18 +620,19 @@ function M.start(client)
 		return
 	end
 
-	-- If client already stopped, nothing to do
 	if client.is_stopped and client.is_stopped() then
 		return
 	end
 
-	-- Prevent duplicate starts. Check all handles so poller-only case doesn't start duplicates.
-	if watchers[client.id] or pollers[client.id] or watchdogs[client.id] then
-		return -- already running
+	local state = get_client_state(client.id)
+
+	-- Prevent duplicate starts
+	if state.watcher or state.poller or state.watchdog then
+		return
 	end
 
 	-- Tunables
-	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 5000 -- VS Code-like: poll less frequently
+	local POLL_INTERVAL = (config.options and config.options.poll_interval) or 5000
 	local POLLER_RESTART_THRESHOLD = (config.options and config.options.poller_restart_threshold) or 2
 	local WATCHDOG_IDLE = (config.options and config.options.watchdog_idle) or 60
 	local RENAME_WINDOW_MS = (config.options and config.options.rename_detection_ms) or 300
@@ -697,84 +645,76 @@ function M.start(client)
 	end
 	root = normalize_path(root)
 
-	-- Apply preset based on project type (Unity, console, large)
+	-- Apply preset
 	config.apply_preset_for_root(root)
 	local applied_preset = config.options._applied_preset
 	if applied_preset then
 		notify("[PRESET] Applied '" .. applied_preset .. "' preset for project", vim.log.levels.DEBUG)
 	end
 
-	--- Restart watcher with backoff and optional fs_event disable flag
+	--- Restart watcher with backoff
 	---@param reason? string
 	---@param delay_ms? number
 	---@param disable_fs_event? boolean
 	local function restart_watcher(reason, delay_ms, disable_fs_event)
 		delay_ms = delay_ms or 300
 
-		-- BUG FIX: Set restart_scheduled IMMEDIATELY to prevent race condition
-		if restart_scheduled[client.id] then
+		if state.restart_scheduled then
 			return
 		end
-		restart_scheduled[client.id] = true
+		state.restart_scheduled = true
 
 		local now = os.time()
-		local until_ts = restart_backoff_until[client.id] or 0
-		if now < until_ts then
+		if now < state.restart_backoff_until then
 			notify("Restart suppressed due to backoff for client " .. client.name, vim.log.levels.DEBUG)
-			restart_scheduled[client.id] = nil
+			state.restart_scheduled = false
 			return
 		end
 
 		if disable_fs_event then
-			-- Disable fs_event attempts for a short window (avoid re-creating broken handle)
-			fs_event_disabled_until[client.id] = now + 5 -- 5 seconds
+			state.fs_event_disabled_until = now + 5
 		end
 
-		restart_backoff_until[client.id] = now + math.ceil(delay_ms / 1000)
+		state.restart_backoff_until = now + math.ceil(delay_ms / 1000)
 
 		vim.defer_fn(function()
-			restart_scheduled[client.id] = nil
+			state.restart_scheduled = false
 
 			if client.is_stopped() then
 				return
 			end
 
 			notify(
-				"Restarting watcher for client "
-					.. client.name
-					.. " (reason: "
-					.. tostring(reason or "unspecified")
-					.. ")",
+				"Restarting watcher for client " .. client.name .. " (reason: " .. tostring(reason or "unspecified") .. ")",
 				vim.log.levels.DEBUG
 			)
 
-			-- LIGHTWEIGHT RESTART: Only recreate fs_event handle, preserve snapshot
-			-- This avoids the expensive full tree scan that was causing freezes
-
-			-- Stop old fs_event handle if exists
-			if watchers[client.id] then
-				pcall(function()
-					local h = watchers[client.id]
-					if h and not (h.is_closing and h:is_closing()) then
-						if h.stop then
-							pcall(h.stop, h)
-						end
-						if h.close then
-							pcall(h.close, h)
-						end
-					end
-				end)
-				watchers[client.id] = nil
+			-- Stop old fs_event handle
+			if state.watcher then
+				safe_close_handle(state.watcher)
+				state.watcher = nil
 			end
 
 			-- Recreate fs_event handle (if not disabled)
 			local use_fs_event = not config.options.force_polling
-			if fs_event_disabled_until[client.id] and os.time() < fs_event_disabled_until[client.id] then
+			if state.fs_event_disabled_until > 0 and os.time() < state.fs_event_disabled_until then
 				use_fs_event = false
 			end
 
 			if use_fs_event then
-				local handle, err = fs_event_mod.start(client, root, snapshots, {
+				-- Create proxy for snapshots
+				local snapshots_proxy = setmetatable({}, {
+					__index = function(_, k)
+						return client_states[k] and client_states[k].snapshot
+					end,
+					__newindex = function(_, k, v)
+						if client_states[k] then
+							client_states[k].snapshot = v
+						end
+					end,
+				})
+
+				local handle, err = fs_event_mod.start(client, root, snapshots_proxy, {
 					notify = notify,
 					queue_events = queue_events,
 					notify_roslyn_renames = notify_roslyn_renames,
@@ -782,16 +722,36 @@ function M.start(client)
 					mark_dirty_dir = mark_dirty_dir,
 				})
 				if handle then
-					watchers[client.id] = handle
+					state.watcher = handle
 				else
 					notify("Failed to recreate fs_event: " .. tostring(err), vim.log.levels.DEBUG)
 				end
 			end
-
-			-- Note: Snapshot is preserved, no full scan needed
-			-- The poller will continue with incremental scanning using dirty_dirs
 		end, delay_ms)
 	end
+
+	-- Create proxy tables for modules that expect the old structure
+	local snapshots_proxy = setmetatable({}, {
+		__index = function(_, k)
+			return client_states[k] and client_states[k].snapshot
+		end,
+		__newindex = function(_, k, v)
+			if client_states[k] then
+				client_states[k].snapshot = v
+			end
+		end,
+	})
+
+	local last_events_proxy = setmetatable({}, {
+		__index = function(_, k)
+			return client_states[k] and client_states[k].last_event
+		end,
+		__newindex = function(_, k, v)
+			if client_states[k] then
+				client_states[k].last_event = v
+			end
+		end,
+	})
 
 	---@type roslyn_filewatch.Helpers
 	local helpers = {
@@ -800,18 +760,16 @@ function M.start(client)
 		queue_events = queue_events,
 		close_deleted_buffers = close_deleted_buffers,
 		restart_watcher = restart_watcher,
-		last_events = last_events,
+		last_events = last_events_proxy,
 	}
 
-	-- Choose whether to attempt native fs_event
-	-- IMPROVEMENT: Enable fs_event on Windows since error handling is robust
+	-- Choose whether to use fs_event
 	local force_polling = (config.options and config.options.force_polling) or false
-	local disabled_until = fs_event_disabled_until[client.id] or 0
 	local now = os.time()
-	local use_fs_event = not force_polling and now >= disabled_until
+	local use_fs_event = not force_polling and now >= state.fs_event_disabled_until
 
 	if use_fs_event then
-		local handle, start_err = fs_event_mod.start(client, root, snapshots, {
+		local handle, start_err = fs_event_mod.start(client, root, snapshots_proxy, {
 			config = config,
 			rename_mod = rename_mod,
 			snapshot_mod = snapshot_mod,
@@ -825,66 +783,54 @@ function M.start(client)
 			identity_from_stat = identity_from_stat,
 			same_file_info = same_file_info,
 			normalize_path = normalize_path,
-			last_events = last_events,
+			last_events = last_events_proxy,
 			rename_window_ms = RENAME_WINDOW_MS,
 		})
 
 		if not handle then
-			-- If native start failed, temporarily disable attempts and continue with poller
 			notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
-			fs_event_disabled_until[client.id] = os.time() + 5
+			state.fs_event_disabled_until = os.time() + 5
 			use_fs_event = false
 		else
-			watchers[client.id] = handle
-			last_events[client.id] = os.time()
+			state.watcher = handle
+			state.last_event = os.time()
 		end
 	else
-		local is_win = utils.is_windows()
 		notify(
 			"Using poller-only mode for client "
 				.. client.name
 				.. " (force_polling="
 				.. tostring(force_polling)
-				.. ", disabled_until="
-				.. tostring(disabled_until > now)
 				.. ")",
 			vim.log.levels.DEBUG
 		)
-
-		-- Prime last_events so the watchdog does not immediately treat this as idle
-		last_events[client.id] = os.time()
+		state.last_event = os.time()
 	end
 
-	-- Always create poller fallback (keeps snapshot reliable)
 	-- Request full scan on startup
-	needs_full_scan[client.id] = true
+	state.needs_full_scan = true
 
-	-- Capture initial solution file mtime for change detection
-	-- This is used to detect when Unity modifies .slnx and adds new projects
+	-- Setup solution/csproj tracking
 	if config.options.solution_aware then
 		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
 		if ok and sln_parser and sln_parser.get_sln_info then
 			local sln_info = sln_parser.get_sln_info(root)
 			if sln_info then
-				-- Initialize with empty csproj_files, then populate asynchronously
-				sln_mtimes[client.id] = {
+				state.sln_info = {
 					path = sln_info.path,
 					mtime = sln_info.mtime,
-					csproj_files = nil, -- Will be populated async
+					csproj_files = nil,
 				}
 
-				-- Async scan csproj files (non-blocking)
 				scan_csproj_async(root, function(initial_csproj)
-					if sln_mtimes[client.id] then
-						sln_mtimes[client.id].csproj_files = initial_csproj
+					if state.sln_info then
+						state.sln_info.csproj_files = initial_csproj
 					end
 				end)
 			else
-				-- No solution file found - check for csproj-only project
-				-- This handles simple C# console projects without .sln files
+				-- No solution file - check for csproj-only project
 				notify("[SLN] No solution file found, checking for csproj-only project", vim.log.levels.DEBUG)
 
-				-- Async scan for csproj files and set up tracking
 				scan_csproj_async(root, function(csproj_files)
 					if not csproj_files or vim.tbl_count(csproj_files) == 0 then
 						vim.schedule(function()
@@ -896,69 +842,21 @@ function M.start(client)
 						return
 					end
 
-					-- Set up csproj tracking (csproj_only mode - no solution path)
-					sln_mtimes[client.id] = {
-						path = nil, -- No solution file
+					state.sln_info = {
+						path = nil,
 						mtime = 0,
 						csproj_files = csproj_files,
-						csproj_only = true, -- Flag to identify csproj-only mode
+						csproj_only = true,
 					}
 
-					-- HELPER: Ensure path is canonical for Roslyn on Windows
-					local function to_roslyn_path(p)
-						p = normalize_path(p)
-						if vim.loop.os_uname().sysname == "Windows_NT" then
-							p = p:gsub("^(%a):", function(l)
-								return l:upper() .. ":"
-							end)
-							p = p:gsub("/", "\\")
-						end
-						return p
-					end
-
-					-- Collect all csproj paths for project/open notification
-					local project_paths = {}
-					for csproj_path, _ in pairs(csproj_files) do
-						table.insert(project_paths, to_roslyn_path(csproj_path))
-					end
-
+					local project_paths = collect_roslyn_project_paths(state.sln_info)
 					if #project_paths > 0 then
 						vim.schedule(function()
-							-- Find matching Roslyn clients and send project/open
 							local clients_list = vim.lsp.get_clients()
 							for _, c in ipairs(clients_list) do
 								if vim.tbl_contains(config.options.client_names, c.name) then
-									local project_uris = vim.tbl_map(function(p)
-										return vim.uri_from_fname(p)
-									end, project_paths)
-
-									pcall(function()
-										c:notify("project/open", {
-											projects = project_uris,
-										})
-									end)
-
-									notify(
-										"[CSPROJ] Sent project/open for " .. #project_paths .. " csproj file(s)",
-										vim.log.levels.DEBUG
-									)
-
-									-- Trigger diagnostic refresh after a delay
-									vim.defer_fn(function()
-										if c.is_stopped and c.is_stopped() then
-											return
-										end
-										local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
-										for _, buf in ipairs(attached_bufs or {}) do
-											if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
-												pcall(function()
-													c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
-														textDocument = vim.lsp.util.make_text_document_params(buf),
-													}, nil, buf)
-												end)
-											end
-										end
-									end, 2000)
+									notify_project_open(c, project_paths, notify)
+									request_diagnostics_refresh(c, 2000)
 								end
 							end
 						end)
@@ -974,47 +872,11 @@ function M.start(client)
 		notify("[SLN] solution_aware is disabled", vim.log.levels.DEBUG)
 	end
 
-	--- Check if solution file has changed since last poll
-	---@param cid number Client ID
-	---@param croot string Root path
-	---@return boolean changed True if solution file mtime changed
-	local function check_sln_changed(cid, croot)
-		if not config.options.solution_aware then
-			return false
-		end
-
-		local cached = sln_mtimes[cid]
-		if not cached then
-			return false
-		end
-
-		-- Get current mtime of solution file
-		local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
-		if not ok or not sln_parser or not sln_parser.get_sln_info then
-			return false
-		end
-
-		local current_info = sln_parser.get_sln_info(croot)
-		if not current_info then
-			return false
-		end
-
-		-- Check if mtime changed
-		if current_info.mtime ~= cached.mtime then
-			-- notify("[SLN] mtime changed: " .. tostring(cached.mtime) .. " -> " .. tostring(current_info.mtime), vim.log.levels.INFO)
-			-- Update cached mtime, but PRESERVE the project tracking set!
-			local old_csproj = cached.csproj_files
-			sln_mtimes[cid] = { path = current_info.path, mtime = current_info.mtime, csproj_files = old_csproj }
-			return true
-		end
-
-		return false
-	end
-
-	local poller, poll_err = fs_poll_mod.start(client, root, snapshots, {
+	-- Create poller
+	local poller, poll_err = fs_poll_mod.start(client, root, snapshots_proxy, {
 		scan_tree = scan_tree,
-		scan_tree_async = snapshot_mod.scan_tree_async, -- NEW: Async non-blocking scan
-		is_scanning = snapshot_mod.is_scanning, -- NEW: Check scan in progress
+		scan_tree_async = snapshot_mod.scan_tree_async,
+		is_scanning = snapshot_mod.is_scanning,
 		partial_scan = snapshot_mod.partial_scan,
 		get_dirty_dirs = get_and_clear_dirty_dirs,
 		should_full_scan = should_full_scan,
@@ -1025,253 +887,147 @@ function M.start(client)
 		notify_roslyn_renames = notify_roslyn_renames,
 		close_deleted_buffers = close_deleted_buffers,
 		restart_watcher = restart_watcher,
-		last_events = last_events,
+		last_events = last_events_proxy,
 		poll_interval = POLL_INTERVAL,
 		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
 		activity_quiet_period = ACTIVITY_QUIET_PERIOD,
-		-- check_sln_changed = check_sln_changed, -- Disabled to prevent full scan freezes
 	})
 
 	if not poller then
 		notify("Failed to create poller: " .. tostring(poll_err), vim.log.levels.ERROR)
-		-- Close any fs_event to avoid leaking
-		pcall(function()
-			if watchers[client.id] and watchers[client.id].close then
-				watchers[client.id]:close()
-			end
-		end)
+		safe_close_handle(state.watcher)
+		state.watcher = nil
 		return
 	end
-	pollers[client.id] = poller
+	state.poller = poller
 
-	-- Create a separate timer to check for solution/csproj file changes
-	-- This is needed because fs_poll only fires when root directory stat changes,
-	-- not when files inside (like .slnx or .csproj) are modified
-	if config.options.solution_aware and sln_mtimes[client.id] then
+	-- Create solution/csproj poll timer
+	if config.options.solution_aware and state.sln_info then
 		local sln_timer = uv.new_timer()
 		if sln_timer then
-			local is_csproj_only = sln_mtimes[client.id].csproj_only == true
+			local is_csproj_only = state.sln_info.csproj_only == true
 			notify(
 				"[PROJECT] Started project watcher (mode: " .. (is_csproj_only and "csproj-only" or "solution") .. ")",
 				vim.log.levels.DEBUG
 			)
 
 			sln_timer:start(POLL_INTERVAL, POLL_INTERVAL, function()
-				-- Safety check: stop if client stopped
 				if client.is_stopped and client.is_stopped() then
-					pcall(function()
-						sln_timer:stop()
-						sln_timer:close()
-					end)
-					sln_poll_timers[client.id] = nil
+					safe_close_handle(sln_timer)
+					state.sln_poll_timer = nil
 					return
 				end
 
-				local cached = sln_mtimes[client.id]
+				local cached = state.sln_info
 				if not cached then
 					return
 				end
 
-				-- HELPER: Ensure path is canonical for Roslyn on Windows
-				local function to_roslyn_path(p)
-					p = normalize_path(p)
-					if vim.loop.os_uname().sysname == "Windows_NT" then
-						p = p:gsub("^(%a):", function(l)
-							return l:upper() .. ":"
-						end)
-						p = p:gsub("/", "\\")
-					end
-					return p
-				end
-
-				-- CSPROJ-ONLY MODE: Just poll for new csproj files
+				-- CSPROJ-ONLY MODE: Poll for new csproj files
 				if cached.csproj_only then
-					-- Async scan for new csproj files
 					scan_csproj_async(root, function(collected_mtimes)
-						local sln_info = sln_mtimes[client.id]
-						if not sln_info then
+						if not state.sln_info then
 							return
 						end
 
-						local previous_csproj = sln_info.csproj_files or {}
+						local previous_csproj = state.sln_info.csproj_files or {}
 						local new_projects_list = {}
 						local current_csproj_set = {}
-						local new_projects_count = 0
 
 						for internal_path, current_mtime_sec in pairs(collected_mtimes) do
 							current_csproj_set[internal_path] = current_mtime_sec
 
 							local old_mtime_sec = previous_csproj[internal_path]
 							if not old_mtime_sec or old_mtime_sec ~= current_mtime_sec then
-								local roslyn_path = to_roslyn_path(internal_path)
-								table.insert(new_projects_list, roslyn_path)
-								new_projects_count = new_projects_count + 1
+								table.insert(new_projects_list, to_roslyn_path(internal_path))
 
-								-- AUTO-RESTORE: If existing project changed, trigger restore
 								if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
 									pcall(restore_mod.schedule_restore, internal_path)
 								end
 							end
 						end
 
-						-- Update tracking set
-						if sln_mtimes[client.id] then
-							sln_mtimes[client.id].csproj_files = current_csproj_set
-						end
+						state.sln_info.csproj_files = current_csproj_set
 
-						-- Notify Roslyn if new projects found
-						if new_projects_count > 0 then
+						if #new_projects_list > 0 then
 							vim.schedule(function()
 								local clients_list = vim.lsp.get_clients()
 								for _, c in ipairs(clients_list) do
 									if vim.tbl_contains(config.options.client_names, c.name) then
-										local project_uris = vim.tbl_map(function(p)
-											return vim.uri_from_fname(p)
-										end, new_projects_list)
-
-										pcall(function()
-											c:notify("project/open", {
-												projects = project_uris,
-											})
-										end)
-
+										notify_project_open(c, new_projects_list, notify)
 										notify(
-											"[CSPROJ] Detected " .. new_projects_count .. " new/changed csproj file(s)",
+											"[CSPROJ] Detected " .. #new_projects_list .. " new/changed csproj file(s)",
 											vim.log.levels.DEBUG
 										)
-
-										-- Trigger diagnostic refresh
-										vim.defer_fn(function()
-											if c.is_stopped and c.is_stopped() then
-												return
-											end
-											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
-											for _, buf in ipairs(attached_bufs or {}) do
-												if
-													vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)
-												then
-													pcall(function()
-														c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
-															textDocument = vim.lsp.util.make_text_document_params(buf),
-														}, nil, buf)
-													end)
-												end
-											end
-										end, 2000)
+										request_diagnostics_refresh(c, 2000)
 									end
 								end
 							end)
 						end
 					end)
-					return -- Early return for csproj-only mode
+					return
 				end
 
-				-- SOLUTION MODE: Check solution file first, then scan csproj
+				-- SOLUTION MODE: Check solution file changes
 				if not cached.path then
 					return
 				end
 
-				-- Async stat the solution file
 				uv.fs_stat(cached.path, function(err, stat)
 					if err or not stat then
 						return
 					end
 
-					-- Calculate mtime in nanoseconds for precision
 					local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
 
-					-- Check if mtime changed
 					if current_mtime == cached.mtime then
-						return -- No change, skip
+						return
 					end
 
-					-- Update cached mtime (preserve csproj_files)
 					local old_csproj = cached.csproj_files
-					sln_mtimes[client.id] = {
+					state.sln_info = {
 						path = cached.path,
 						mtime = current_mtime,
 						csproj_files = old_csproj,
 					}
 
-					-- Solution changed! Trigger async project scan
 					vim.schedule(function()
-						local sln_info = sln_mtimes[client.id]
-						if not sln_info or not sln_info.path then
+						if not state.sln_info or not state.sln_info.path then
 							return
 						end
 
-						local previous_csproj = sln_info.csproj_files or {}
+						local previous_csproj = state.sln_info.csproj_files or {}
 
-						-- Use async csproj scanning (non-blocking)
 						scan_csproj_async(root, function(collected_mtimes)
 							local new_projects_list = {}
 							local current_csproj_set = {}
-							local new_projects_count = 0
 
 							for internal_path, current_mtime_sec in pairs(collected_mtimes) do
 								current_csproj_set[internal_path] = current_mtime_sec
 
 								local old_mtime_sec = previous_csproj[internal_path]
-								if
-									sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec)
-								then
-									local roslyn_path = to_roslyn_path(internal_path)
-									table.insert(new_projects_list, roslyn_path)
-									new_projects_count = new_projects_count + 1
+								if state.sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
+									table.insert(new_projects_list, to_roslyn_path(internal_path))
 
-									-- AUTO-RESTORE: If existing project changed, trigger restore
 									if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
 										pcall(restore_mod.schedule_restore, internal_path)
 									end
 								end
 							end
 
-							-- Init check - first time populating csproj_files
-							if not sln_info.csproj_files then
-								if sln_mtimes[client.id] then
-									sln_mtimes[client.id].csproj_files = current_csproj_set
-								end
+							if not state.sln_info.csproj_files then
+								state.sln_info.csproj_files = current_csproj_set
 								return
 							end
 
-							-- Update tracking set
-							if sln_mtimes[client.id] then
-								sln_mtimes[client.id].csproj_files = current_csproj_set
-							end
+							state.sln_info.csproj_files = current_csproj_set
 
-							-- Notify Roslyn if needed
-							if new_projects_count > 0 then
+							if #new_projects_list > 0 then
 								local clients_list = vim.lsp.get_clients()
 								for _, c in ipairs(clients_list) do
 									if vim.tbl_contains(config.options.client_names, c.name) then
-										local project_uris = vim.tbl_map(function(p)
-											return vim.uri_from_fname(p)
-										end, new_projects_list)
-
-										pcall(function()
-											c:notify("project/open", {
-												projects = project_uris,
-											})
-										end)
-
-										-- Trigger diagnostic refresh
-										vim.defer_fn(function()
-											if c.is_stopped and c.is_stopped() then
-												return
-											end
-											local attached_bufs = vim.lsp.get_buffers_by_client_id(c.id)
-											for _, buf in ipairs(attached_bufs or {}) do
-												if
-													vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf)
-												then
-													pcall(function()
-														c:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
-															textDocument = vim.lsp.util.make_text_document_params(buf),
-														}, nil, buf)
-													end)
-												end
-											end
-										end, 2000)
+										notify_project_open(c, new_projects_list, notify)
+										request_diagnostics_refresh(c, 2000)
 									end
 								end
 							end
@@ -1279,174 +1035,122 @@ function M.start(client)
 					end)
 				end)
 			end)
-			sln_poll_timers[client.id] = sln_timer
+			state.sln_poll_timer = sln_timer
 		else
 			vim.schedule(function()
 				vim.notify("[roslyn-filewatch] Failed to create project timer", vim.log.levels.ERROR)
 			end)
 		end
-	else
-		if not config.options.solution_aware then
-			notify("[SLN] Timer not started: solution_aware disabled", vim.log.levels.DEBUG)
-		elseif not sln_mtimes[client.id] then
-			-- This should no longer happen since we now set sln_mtimes for csproj-only projects
-			notify("[PROJECT] Timer not started: no project files tracked", vim.log.levels.DEBUG)
-		end
 	end
 
 	-- Watchdog
-	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots, {
+	local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots_proxy, {
 		notify = notify,
 		restart_watcher = restart_watcher,
 		get_handle = function()
-			return watchers[client.id]
+			return state.watcher
 		end,
-		last_events = last_events,
+		last_events = last_events_proxy,
 		watchdog_idle = WATCHDOG_IDLE,
 		use_fs_event = use_fs_event,
 	})
 	if not watchdog then
 		notify("Failed to start watchdog: " .. tostring(watchdog_err), vim.log.levels.ERROR)
-		pcall(function()
-			if pollers[client.id] and pollers[client.id].close then
-				pollers[client.id]:close()
-			end
-			if watchers[client.id] and watchers[client.id].close then
-				watchers[client.id]:close()
-			end
-		end)
+		safe_close_handle(state.poller)
+		state.poller = nil
+		safe_close_handle(state.watcher)
+		state.watcher = nil
 		return
 	end
-	watchdogs[client.id] = watchdog
+	state.watchdog = watchdog
 
-	-- Autocmds to keep editor <-> fs state coherent
-	local autocmd_ids = autocmds_mod.start(client, root, snapshots, {
+	-- Create proxy for sln_mtimes that autocmds expects
+	local sln_mtimes_proxy = setmetatable({}, {
+		__index = function(_, k)
+			return client_states[k] and client_states[k].sln_info
+		end,
+	})
+
+	-- Autocmds
+	local autocmd_ids = autocmds_mod.start(client, root, snapshots_proxy, {
 		notify = notify,
 		restart_watcher = restart_watcher,
 		normalize_path = normalize_path,
 		queue_events = queue_events,
-		sln_mtimes = sln_mtimes,
+		sln_mtimes = sln_mtimes_proxy,
 		restore_mod = restore_mod,
 	})
-	autocmds[client.id] = autocmd_ids
+	state.autocmd_ids = autocmd_ids
 
 	notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
-	-- NEW: Project warm-up for faster Roslyn initialization
+	-- Project warm-up
 	local ok_warmup, warmup_mod = pcall(require, "roslyn_filewatch.project_warmup")
 	if ok_warmup and warmup_mod and warmup_mod.warmup then
 		warmup_mod.warmup(client)
 	end
 
-	-- NEW: Game engine context setup (Unity analyzers, Godot settings, etc.)
+	-- Game engine context
 	local ok_context, context_mod = pcall(require, "roslyn_filewatch.game_context")
 	if ok_context and context_mod and context_mod.setup then
 		context_mod.setup(client)
 	end
 
+	-- LspDetach cleanup
 	vim.api.nvim_create_autocmd("LspDetach", {
 		callback = function(args)
 			if args.data.client_id == client.id then
-				-- Clear snapshot + state
-				snapshots[client.id] = nil
-				restart_scheduled[client.id] = nil
-				restart_backoff_until[client.id] = nil
-				fs_event_disabled_until[client.id] = nil
-				last_events[client.id] = nil
-				sln_mtimes[client.id] = nil
-				-- Clear incremental scanning state
-				dirty_dirs[client.id] = nil
-				needs_full_scan[client.id] = nil
-				-- Clear deferred loading state
-				deferred_projects[client.id] = nil
-				deferred_triggered[client.id] = nil
 				-- Clear diagnostics state
 				local diag_mod = get_diagnostics_mod()
 				if diag_mod and diag_mod.clear_client then
 					pcall(diag_mod.clear_client, client.id)
 				end
+
 				-- Clear project warmup state
-				local ok_warmup, warmup_mod = pcall(require, "roslyn_filewatch.project_warmup")
-				if ok_warmup and warmup_mod and warmup_mod.clear_client then
-					pcall(warmup_mod.clear_client, client.id)
+				local ok_w, w_mod = pcall(require, "roslyn_filewatch.project_warmup")
+				if ok_w and w_mod and w_mod.clear_client then
+					pcall(w_mod.clear_client, client.id)
 				end
-				-- Cleanup handles & timers
+
+				-- Cleanup
 				cleanup_client(client.id)
+				client_states[client.id] = nil
 				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
-				return true -- Remove this autocmd after cleanup
+				return true
 			end
 		end,
 	})
 end
 
 --- Reload all tracked projects for all active Roslyn clients
---- Forces Roslyn to refresh project information and diagnostics
 function M.reload_projects()
 	local clients = vim.lsp.get_clients()
 	local reloaded = 0
 
-	-- HELPER: Ensure path is canonical for Roslyn on Windows
-	local function to_roslyn_path(p)
-		p = normalize_path(p)
-		if vim.loop.os_uname().sysname == "Windows_NT" then
-			p = p:gsub("^(%a):", function(l)
-				return l:upper() .. ":"
-			end)
-			p = p:gsub("/", "\\")
-		end
-		return p
-	end
-
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
-			local cid = client.id
-			local sln_info = sln_mtimes[cid]
+			local state = get_client_state(client.id)
 
-			if sln_info and sln_info.csproj_files then
-				local project_paths = {}
-				for csproj_path, _ in pairs(sln_info.csproj_files) do
-					table.insert(project_paths, to_roslyn_path(csproj_path))
-				end
+			if state.sln_info and state.sln_info.csproj_files then
+				local project_paths = collect_roslyn_project_paths(state.sln_info)
 
 				if #project_paths > 0 then
-					local project_uris = vim.tbl_map(function(p)
-						return vim.uri_from_fname(p)
-					end, project_paths)
-
-					-- Send project/open notification
-					pcall(function()
-						client:notify("project/open", {
-							projects = project_uris,
-						})
-					end)
-
+					notify_project_open(client, project_paths, notify)
 					reloaded = reloaded + 1
 					notify("[RELOAD] Sent project/open for " .. #project_paths .. " project(s)", vim.log.levels.DEBUG)
 
-					-- Trigger diagnostic refresh after a delay
-					vim.defer_fn(function()
-						if client.is_stopped and client.is_stopped() then
-							return
-						end
-
-						-- Use throttled diagnostics if available
-						local diag_mod = get_diagnostics_mod()
-						if diag_mod and diag_mod.request_visible_diagnostics then
-							diag_mod.request_visible_diagnostics(cid)
-						else
-							-- Fallback: request diagnostics for attached buffers
-							local attached_bufs = vim.lsp.get_buffers_by_client_id(cid)
-							for _, buf in ipairs(attached_bufs or {}) do
-								if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
-									pcall(function()
-										client:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
-											textDocument = vim.lsp.util.make_text_document_params(buf),
-										}, nil, buf)
-									end)
-								end
+					-- Use throttled diagnostics if available
+					local diag_mod = get_diagnostics_mod()
+					if diag_mod and diag_mod.request_visible_diagnostics then
+						vim.defer_fn(function()
+							if client.is_stopped and client.is_stopped() then
+								return
 							end
-						end
-					end, 2000)
+							diag_mod.request_visible_diagnostics(client.id)
+						end, 2000)
+					else
+						request_diagnostics_refresh(client, 2000)
+					end
 				end
 			end
 		end
@@ -1459,71 +1163,7 @@ function M.reload_projects()
 	end
 end
 
---- Trigger deferred project loading for a client
---- Called when first C# file is opened
----@param client_id number
-local function trigger_deferred_loading(client_id)
-	if deferred_triggered[client_id] then
-		return -- Already triggered
-	end
-
-	local pending = deferred_projects[client_id]
-	if not pending or #pending.projects == 0 then
-		return
-	end
-
-	deferred_triggered[client_id] = true
-
-	local delay = config.options.deferred_loading_delay_ms or 500
-
-	vim.defer_fn(function()
-		local client = vim.lsp.get_client_by_id(client_id)
-		if not client or (client.is_stopped and client.is_stopped()) then
-			return
-		end
-
-		local project_uris = vim.tbl_map(function(p)
-			return vim.uri_from_fname(p)
-		end, pending.projects)
-
-		pcall(function()
-			client:notify("project/open", {
-				projects = project_uris,
-			})
-		end)
-
-		notify("[DEFERRED] Sent project/open for " .. #pending.projects .. " project(s)", vim.log.levels.DEBUG)
-
-		-- Trigger diagnostic refresh
-		vim.defer_fn(function()
-			if client.is_stopped and client.is_stopped() then
-				return
-			end
-			local diag_mod = get_diagnostics_mod()
-			if diag_mod and diag_mod.request_visible_diagnostics then
-				diag_mod.request_visible_diagnostics(client_id)
-			end
-		end, 2000)
-	end, delay)
-end
-
---- Setup deferred loading autocmd for a client
----@param client_id number
----@param root string
-local function setup_deferred_loading_autocmd(client_id)
-	vim.api.nvim_create_autocmd("BufEnter", {
-		group = vim.api.nvim_create_augroup("RoslynFilewatch_Deferred_" .. client_id, { clear = true }),
-		pattern = "*.cs",
-		callback = function()
-			trigger_deferred_loading(client_id)
-			-- Remove this autocmd after triggering
-			if deferred_triggered[client_id] then
-				pcall(function()
-					vim.api.nvim_del_augroup_by_name("RoslynFilewatch_Deferred_" .. client_id)
-				end)
-			end
-		end,
-	})
-end
+-- Phase 5: Removed dead code (trigger_deferred_loading, setup_deferred_loading_autocmd)
+-- These functions were defined but never called
 
 return M

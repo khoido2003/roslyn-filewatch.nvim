@@ -387,4 +387,108 @@ function M.split_path(path)
 	return segments
 end
 
+--- Convert path to Roslyn-compatible format (Windows canonical path)
+--- Ensures drive letter is uppercase and uses backslashes on Windows
+---@param path string Path to convert
+---@return string Roslyn-compatible path
+function M.to_roslyn_path(path)
+	if not path or path == "" then
+		return path or ""
+	end
+
+	path = M.normalize_path(path)
+
+	if M.is_windows() then
+		-- Uppercase drive letter
+		path = path:gsub("^(%a):", function(l)
+			return l:upper() .. ":"
+		end)
+		-- Convert to backslashes for Roslyn
+		path = path:gsub("/", "\\")
+	end
+
+	return path
+end
+
+--- Safely stop and close a timer or handle
+--- Handles nil values and already-closing handles gracefully
+---@param handle uv_timer_t|uv_fs_event_t|uv_fs_poll_t|nil Handle to close
+function M.safe_close_handle(handle)
+	if not handle then
+		return
+	end
+
+	pcall(function()
+		-- Check if handle has is_closing method and is not already closing
+		if handle.is_closing and handle:is_closing() then
+			return
+		end
+
+		-- Stop if possible
+		if handle.stop then
+			pcall(handle.stop, handle)
+		end
+
+		-- Close if possible
+		if handle.close then
+			pcall(handle.close, handle)
+		end
+	end)
+end
+
+--- Request diagnostics refresh for a client's attached buffers
+--- Common pattern used throughout the plugin after project changes
+---@param client vim.lsp.Client|nil The LSP client
+---@param delay_ms number|nil Delay before requesting (default: 2000)
+function M.request_diagnostics_refresh(client, delay_ms)
+	if not client then
+		return
+	end
+
+	delay_ms = delay_ms or 2000
+
+	vim.defer_fn(function()
+		-- Check if client is still active
+		if client.is_stopped and client.is_stopped() then
+			return
+		end
+
+		local attached_bufs = vim.lsp.get_buffers_by_client_id(client.id)
+		for _, buf in ipairs(attached_bufs or {}) do
+			if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
+				pcall(function()
+					client:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
+						textDocument = vim.lsp.util.make_text_document_params(buf),
+					}, nil, buf)
+				end)
+			end
+		end
+	end, delay_ms)
+end
+
+--- Send project/open notification to Roslyn LSP
+--- Common pattern used when opening/reloading projects
+---@param client vim.lsp.Client The LSP client
+---@param project_paths string[] List of project file paths (already in Roslyn format)
+---@param notify_fn fun(msg: string, level: number)|nil Optional notify function for logging
+function M.notify_project_open(client, project_paths, notify_fn)
+	if not client or not project_paths or #project_paths == 0 then
+		return
+	end
+
+	local project_uris = vim.tbl_map(function(p)
+		return vim.uri_from_fname(p)
+	end, project_paths)
+
+	pcall(function()
+		client:notify("project/open", {
+			projects = project_uris,
+		})
+	end)
+
+	if notify_fn then
+		pcall(notify_fn, "[PROJECT] Sent project/open for " .. #project_paths .. " project(s)", vim.log.levels.DEBUG)
+	end
+end
+
 return M

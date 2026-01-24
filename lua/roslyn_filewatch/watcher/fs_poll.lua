@@ -90,6 +90,14 @@ function M.start(client, root, snapshots, deps)
 			local time_since_last_event = current_time - last_event_time
 			local activity_quiet_period = deps.activity_quiet_period or 5 -- Default 5 seconds
 
+		-- Also skip if an async scan is already in progress
+			if deps.is_scanning and deps.is_scanning(root) then
+				return
+			end
+
+			-- Forward declaration for use in trailing_timer callback
+			local perform_scan
+
 			-- If we just processed events recently, skip this cycle to let things settle
 			-- This is critical for Unity regeneration which produces many events
 			if time_since_last_event < activity_quiet_period then
@@ -98,9 +106,8 @@ function M.start(client, root, snapshots, deps)
 				if trailing_timer and not trailing_timer:is_active() then
 					local trailing_ms = math.ceil((activity_quiet_period - time_since_last_event) * 1000) + 200
 					trailing_timer:start(trailing_ms, 0, function()
-						-- Ensure perform_scan is available (closure)
+						-- perform_scan is now available via forward declaration
 						if perform_scan then
-							-- Run valid scan in schedule
 							vim.schedule(perform_scan)
 						end
 					end)
@@ -113,12 +120,7 @@ function M.start(client, root, snapshots, deps)
 				trailing_timer:stop()
 			end
 
-			-- Also skip if an async scan is already in progress
-			if deps.is_scanning and deps.is_scanning(root) then
-				return
-			end
-
-			local function perform_scan()
+			perform_scan = function()
 				-- Incremental scanning: check if we need full scan or partial scan
 				local do_full_scan = true
 				local dirty_dir_list = nil
