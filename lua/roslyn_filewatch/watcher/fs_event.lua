@@ -9,7 +9,7 @@
 ---@field notify fun(msg: string, level?: number)
 ---@field notify_roslyn_renames fun(files: roslyn_filewatch.RenameEntry[])
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
----@field close_deleted_buffers fun(path: string)
+---@field close_deleted_buffers? fun(path: string) -- DEPRECATED: no longer used
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field mark_dirty_dir fun(client_id: number, path: string)|nil
 ---@field mtime_ns fun(stat: any): number
@@ -233,7 +233,6 @@ function M.start(client, root, snapshots, deps)
 	local notify_fn = deps.notify or notify
 	local notify_roslyn_renames = deps.notify_roslyn_renames
 	local queue_events = deps.queue_events
-	local close_deleted_buffers = deps.close_deleted_buffers
 	local restart_watcher = deps.restart_watcher
 	local mtime_ns = deps.mtime_ns or utils.mtime_ns
 	local identity_from_stat = deps.identity_from_stat or utils.identity_from_stat
@@ -250,7 +249,6 @@ function M.start(client, root, snapshots, deps)
 		notify = notify_fn,
 		notify_roslyn_renames = notify_roslyn_renames,
 		queue_events = queue_events,
-		close_deleted_buffers = close_deleted_buffers,
 		restart_watcher = restart_watcher,
 		last_events = last_events,
 	}
@@ -348,7 +346,6 @@ function M.start(client, root, snapshots, deps)
 							if rename_m and rename_m.on_delete then
 								local ok, res = pcall(rename_m.on_delete, client.id, fullpath, prev_mt, snapshots, {
 									queue_events = queue_events,
-									close_deleted_buffers = close_deleted_buffers,
 									notify = notify_fn,
 									rename_window_ms = rename_window_ms,
 								})
@@ -367,7 +364,7 @@ function M.start(client, root, snapshots, deps)
 								if snapshots[client.id] then
 									snapshots[client.id][fullpath] = nil
 								end
-								pcall(close_deleted_buffers, fullpath)
+
 								table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
 							end
 						end

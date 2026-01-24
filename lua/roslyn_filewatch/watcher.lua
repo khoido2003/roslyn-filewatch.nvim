@@ -32,8 +32,7 @@ local notify_roslyn_renames = notify_mod.roslyn_renames
 local M = {}
 
 ------------------------------------------------------
--- CONSOLIDATED CLIENT STATE (Phase 3)
--- Instead of 17 separate tables, use a single structure per client
+-- CLIENT STATE
 ------------------------------------------------------
 
 ---@class ClientState
@@ -168,61 +167,104 @@ end)
 ------------------------------------------------------
 
 --- Async helper: scan root directory recursively for .csproj files and get their mtimes
+--- Uses fully async uv.fs_scandir to avoid blocking during Unity index regeneration
 ---@param root string Root directory to scan
 ---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
 local function scan_csproj_async(root, callback)
 	root = normalize_path(root)
 
-	local csproj_files = vim.fs.find(function(name, _)
-		return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
-	end, {
-		path = root,
-		limit = 50,
-		type = "file",
-	})
-
-	if not csproj_files or #csproj_files == 0 then
-		vim.schedule(function()
-			callback({})
-		end)
-		return
-	end
-
-	local csproj_paths = {}
-	for _, path in ipairs(csproj_files) do
-		table.insert(csproj_paths, normalize_path(path))
-	end
-
 	local results = {}
-	local pending = #csproj_paths
+	local pending_dirs = 0
+	local scan_complete = false
 
-	if pending == 0 then
-		vim.schedule(function()
-			callback({})
-		end)
-		return
+	local ignore_dirs = config.options.ignore_dirs or {}
+	local ignore_set = {}
+	for _, d in ipairs(ignore_dirs) do
+		ignore_set[d:lower()] = true
 	end
 
-	for _, path in ipairs(csproj_paths) do
-		uv.fs_stat(path, function(stat_err, stat)
-			if not stat_err and stat then
-				results[path] = stat.mtime.sec
-			else
-				results[path] = 0
+	local function finish_scan()
+		if scan_complete then
+			return
+		end
+		scan_complete = true
+		vim.schedule(function()
+			callback(results)
+		end)
+	end
+
+	local function scan_dir_async(dir)
+		pending_dirs = pending_dirs + 1
+
+		uv.fs_scandir(dir, function(err, scanner)
+			if err or not scanner then
+				pending_dirs = pending_dirs - 1
+				if pending_dirs == 0 then
+					finish_scan()
+				end
+				return
 			end
 
-			pending = pending - 1
-			if pending == 0 then
-				vim.schedule(function()
-					callback(results)
+			local subdirs = {}
+			local csproj_paths = {}
+
+			-- Collect entries synchronously (fs_scandir_next is fast)
+			while true do
+				local name, typ = uv.fs_scandir_next(scanner)
+				if not name then
+					break
+				end
+
+				local fullpath = normalize_path(dir .. "/" .. name)
+
+				if typ == "directory" then
+					-- Skip ignored directories
+					if not ignore_set[name:lower()] then
+						table.insert(subdirs, fullpath)
+					end
+				elseif typ == "file" then
+					if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
+						table.insert(csproj_paths, fullpath)
+					end
+				end
+			end
+
+			-- Stat csproj files asynchronously
+			for _, csproj_path in ipairs(csproj_paths) do
+				pending_dirs = pending_dirs + 1
+				uv.fs_stat(csproj_path, function(stat_err, stat)
+					if not stat_err and stat then
+						results[csproj_path] = stat.mtime.sec
+					else
+						results[csproj_path] = 0
+					end
+					pending_dirs = pending_dirs - 1
+					if pending_dirs == 0 then
+						finish_scan()
+					end
 				end)
 			end
+
+			-- Recurse into subdirs asynchronously
+			for _, subdir in ipairs(subdirs) do
+				-- Use defer_fn to avoid stack overflow on deep trees
+				vim.defer_fn(function()
+					scan_dir_async(subdir)
+				end, 0)
+			end
+
+			pending_dirs = pending_dirs - 1
+			if pending_dirs == 0 then
+				finish_scan()
+			end
 		end)
 	end
+
+	scan_dir_async(root)
 end
 
 ------------------------------------------------------
--- INCREMENTAL SCANNING HELPERS (Phase 4: Extracted functions)
+-- INCREMENTAL SCANNING HELPERS
 ------------------------------------------------------
 
 --- Mark a directory as needing rescan
@@ -287,51 +329,7 @@ local function request_full_scan(client_id)
 end
 
 ------------------------------------------------------
--- BUFFER UTILITIES (Phase 4: Extracted functions)
-------------------------------------------------------
-
---- Close buffers for deleted files (safe: runs in scheduled context)
----@param path string
-local function close_deleted_buffers(path)
-	if not path or path == "" then
-		return
-	end
-
-	path = normalize_path(path)
-
-	local ok_uri, uri = pcall(vim.uri_from_fname, path)
-	if not ok_uri or not uri then
-		return
-	end
-
-	vim.defer_fn(function()
-		local ok, st = pcall(function()
-			return uv.fs_stat(path)
-		end)
-		if ok and st then
-			return
-		end
-
-		vim.schedule(function()
-			for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-				if vim.api.nvim_buf_is_loaded(bufnr) then
-					local bname = vim.api.nvim_buf_get_name(bufnr)
-					if bname ~= "" then
-						local ok_bufuri, bufuri = pcall(vim.uri_from_fname, normalize_path(bname))
-						if ok_bufuri and bufuri == uri then
-							pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-							notify("Closed buffer for deleted file: " .. path, vim.log.levels.DEBUG)
-							break
-						end
-					end
-				end
-			end
-		end)
-	end, 200)
-end
-
-------------------------------------------------------
--- PROJECT NOTIFICATION HELPERS (Phase 4: Extracted functions)
+-- PROJECT NOTIFICATION HELPERS
 ------------------------------------------------------
 
 --- Collect Roslyn-formatted paths from sln_info
@@ -434,7 +432,7 @@ local function handle_csproj_reload(client, sln_info)
 end
 
 ------------------------------------------------------
--- EVENT QUEUE AND BATCHING (Phase 4: Simplified)
+-- EVENT QUEUE AND BATCHING
 ------------------------------------------------------
 
 --- Queue and batch flush events
@@ -510,7 +508,7 @@ local function queue_events(client_id, evs)
 end
 
 ------------------------------------------------------
--- CLIENT CLEANUP (Phase 4: Consolidated)
+-- CLIENT CLEANUP
 ------------------------------------------------------
 
 --- Cleanup all resources for a client
@@ -610,7 +608,7 @@ function M.resync()
 end
 
 ------------------------------------------------------
--- WATCHER START (Phase 4: Refactored with extracted functions)
+-- WATCHER START
 ------------------------------------------------------
 
 --- Start watcher for a client
@@ -685,7 +683,11 @@ function M.start(client)
 			end
 
 			notify(
-				"Restarting watcher for client " .. client.name .. " (reason: " .. tostring(reason or "unspecified") .. ")",
+				"Restarting watcher for client "
+					.. client.name
+					.. " (reason: "
+					.. tostring(reason or "unspecified")
+					.. ")",
 				vim.log.levels.DEBUG
 			)
 
@@ -758,7 +760,6 @@ function M.start(client)
 		notify = notify,
 		notify_roslyn_renames = notify_roslyn_renames,
 		queue_events = queue_events,
-		close_deleted_buffers = close_deleted_buffers,
 		restart_watcher = restart_watcher,
 		last_events = last_events_proxy,
 	}
@@ -776,7 +777,6 @@ function M.start(client)
 			notify = notify,
 			notify_roslyn_renames = notify_roslyn_renames,
 			queue_events = queue_events,
-			close_deleted_buffers = close_deleted_buffers,
 			restart_watcher = restart_watcher,
 			mark_dirty_dir = mark_dirty_dir,
 			mtime_ns = mtime_ns,
@@ -797,11 +797,7 @@ function M.start(client)
 		end
 	else
 		notify(
-			"Using poller-only mode for client "
-				.. client.name
-				.. " (force_polling="
-				.. tostring(force_polling)
-				.. ")",
+			"Using poller-only mode for client " .. client.name .. " (force_polling=" .. tostring(force_polling) .. ")",
 			vim.log.levels.DEBUG
 		)
 		state.last_event = os.time()
@@ -885,7 +881,6 @@ function M.start(client)
 		queue_events = queue_events,
 		notify = notify,
 		notify_roslyn_renames = notify_roslyn_renames,
-		close_deleted_buffers = close_deleted_buffers,
 		restart_watcher = restart_watcher,
 		last_events = last_events_proxy,
 		poll_interval = POLL_INTERVAL,
@@ -1006,7 +1001,10 @@ function M.start(client)
 								current_csproj_set[internal_path] = current_mtime_sec
 
 								local old_mtime_sec = previous_csproj[internal_path]
-								if state.sln_info.csproj_files and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec) then
+								if
+									state.sln_info.csproj_files
+									and (not old_mtime_sec or old_mtime_sec ~= current_mtime_sec)
+								then
 									table.insert(new_projects_list, to_roslyn_path(internal_path))
 
 									if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then

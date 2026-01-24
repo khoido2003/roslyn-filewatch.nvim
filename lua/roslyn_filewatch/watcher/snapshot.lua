@@ -6,7 +6,7 @@
 ---@field notify fun(msg: string, level?: number)
 ---@field notify_roslyn_renames fun(files: roslyn_filewatch.RenameEntry[])
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
----@field close_deleted_buffers fun(path: string)
+---@field close_deleted_buffers? fun(path: string) -- DEPRECATED: no longer used
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field last_events table<number, number>
 
@@ -508,9 +508,7 @@ function M.resync_snapshot_for(client_id, root, snapshots, helpers)
 		for path, _ in pairs(old_map) do
 			if not processed_old_paths[path] and new_map[path] == nil then
 				saw_delete = true
-				if helpers.close_deleted_buffers then
-					pcall(helpers.close_deleted_buffers, path)
-				end
+
 				table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 			end
 		end

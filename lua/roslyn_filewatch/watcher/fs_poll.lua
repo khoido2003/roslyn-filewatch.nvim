@@ -13,7 +13,7 @@
 ---@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
 ---@field notify fun(msg: string, level?: number)
 ---@field notify_roslyn_renames fun(files: roslyn_filewatch.RenameEntry[])
----@field close_deleted_buffers fun(path: string)
+---@field close_deleted_buffers? fun(path: string) -- DEPRECATED: no longer used
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
 ---@field last_events table<number, number>
 ---@field poll_interval number
@@ -90,7 +90,7 @@ function M.start(client, root, snapshots, deps)
 			local time_since_last_event = current_time - last_event_time
 			local activity_quiet_period = deps.activity_quiet_period or 5 -- Default 5 seconds
 
-		-- Also skip if an async scan is already in progress
+			-- Also skip if an async scan is already in progress
 			if deps.is_scanning and deps.is_scanning(root) then
 				return
 			end
@@ -209,9 +209,6 @@ function M.start(client, root, snapshots, deps)
 							-- Remaining old_map entries are deletes
 							for path, _ in pairs(async_old_map) do
 								if not async_processed_old[path] and async_new_map[path] == nil then
-									if deps.close_deleted_buffers then
-										pcall(deps.close_deleted_buffers, path)
-									end
 									table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 3 })
 								end
 							end
@@ -321,9 +318,7 @@ function M.start(client, root, snapshots, deps)
 				for path, _ in pairs(old_map) do
 					if not processed_old[path] and new_map[path] == nil then
 						saw_delete = true
-						if deps.close_deleted_buffers then
-							pcall(deps.close_deleted_buffers, path)
-						end
+
 						table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
 					end
 				end
