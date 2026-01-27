@@ -447,6 +447,200 @@ function M.partial_scan(dirs, existing_map, root)
 	end
 end
 
+--- Async partial scan: scan specific directories asynchronously and merge into existing snapshot
+--- Used for incremental updates without blocking the UI during Unity regeneration
+---@param dirs string[] List of directories to scan
+---@param existing_map table<string, roslyn_filewatch.SnapshotEntry> Existing snapshot to update
+---@param root string Root path (for gitignore context)
+---@param callback fun(updated_map: table<string, roslyn_filewatch.SnapshotEntry>) Called when scan completes
+function M.partial_scan_async(dirs, existing_map, root, callback)
+	if not dirs or #dirs == 0 then
+		if callback then
+			vim.schedule(function()
+				callback(existing_map)
+			end)
+		end
+		return
+	end
+
+	root = normalize_path(root)
+	local ignore_dirs = config.options.ignore_dirs or {}
+	local watch_extensions = config.options.watch_extensions or {}
+
+	-- Cache platform check
+	local is_win = utils.is_windows()
+
+	-- Pre-compute lowercase ignore dirs on Windows
+	local ignore_dirs_lower = {}
+	if is_win then
+		for _, dir in ipairs(ignore_dirs) do
+			table.insert(ignore_dirs_lower, dir:lower())
+		end
+	end
+
+	-- Cache gitignore module and matcher
+	local gitignore_mod = nil
+	local gitignore_matcher = nil
+	if config.options.respect_gitignore ~= false then
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+		if ok and mod then
+			gitignore_mod = mod
+			gitignore_matcher = mod.load(root)
+		end
+	end
+
+	-- First, remove all existing entries under the dirty directories (sync - this is fast)
+	for _, dir in ipairs(dirs) do
+		local normalized_dir = normalize_path(dir)
+		local prefix = normalized_dir .. "/"
+		local to_remove = {}
+		for path, _ in pairs(existing_map) do
+			if path == normalized_dir or path:sub(1, #prefix) == prefix then
+				table.insert(to_remove, path)
+			end
+		end
+		for _, path in ipairs(to_remove) do
+			existing_map[path] = nil
+		end
+	end
+
+	-- Collect all files to stat asynchronously
+	local files_to_stat = {}
+	local dirs_processed = 0
+	local total_dirs = #dirs
+
+	--- Process a single directory async
+	---@param dir_path string
+	---@param on_dir_done fun()
+	local function scan_single_dir_async(dir_path, on_dir_done)
+		uv.fs_scandir(dir_path, function(err, scanner)
+			if err or not scanner then
+				on_dir_done()
+				return
+			end
+
+			-- Collect entries (fs_scandir_next is fast and synchronous)
+			local entries = {}
+			while true do
+				local name, typ = uv.fs_scandir_next(scanner)
+				if not name then
+					break
+				end
+				table.insert(entries, { name = name, typ = typ })
+			end
+
+			-- Process entries and collect files to stat
+			local local_files = {}
+			for _, entry in ipairs(entries) do
+				local fullpath = normalize_path(dir_path .. "/" .. entry.name)
+
+				-- Check gitignore
+				if gitignore_matcher and gitignore_mod then
+					if gitignore_mod.is_ignored(gitignore_matcher, fullpath, entry.typ == "directory") then
+						goto continue
+					end
+				end
+
+				-- Only process files (single-level scan)
+				if entry.typ == "file" then
+					if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
+						table.insert(local_files, fullpath)
+					end
+				end
+
+				::continue::
+			end
+
+			-- Add to global files list
+			for _, f in ipairs(local_files) do
+				table.insert(files_to_stat, f)
+			end
+
+			on_dir_done()
+		end)
+	end
+
+	--- Stat all collected files asynchronously in chunks
+	local function stat_files_async()
+		if #files_to_stat == 0 then
+			vim.schedule(function()
+				if callback then
+					callback(existing_map)
+				end
+			end)
+			return
+		end
+
+		local pending_stats = #files_to_stat
+		local completed_stats = 0
+		local STAT_CHUNK_SIZE = 20
+		local current_index = 1
+
+		local function stat_chunk()
+			local chunk_end = math.min(current_index + STAT_CHUNK_SIZE - 1, #files_to_stat)
+
+			for i = current_index, chunk_end do
+				local fullpath = files_to_stat[i]
+				uv.fs_stat(fullpath, function(stat_err, st)
+					if not stat_err and st then
+						existing_map[fullpath] = {
+							mtime = mtime_ns(st),
+							size = st.size,
+							ino = st.ino,
+							dev = st.dev,
+						}
+					end
+					completed_stats = completed_stats + 1
+
+					if completed_stats == pending_stats then
+						vim.schedule(function()
+							if callback then
+								callback(existing_map)
+							end
+						end)
+					end
+				end)
+			end
+
+			current_index = chunk_end + 1
+			if current_index <= #files_to_stat then
+				-- Yield between chunks to keep UI responsive
+				vim.defer_fn(stat_chunk, 1)
+			end
+		end
+
+		stat_chunk()
+	end
+
+	-- Process all directories
+	local function process_next_dir()
+		if dirs_processed >= total_dirs then
+			-- All directories scanned, now stat the files
+			vim.defer_fn(stat_files_async, 0)
+			return
+		end
+
+		local dir = dirs[dirs_processed + 1]
+		local normalized_dir = normalize_path(dir)
+
+		-- Check if directory exists async
+		uv.fs_stat(normalized_dir, function(err, stat)
+			if not err and stat and stat.type == "directory" then
+				scan_single_dir_async(normalized_dir, function()
+					dirs_processed = dirs_processed + 1
+					-- Yield between directories
+					vim.defer_fn(process_next_dir, 0)
+				end)
+			else
+				dirs_processed = dirs_processed + 1
+				vim.defer_fn(process_next_dir, 0)
+			end
+		end)
+	end
+
+	process_next_dir()
+end
+
 --- Resync snapshot for a specific client (ASYNC VERSION).
 --- Compares current filesystem state with stored snapshot and emits appropriate events.
 --- Uses async scanning to prevent UI freezes during large scans (Unity regeneration).

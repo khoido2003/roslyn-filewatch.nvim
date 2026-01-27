@@ -226,6 +226,25 @@ M.options = {
 
 	--- Enable auto-restore of NuGet packages on .csproj change (default: true)
 	enable_autorestore = true,
+
+	--- Regeneration detection: automatically pause event processing during heavy file generation
+	--- (Unity asset imports, Godot project regeneration, etc.)
+	regen_detection_enabled = true,
+
+	--- Number of events within burst window to trigger regeneration mode
+	regen_burst_threshold = 30,
+
+	--- Time window (ms) for burst detection
+	regen_burst_window_ms = 500,
+
+	--- Quiet time (ms) before exiting regeneration mode
+	regen_quiet_period_ms = 2000,
+
+	--- Maximum regeneration mode duration (ms) - safety lim it
+	regen_max_duration_ms = 60000,
+
+	--- Maximum events per batch sent to Roslyn LSP (prevents server overload)
+	max_events_per_batch = 100,
 }
 
 -- Track detected root for preset application

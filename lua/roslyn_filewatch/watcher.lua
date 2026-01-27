@@ -552,6 +552,19 @@ local function queue_events(client_id, evs)
 				safe_close_handle(queue.timer)
 				queue.timer = nil
 				if #changes > 0 then
+					-- Apply event rate limiting to prevent server overload
+					local max_events = config.options.max_events_per_batch or 100
+					if #changes > max_events then
+						notify(
+							"[BATCH] Limiting batch from " .. #changes .. " to " .. max_events .. " events",
+							vim.log.levels.DEBUG
+						)
+						local limited_changes = {}
+						for i = 1, max_events do
+							limited_changes[i] = changes[i]
+						end
+						changes = limited_changes
+					end
 					vim.schedule(function()
 						pcall(notify_roslyn, changes)
 					end)
@@ -635,6 +648,14 @@ local function cleanup_client(client_id)
 			restore_mod.clear_for_root(state.root)
 		end)
 	end
+
+	-- Clear regeneration detector state
+	pcall(function()
+		local regen_detector = require("roslyn_filewatch.watcher.regen_detector")
+		if regen_detector and regen_detector.clear then
+			regen_detector.clear(client_id)
+		end
+	end)
 end
 
 ------------------------------------------------------
@@ -977,6 +998,7 @@ function M.start(client)
 		scan_tree_async = snapshot_mod.scan_tree_async,
 		is_scanning = snapshot_mod.is_scanning,
 		partial_scan = snapshot_mod.partial_scan,
+		partial_scan_async = snapshot_mod.partial_scan_async,
 		get_dirty_dirs = get_and_clear_dirty_dirs,
 		should_full_scan = should_full_scan,
 		identity_from_stat = identity_from_stat,

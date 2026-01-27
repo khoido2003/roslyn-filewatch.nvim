@@ -28,6 +28,20 @@ local notify_mod = require("roslyn_filewatch.watcher.notify")
 
 local notify = notify_mod and notify_mod.user or function() end
 
+-- Lazy load regeneration detector to avoid circular dependencies
+local regen_detector = nil
+local function get_regen_detector()
+	if regen_detector == nil then
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.regen_detector")
+		if ok then
+			regen_detector = mod
+		else
+			regen_detector = false -- Mark as failed to avoid repeated attempts
+		end
+	end
+	return regen_detector or nil
+end
+
 local M = {}
 
 ---@class EventBuffer
@@ -576,6 +590,12 @@ function M.start(client, root, snapshots, deps)
 
 				if last_events then
 					last_events[client.id] = os.time()
+				end
+
+				-- Track event for regeneration detection (Unity/Godot burst detection)
+				local regen = get_regen_detector()
+				if regen then
+					pcall(regen.on_event, client.id)
 				end
 
 				local q = raw_event_queues[client.id]

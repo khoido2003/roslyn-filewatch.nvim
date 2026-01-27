@@ -6,6 +6,7 @@
 ---@field scan_tree_async fun(root: string, callback: fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>), on_progress?: fun(scanned: number))|nil
 ---@field is_scanning fun(root: string): boolean|nil Check if async scan is in progress
 ---@field partial_scan fun(dirs: string[], existing_map: table<string, roslyn_filewatch.SnapshotEntry>, root: string)|nil
+---@field partial_scan_async fun(dirs: string[], existing_map: table<string, roslyn_filewatch.SnapshotEntry>, root: string, callback: fun(updated_map: table<string, roslyn_filewatch.SnapshotEntry>))|nil Async version of partial_scan
 ---@field get_dirty_dirs fun(client_id: number): string[]|nil
 ---@field should_full_scan fun(client_id: number): boolean|nil
 ---@field identity_from_stat fun(st: roslyn_filewatch.SnapshotEntry|nil): string|nil
@@ -23,6 +24,20 @@
 ---@field on_sln_changed fun(client_id: number, sln_path: string)|nil Called when solution file change is detected
 
 local uv = vim.uv or vim.loop
+
+-- Lazy load regeneration detector to avoid circular dependencies
+local regen_detector = nil
+local function get_regen_detector()
+	if regen_detector == nil then
+		local ok, mod = pcall(require, "roslyn_filewatch.watcher.regen_detector")
+		if ok then
+			regen_detector = mod
+		else
+			regen_detector = false -- Mark as failed to avoid repeated attempts
+		end
+	end
+	return regen_detector or nil
+end
 
 local M = {}
 
@@ -92,6 +107,15 @@ function M.start(client, root, snapshots, deps)
 
 			-- Also skip if an async scan is already in progress
 			if deps.is_scanning and deps.is_scanning(root) then
+				return
+			end
+
+			-- Skip if currently in regeneration mode (Unity/Godot regenerating files)
+			local regen = get_regen_detector()
+			if regen and regen.is_regenerating(client.id) then
+				if deps.notify then
+					pcall(deps.notify, "Skipping poll - regeneration in progress", vim.log.levels.DEBUG)
+				end
 				return
 			end
 
@@ -254,7 +278,65 @@ function M.start(client, root, snapshots, deps)
 						return
 					end
 				else
-					-- Partial scan: copy old map and update only dirty dirs
+					-- Partial scan: prefer async if available (prevents UI freeze)
+					if deps.partial_scan_async then
+						local partial_new_map = {}
+						for k, v in pairs(old_map) do
+							partial_new_map[k] = v
+						end
+						deps.partial_scan_async(dirty_dir_list, partial_new_map, root, function(async_partial_map)
+							local async_old_map = snapshots[client.id] or {}
+							local async_evs = {}
+							local async_old_id_map = {}
+							for path, entry in pairs(async_old_map) do
+								local id = deps.identity_from_stat and deps.identity_from_stat(entry) or nil
+								if id then
+									async_old_id_map[id] = path
+								end
+							end
+							local async_processed_old = {}
+							for path, mt in pairs(async_partial_map) do
+								local old_mt = async_old_map[path]
+								if not old_mt then
+									local id = deps.identity_from_stat and deps.identity_from_stat(mt) or nil
+									local oldpath = id and async_old_id_map[id]
+									if oldpath then
+										async_processed_old[oldpath] = true
+										async_old_id_map[id] = nil
+									else
+										table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 1 })
+									end
+								elseif
+									not (
+										deps.same_file_info
+										and deps.same_file_info(async_old_map[path], async_partial_map[path])
+									)
+								then
+									table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 2 })
+								end
+								async_processed_old[path] = true
+							end
+							for path, _ in pairs(async_old_map) do
+								if not async_processed_old[path] and async_partial_map[path] == nil then
+									for _, dirty_dir in ipairs(dirty_dir_list) do
+										if path:find(dirty_dir, 1, true) == 1 then
+											table.insert(async_evs, { uri = vim.uri_from_fname(path), type = 3 })
+											break
+										end
+									end
+								end
+							end
+							snapshots[client.id] = async_partial_map
+							if #async_evs > 0 and deps.queue_events then
+								pcall(deps.queue_events, client.id, async_evs)
+							end
+							if deps.last_events then
+								deps.last_events[client.id] = os.time()
+							end
+						end)
+						return
+					end
+					-- Fallback: synchronous partial scan
 					new_map = {}
 					for k, v in pairs(old_map) do
 						new_map[k] = v
