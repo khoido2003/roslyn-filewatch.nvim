@@ -641,10 +641,38 @@ function M.resync()
 	for _, client in ipairs(clients) do
 		if vim.tbl_contains(config.options.client_names, client.name) then
 			local state = get_client_state(client.id)
+
+			-- Reset internal state
 			state.snapshot = {}
 			state.needs_full_scan = true
 			state.dirty_dirs = {}
 			state.last_event = os.time()
+
+			-- Clear the project open tracking state so next file triggers project/open
+			pcall(function()
+				autocmds_mod.clear_client(client.id)
+			end)
+
+			-- Send project/open notifications if we have project info
+			if state.sln_info and state.sln_info.csproj_files then
+				local project_paths = collect_roslyn_project_paths(state.sln_info)
+				if #project_paths > 0 then
+					notify_project_open(client, project_paths, notify)
+					notify("[RESYNC] Sent project/open for " .. #project_paths .. " project(s)", vim.log.levels.DEBUG)
+
+					-- Trigger restore if autorestore is enabled
+					if config.options.enable_autorestore then
+						local first_path = project_paths[1]
+						if first_path then
+							pcall(restore_mod.schedule_restore, first_path, 1000)
+						end
+					end
+
+					-- Request diagnostics refresh
+					request_diagnostics_refresh(client, 2000)
+				end
+			end
+
 			resynced = resynced + 1
 			notify("Resync triggered for client " .. client.name, vim.log.levels.INFO)
 		end
@@ -1144,26 +1172,47 @@ function M.start(client)
 		context_mod.setup(client)
 	end
 
-	-- LspDetach cleanup
+	-- LspDetach cleanup - only cleanup when client actually stops
 	vim.api.nvim_create_autocmd("LspDetach", {
 		callback = function(args)
 			if args.data.client_id == client.id then
-				-- Clear diagnostics state
-				local diag_mod = get_diagnostics_mod()
-				if diag_mod and diag_mod.clear_client then
-					pcall(diag_mod.clear_client, client.id)
-				end
+				-- Check if the client is still running (has other buffers attached)
+				-- LspDetach fires per-buffer, so we should only cleanup when client stops
+				vim.schedule(function()
+					-- Check if client still exists and is active
+					local client_still_active = vim.lsp.get_client_by_id(client.id)
+					if
+						client_still_active
+						and not (client_still_active.is_stopped and client_still_active:is_stopped())
+					then
+						-- Client is still active, just a buffer detach - don't cleanup
+						-- Only clear the project open flag to allow re-triggering on next file open
+						pcall(function()
+							autocmds_mod.clear_client(client.id)
+						end)
+						notify("LspDetach: Buffer detached, client still active", vim.log.levels.DEBUG)
+						return
+					end
 
-				-- Clear project warmup state
-				local ok_w, w_mod = pcall(require, "roslyn_filewatch.project_warmup")
-				if ok_w and w_mod and w_mod.clear_client then
-					pcall(w_mod.clear_client, client.id)
-				end
+					-- Client is actually stopping - do full cleanup
+					notify("LspDetach: Client stopping, performing cleanup", vim.log.levels.DEBUG)
 
-				-- Cleanup
-				cleanup_client(client.id)
-				client_states[client.id] = nil
-				notify("LspDetach: Watcher stopped for client " .. client.name, vim.log.levels.DEBUG)
+					-- Clear diagnostics state
+					local diag_mod = get_diagnostics_mod()
+					if diag_mod and diag_mod.clear_client then
+						pcall(diag_mod.clear_client, client.id)
+					end
+
+					-- Clear project warmup state
+					local ok_w, w_mod = pcall(require, "roslyn_filewatch.project_warmup")
+					if ok_w and w_mod and w_mod.clear_client then
+						pcall(w_mod.clear_client, client.id)
+					end
+
+					-- Cleanup
+					cleanup_client(client.id)
+					client_states[client.id] = nil
+				end)
 				return true
 			end
 		end,
@@ -1210,8 +1259,5 @@ function M.reload_projects()
 		vim.notify("[roslyn-filewatch] No projects to reload", vim.log.levels.WARN)
 	end
 end
-
--- Phase 5: Removed dead code (trigger_deferred_loading, setup_deferred_loading_autocmd)
--- These functions were defined but never called
 
 return M

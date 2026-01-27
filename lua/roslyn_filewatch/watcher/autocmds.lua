@@ -172,6 +172,34 @@ function M.start(client, root, snapshots, deps)
 						if sln_info and sln_info.csproj_only and sln_info.csproj_files then
 							-- Handle project open (only once per client)
 							handle_csproj_project_open(sln_info)
+
+							-- ALWAYS trigger restore for new source files in csproj-only projects
+							-- This ensures restore happens even if project/open was already sent
+							if config.options.enable_autorestore and deps.restore_mod then
+								for csproj_path, _ in pairs(sln_info.csproj_files) do
+									-- Use schedule to avoid blocking
+									vim.schedule(function()
+										pcall(deps.restore_mod.schedule_restore, csproj_path, 2000)
+									end)
+									break -- Only restore one csproj
+								end
+							end
+
+							-- Also send project/open directly for the new file
+							-- This ensures LSP is aware of the new file even after all buffers were deleted
+							local project_paths = collect_project_paths(sln_info)
+							if #project_paths > 0 then
+								vim.schedule(function()
+									notify_project_open(client, project_paths, notify)
+									notify(
+										"[AUTOCMD] New source file detected, sent project/open for "
+											.. #project_paths
+											.. " project(s)",
+										vim.log.levels.DEBUG
+									)
+									request_diagnostics_refresh(client, 1000)
+								end)
+							end
 						end
 					end
 
@@ -258,6 +286,43 @@ function M.start(client, root, snapshots, deps)
 		end,
 	})
 	table.insert(ids, id_main)
+
+	-- BufUnload: Detect when all buffers attached to this client are deleted
+	-- This resets the project open flag so new files trigger project/open notification
+	local id_unload = vim.api.nvim_create_autocmd({ "BufUnload" }, {
+		group = group,
+		callback = function(args)
+			if should_ignore_buf(args.buf) then
+				return
+			end
+
+			-- Skip if this buffer isn't attached to our client
+			if not is_buffer_attached_to_client(args.buf) then
+				return
+			end
+
+			-- Check if there are any other buffers still attached to this client
+			-- We need to defer this check because BufUnload fires before the buffer is actually removed
+			vim.schedule(function()
+				local remaining_bufs = vim.lsp.get_buffers_by_client_id(client.id)
+				-- Filter out the current buffer being unloaded
+				local other_bufs = vim.tbl_filter(function(buf)
+					return buf ~= args.buf and vim.api.nvim_buf_is_valid(buf)
+				end, remaining_bufs or {})
+
+				if #other_bufs == 0 then
+					-- All buffers deleted - reset the project open flag
+					-- so next file open will trigger project/open notification
+					initial_project_open_sent[client.id] = nil
+					notify(
+						"[AUTOCMD] All buffers deleted, reset project open state for client " .. client.id,
+						vim.log.levels.DEBUG
+					)
+				end
+			end)
+		end,
+	})
+	table.insert(ids, id_unload)
 
 	-- BufEnter, BufWritePost, FileChangedRO
 	local id_early = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
