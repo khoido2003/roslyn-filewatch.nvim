@@ -4,6 +4,7 @@
 
 local config = require("roslyn_filewatch.config")
 local uv = vim.uv or vim.loop
+local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}
 
@@ -122,7 +123,7 @@ function M.schedule_restore(project_path, on_complete, delay_ms)
 	end
 
 	-- Normalize path
-	project_path = project_path:gsub("\\", "/")
+	project_path = utils.normalize_path(project_path)
 
 	-- Cancel existing debounce timer for this file
 	if debounce_timers[project_path] then
@@ -184,6 +185,59 @@ end
 ---@return boolean
 function M.is_restoring(project_path)
 	return queued_set[project_path] == true or (processing_active and total_batch_active)
+end
+
+--- Clear all timers and callbacks for paths under a given root
+--- Called when a client stops to prevent memory leaks
+---@param root string Root directory path (normalized with forward slashes)
+function M.clear_for_root(root)
+	if not root or root == "" then
+		return
+	end
+
+	-- Normalize root for comparison
+	root = utils.normalize_path(root)
+
+	-- Clear debounce timers for paths under this root
+	local timers_to_remove = {}
+	for path, timer in pairs(debounce_timers) do
+		if utils.path_starts_with(path, root) then
+			table.insert(timers_to_remove, path)
+			pcall(function()
+				if timer and not timer:is_closing() then
+					timer:stop()
+					timer:close()
+				end
+			end)
+		end
+	end
+	for _, path in ipairs(timers_to_remove) do
+		debounce_timers[path] = nil
+	end
+
+	-- Clear callbacks for paths under this root
+	local callbacks_to_remove = {}
+	for path, _ in pairs(restore_callbacks) do
+		if utils.path_starts_with(path, root) then
+			table.insert(callbacks_to_remove, path)
+		end
+	end
+	for _, path in ipairs(callbacks_to_remove) do
+		restore_callbacks[path] = nil
+	end
+
+	-- Clear queued items for paths under this root
+	local queue_to_remove = {}
+	for i, item in ipairs(restore_queue) do
+		if utils.path_starts_with(item.path, root) then
+			table.insert(queue_to_remove, i)
+			queued_set[item.path] = nil
+		end
+	end
+	-- Remove in reverse order to maintain indices
+	for i = #queue_to_remove, 1, -1 do
+		table.remove(restore_queue, queue_to_remove[i])
+	end
 end
 
 return M

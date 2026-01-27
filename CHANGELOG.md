@@ -5,6 +5,40 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.7] - 2026-01-27
+### Removed
+- **Snippet Support**: Removed built-in snippet management (`snippets.lua`, commands, and config) to reduce bloat. Users are encouraged to use dedicated snippet plugins (like FriendlySnippets) instead.
+
+### Fixed
+- **Watcher Logic**: Fixed `last_events` tracking to prevent nil errors.
+- **Restore Module**: Fixed syntax error in `restore.lua`.
+- **Watchdog Stability**: Added check for client existence before attempting cleanup.
+- **CRITICAL: New files in new folders not detected in Unity projects**
+  - Fixed issue where creating a new folder with a new file inside was not detected by LSP
+  - Root cause: `check_sln_changed` and `on_sln_changed` deps were defined in `fs_poll.lua` but never wired up in `watcher.lua`
+  - When solution file (`.slnx`/`.sln`/`.slnf`) changes, the poller now properly:
+    - Clears the snapshot to force a full rescan
+    - Rescans for new csproj files
+    - Sends `project/open` notifications for new projects
+    - Triggers diagnostics refresh
+- **CRITICAL: Fix "All Buffers Deleted" Bug**
+  - Properly detects when all buffers are closed and resets project state
+  - Ensures opening a new file after `bufdo bd!` correctly triggers `project/open`
+- **Fix LspDetach State Clearing** 
+  - `LspDetach` handler no longer wipes project info on every buffer close
+  - Full cleanup only happens when the LSP client actually stops
+- **New File Detection**
+  - Newly created .cs files in csproj-only projects now ALWAYS trigger `dotnet restore` and `project/open`
+  - Bypasses the one-time project load flag for new source files
+
+### Improved
+- **Enhanced Resync Command**
+  - `:RoslynFilewatchResync` now actually does something useful:
+    - Clears project tracking state
+    - Sends `project/open` notifications to LSP
+    - Triggers `dotnet restore` (if enabled)
+    - Refreshes diagnostics
+
 ## [v0.3.5] - 2026-01-24
 
 ### Fixed

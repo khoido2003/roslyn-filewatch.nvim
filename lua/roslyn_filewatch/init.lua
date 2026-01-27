@@ -232,19 +232,6 @@ function M.setup(opts)
 			cli.open_sln()
 		end, { desc = "Open solution file" })
 	end
-
-	-- Snippet commands
-	if config.options.enable_snippets then
-		vim.api.nvim_create_user_command("RoslynSnippets", function()
-			local snippets = require("roslyn_filewatch.snippets")
-			snippets.show_snippets()
-		end, { desc = "Show available C# snippets" })
-
-		vim.api.nvim_create_user_command("RoslynLoadSnippets", function()
-			local snippets = require("roslyn_filewatch.snippets")
-			snippets.setup_luasnip()
-		end, { desc = "Load snippets into LuaSnip" })
-	end
 end
 
 --- Show current watcher status

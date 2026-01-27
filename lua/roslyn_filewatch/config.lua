@@ -224,9 +224,6 @@ M.options = {
 	--- Enable NuGet commands (restore, add, remove)
 	enable_nuget_commands = false,
 
-	--- Enable snippets (Unity, Godot, etc.)
-	enable_snippets = false,
-
 	--- Enable auto-restore of NuGet packages on .csproj change (default: true)
 	enable_autorestore = true,
 }

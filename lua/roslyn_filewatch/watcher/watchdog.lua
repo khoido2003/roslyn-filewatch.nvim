@@ -50,6 +50,27 @@ function M.start(client, root, snapshots, deps)
 				return
 			end
 
+			-- LSP client health check: detect silent LSP death
+			-- If the client no longer exists in vim.lsp, it died silently
+			local client_check = vim.lsp.get_client_by_id(client.id)
+			if not client_check then
+				if notify then
+					pcall(notify, "LSP client died silently, stopping watcher", vim.log.levels.WARN)
+				end
+				-- Stop the watchdog timer itself
+				pcall(function()
+					if t and not t:is_closing() then
+						t:stop()
+						t:close()
+					end
+				end)
+				-- Notify via restart_watcher to trigger cleanup
+				if restart_watcher then
+					pcall(restart_watcher, "lsp_client_died", 0)
+				end
+				return
+			end
+
 			local last = (last_events and last_events[client.id]) or 0
 			local now = os.time()
 

@@ -2,7 +2,7 @@
 
 A lightweight, **file-watching and project-sync plugin** for Neovim that keeps the **Roslyn LSP** up-to-date with file changes.
 
-Now with built-in **Dotnet CLI integration**, **Game Engine support**, and **Snippet** management.
+Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 ---
 
@@ -40,7 +40,7 @@ Enable these features in your config to get a full C# IDE experience:
 - **Dotnet CLI**: Build, Run, Watch, Clean, and create Projects directly from Neovim.
 - **NuGet**: Manage packages (Add/Remove/Restore) interactively.
 - **Auto-Restore**: Automatically runs `dotnet restore` when `.csproj` files are modified (opt-in).
-- **Snippets**: A collection of 150+ snippets for Unity, Godot, and ASP.NET (requires LuaSnip).
+
 - **Solution Explorer**: A tree-view picker to navigate your solution (`:RoslynExplorer`).
 
 ---
@@ -169,8 +169,7 @@ require("roslyn_filewatch").setup({
   -- Enable auto-restore of NuGet packages on .csproj change
   enable_autorestore = true,
   
-  -- Enable C# snippets (requires LuaSnip)
-  enable_snippets = false,
+
 })
 ```
 
@@ -217,7 +216,7 @@ Most commands are **interactive**—if you run them without arguments, a selecti
 | `:RoslynExplorer` | `:RoslynExplorer` | Interactive Solution/Project explorer. |
 | `:RoslynFiles` | `:RoslynFiles` | Fuzzy find C# files within the solution scope. |
 | `:RoslynStatus` | `:RoslynStatus` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
-| `:RoslynReload` | `:RoslynReload` | **Emergency Fix**: Forces Roslyn to reload all project files. Use if Intellisense breaks. |
+| `:RoslynReloadProjects` | `:RoslynReloadProjects` | **Emergency Fix**: Forces Roslyn to reload all project files. Use if Intellisense breaks. |
 | `:RoslynEngineInfo`| `:RoslynEngineInfo`| Shows detected game engine and active settings. |
 
 ### 🔨 Build & Run (`enable_dotnet_commands = true`)
@@ -256,7 +255,7 @@ This plugin keeps Roslyn aware of **file system changes**:
     *   **Features**:
         *   `dotnet_cli.lua`: Wraps the `dotnet` binary. Handles messy job of parsing CLI output.
         *   `explorer.lua`: Implements the Tree View UI (using `vim.ui.select` or Telescope if available).
-        *   `snippets.lua`: Definitions for Unity/Godot snippets.
+
     *   **Engine Support**:
         *   `presets.lua`: Registry of game engines.
         *   `game_engines/`: Individual logic for Unity, Godot, etc. detection.

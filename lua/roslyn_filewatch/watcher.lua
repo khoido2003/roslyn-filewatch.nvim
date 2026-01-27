@@ -50,6 +50,7 @@ local M = {}
 ---@field needs_full_scan boolean
 ---@field sln_info { path: string|nil, mtime: number, csproj_files: table<string, number>|nil, csproj_only?: boolean }|nil
 ---@field csproj_reload_pending { timer: uv_timer_t|nil, pending: boolean }|nil
+---@field root string|nil -- Root directory path for cleanup
 ---@field autocmd_ids number[]|nil
 
 ---@type table<number, ClientState>
@@ -79,6 +80,7 @@ local function get_client_state(client_id)
 			sln_info = nil,
 			csproj_reload_pending = nil,
 			autocmd_ids = nil,
+			root = nil,
 		}
 	end
 	return client_states[client_id]
@@ -613,6 +615,20 @@ local function cleanup_client(client_id)
 		end)
 		state.autocmd_ids = nil
 	end
+
+	-- Clear autocmd tracking state
+	pcall(function()
+		if autocmds_mod and autocmds_mod.clear_client then
+			autocmds_mod.clear_client(client_id)
+		end
+	end)
+
+	-- Clear restore module timers/callbacks for this root
+	if state.root then
+		pcall(function()
+			restore_mod.clear_for_root(state.root)
+		end)
+	end
 end
 
 ------------------------------------------------------
@@ -720,6 +736,9 @@ function M.start(client)
 		return
 	end
 	root = normalize_path(root)
+
+	-- Store root in state for cleanup
+	state.root = root
 
 	-- Apply preset
 	config.apply_preset_for_root(root)
@@ -964,6 +983,66 @@ function M.start(client)
 		poll_interval = POLL_INTERVAL,
 		poller_restart_threshold = POLLER_RESTART_THRESHOLD,
 		activity_quiet_period = ACTIVITY_QUIET_PERIOD,
+		-- Solution file change detection: triggers full rescan when .slnx/.sln/.slnf changes
+		-- This ensures new project directories (and their source files) are detected
+		check_sln_changed = function(client_id, poll_root)
+			local poll_state = get_client_state(client_id)
+			if not poll_state.sln_info or not poll_state.sln_info.path then
+				return false
+			end
+			local stat = uv.fs_stat(poll_state.sln_info.path)
+			if not stat then
+				return false
+			end
+			local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
+			if current_mtime ~= poll_state.sln_info.mtime then
+				notify("[SLN] Solution file mtime changed, will trigger full rescan", vim.log.levels.DEBUG)
+				poll_state.sln_info.mtime = current_mtime
+				return true
+			end
+			return false
+		end,
+		on_sln_changed = function(client_id, poll_root)
+			local poll_state = get_client_state(client_id)
+			notify("[SLN] Solution file changed, rescanning csproj files", vim.log.levels.DEBUG)
+			-- Force full scan on next poll cycle
+			poll_state.needs_full_scan = true
+			-- Rescan csproj files and send project/open notifications
+			scan_csproj_async(poll_root, function(collected_mtimes)
+				if not poll_state.sln_info then
+					return
+				end
+				local previous_csproj = poll_state.sln_info.csproj_files or {}
+				local new_projects_list = {}
+				local current_csproj_set = {}
+
+				for internal_path, current_mtime_sec in pairs(collected_mtimes) do
+					current_csproj_set[internal_path] = current_mtime_sec
+					local old_mtime_sec = previous_csproj[internal_path]
+					if not old_mtime_sec then
+						table.insert(new_projects_list, to_roslyn_path(internal_path))
+					end
+				end
+
+				poll_state.sln_info.csproj_files = current_csproj_set
+
+				if #new_projects_list > 0 then
+					vim.schedule(function()
+						local clients_list = vim.lsp.get_clients()
+						for _, c in ipairs(clients_list) do
+							if vim.tbl_contains(config.options.client_names, c.name) then
+								notify_project_open(c, new_projects_list, notify)
+								notify(
+									"[SLN] Detected " .. #new_projects_list .. " new project(s) from solution change",
+									vim.log.levels.DEBUG
+								)
+								request_diagnostics_refresh(c, 2000)
+							end
+						end
+					end)
+				end
+			end)
+		end,
 	})
 
 	if not poller then
