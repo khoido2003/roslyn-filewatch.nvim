@@ -37,19 +37,10 @@ function M.setup(opts)
 	end, { desc = "Force resync file watcher snapshots" })
 
 	-- Create user command for project reload
-	vim.api.nvim_create_user_command("RoslynReload", function()
+	vim.api.nvim_create_user_command("RoslynReloadProjects", function()
 		M.reload()
-	end, { desc = "Force reload all Roslyn projects" })
-
-	-- Create user command for solution explorer
-	vim.api.nvim_create_user_command("RoslynExplorer", function()
-		M.explorer()
-	end, { desc = "Open Solution Explorer" })
-
-	-- Create user command for C# file finder
-	vim.api.nvim_create_user_command("RoslynFiles", function()
-		M.find_files()
-	end, { desc = "Find C# files in solution" })
+		vim.notify("[roslyn-filewatch] Reloading all projects...", vim.log.levels.INFO)
+	end, { desc = "Force reload all project files" })
 
 	-- Create user command for game engine info
 	vim.api.nvim_create_user_command("RoslynEngineInfo", function()
@@ -57,8 +48,17 @@ function M.setup(opts)
 	end, { desc = "Show game engine context info" })
 
 	-- ===== DOTNET CLI COMMANDS =====
-
 	if config.options.enable_dotnet_commands then
+		-- Create user command for solution explorer
+		vim.api.nvim_create_user_command("RoslynExplorer", function()
+			M.explorer()
+		end, { desc = "Open Solution Explorer" })
+
+		-- Create user command for C# file finder
+		vim.api.nvim_create_user_command("RoslynFiles", function()
+			M.find_files()
+		end, { desc = "Find C# files in solution" })
+
 		-- Build commands
 		vim.api.nvim_create_user_command("RoslynBuild", function(opts)
 			local cli = require("roslyn_filewatch.dotnet_cli")
@@ -245,11 +245,6 @@ function M.setup(opts)
 			snippets.setup_luasnip()
 		end, { desc = "Load snippets into LuaSnip" })
 	end
-
-	vim.api.nvim_create_user_command("RoslynReloadProjects", function()
-		M.reload()
-		vim.notify("[roslyn-filewatch] Reloading all projects...", vim.log.levels.INFO)
-	end, { desc = "Force reload all project files" })
 end
 
 --- Show current watcher status
