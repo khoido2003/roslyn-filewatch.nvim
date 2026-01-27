@@ -38,6 +38,14 @@ local M = {}
 ---@type table<number, EventBuffer>
 local event_buffers = {}
 
+---@class RawEventQueue
+---@field events string[] Raw filenames from fs_event
+---@field processing boolean
+
+--- Per-client raw event queue
+---@type table<number, RawEventQueue>
+local raw_event_queues = {}
+
 --- Stop and close timer safely
 ---@param t uv_timer_t|nil
 local function local_stop_close(t)
@@ -51,6 +59,17 @@ local function local_stop_close(t)
 		t:close()
 	end)
 end
+
+-- Error/resync throttle knobs
+local ERROR_WINDOW_SEC = 2
+local ERROR_THRESHOLD = 2
+local RESYNC_MIN_INTERVAL_SEC = 2
+
+---@type table<number, { count: number, since: number }>
+local error_counters = {}
+
+---@type table<number, number>
+local last_resync_ts = {}
 
 --- Clear event buffer for a client
 ---@param client_id number
@@ -74,6 +93,9 @@ function M.clear(client_id)
 	buf.map = nil
 	event_buffers[client_id] = nil
 
+	-- Clear raw queue
+	raw_event_queues[client_id] = nil
+
 	-- Clean up error tracking tables to prevent memory leaks
 	error_counters[client_id] = nil
 	last_resync_ts[client_id] = nil
@@ -81,23 +103,19 @@ end
 
 -- Default debounce for processing fs_event bursts (ms)
 -- Higher values coalesce more events (better for Unity regeneration)
-local DEFAULT_PROCESSING_DEBOUNCE_MS = 150
+local DEFAULT_PROCESSING_DEBOUNCE_MS = 300
 
 -- Async flush processing chunk size (files per chunk)
-local FLUSH_CHUNK_SIZE = 10
+local FLUSH_CHUNK_SIZE = 25
 -- Delay between chunks (ms) - allows UI to remain responsive
-local FLUSH_CHUNK_DELAY_MS = 1
+local FLUSH_CHUNK_DELAY_MS = 5
+
+-- Raw event processing chunk size
+local RAW_PROCESS_CHUNK_SIZE = 50
+-- Raw event processing delay
+local RAW_PROCESS_DELAY_MS = 5
 
 -- Error/resync throttle knobs
-local ERROR_WINDOW_SEC = 2
-local ERROR_THRESHOLD = 2
-local RESYNC_MIN_INTERVAL_SEC = 2
-
----@type table<number, { count: number, since: number }>
-local error_counters = {}
-
----@type table<number, number>
-local last_resync_ts = {}
 
 --- Check if path should be watched with early extension check for performance
 ---@param fullpath string Normalized path
@@ -207,6 +225,77 @@ local function may_restart_due_to_nil_filename(client_id, notify_fn, restart_fn)
 		end
 	end, 50)
 	return true
+end
+
+--- Schedule processing of raw events for a client
+---@param client_id number
+---@param root string
+---@param cfg roslyn_filewatch.config
+---@param schedule_flush_fn fun(client_id: number)
+local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
+	local q = raw_event_queues[client_id]
+	if not q or q.processing then
+		return
+	end
+
+	-- If queue is empty, nothing to do
+	if #q.events == 0 then
+		return
+	end
+
+	q.processing = true
+
+	local function process_next_chunk()
+		local q_next = raw_event_queues[client_id]
+		-- Client might have been cleared
+		if not q_next then
+			return
+		end
+
+		local chunk_size = math.min(#q_next.events, RAW_PROCESS_CHUNK_SIZE)
+		if chunk_size == 0 then
+			q_next.processing = false
+			return
+		end
+
+		local chunk = {}
+		for _ = 1, chunk_size do
+			table.insert(chunk, table.remove(q_next.events, 1))
+		end
+
+		-- Process the chunk synchronously
+		local added_any = false
+		for _, filename in ipairs(chunk) do
+			if filename then
+				-- Expensive string ops happen here, spread out over time
+				local fullpath = utils.normalize_path(root .. "/" .. filename)
+
+				-- Quick extension check first
+				local ext = utils.get_extension(fullpath)
+				if ext then
+					-- Full path check
+					if should_watch_path(fullpath, cfg) then
+						event_buffers[client_id] = event_buffers[client_id] or { map = {}, timer = nil }
+						event_buffers[client_id].map[fullpath] = true
+						added_any = true
+					end
+				end
+			end
+		end
+
+		if added_any then
+			schedule_flush_fn(client_id)
+		end
+
+		-- If more events, schedule next chunk
+		if #q_next.events > 0 then
+			vim.defer_fn(process_next_chunk, RAW_PROCESS_DELAY_MS)
+		else
+			q_next.processing = false
+		end
+	end
+
+	vim.defer_fn(process_next_chunk, RAW_PROCESS_DELAY_MS)
 end
 
 --- Start fs_event watcher
@@ -481,26 +570,26 @@ function M.start(client, root, snapshots, deps)
 					return
 				end
 
-				local fullpath = normalize_path(root .. "/" .. filename)
-
-				-- Early exit: check extension first for performance
-				local ext = utils.get_extension(fullpath)
-				if not ext then
-					return
-				end
-
-				-- Now check full path filtering
-				if not should_watch_path(fullpath, cfg) then
-					return
-				end
+				-- RAW EVENT QUEUE:
+				-- Push raw filename to queue immediately.
+				-- Do NOT perform string manipulation or filtering here on the hot path.
 
 				if last_events then
 					last_events[client.id] = os.time()
 				end
 
-				event_buffers[client.id] = event_buffers[client.id] or { map = {}, timer = nil }
-				event_buffers[client.id].map[fullpath] = true
-				schedule_flush(client.id)
+				local q = raw_event_queues[client.id]
+				if not q then
+					q = { events = {}, processing = false }
+					raw_event_queues[client.id] = q
+				end
+
+				table.insert(q.events, filename)
+
+				-- Trigger processing if not already running
+				if not q.processing then
+					schedule_raw_processing(client.id, root, cfg, schedule_flush)
+				end
 			end)
 
 			if not ok_cb then

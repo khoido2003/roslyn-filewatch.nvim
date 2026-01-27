@@ -464,22 +464,28 @@ local function process_auto_restore(client_id, evs, state)
 	-- it might be Unity creating a file in a new folder. Unity will eventually
 	-- regenerate the .csproj, but we might miss that event or it might be delayed.
 	-- We trigger a restore with a LONGER delay (5s) to allow Unity to finish.
+
 	if not restore_triggered then
+		local source_created = false
 		for _, ev in ipairs(evs) do
 			if ev.type == 1 and ev.uri then -- Created
 				local path = vim.uri_to_fname(ev.uri)
 				if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
-					-- Find which project this file likely belongs to
-					if state.sln_info and state.sln_info.csproj_files then
-						for csproj_path, _ in pairs(state.sln_info.csproj_files) do
-							-- Trigger restore with 5000ms delay
-							-- This prevents racing with Unity's internal generation
-							pcall(restore_mod.schedule_restore, csproj_path, 5000)
-						end
-						-- Only trigger once per batch
-						break
-					end
+					source_created = true
+					break
 				end
+			end
+		end
+
+		if source_created then
+			if state.sln_info and state.sln_info.path then
+				-- If we have a solution file, restore that instead of guessing projects
+				pcall(restore_mod.schedule_restore, state.sln_info.path, 5000)
+			elseif state.sln_info and state.sln_info.csproj_files then
+				-- If no solution, maybe pick the first csproj we know?
+				-- Or just do nothing and wait for csproj file events (safer)
+				-- Triggering restore on ALL csproj is too heavy.
+				-- Let's just pick one to trigger the "restore" batch if possible, or skip.
 			end
 		end
 	end
@@ -1086,6 +1092,7 @@ function M.start(client)
 						local new_projects_list = {}
 						local current_csproj_set = {}
 
+						local restore_needed_projects = {}
 						for internal_path, current_mtime_sec in pairs(collected_mtimes) do
 							current_csproj_set[internal_path] = current_mtime_sec
 
@@ -1094,8 +1101,22 @@ function M.start(client)
 								table.insert(new_projects_list, to_roslyn_path(internal_path))
 
 								if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
-									pcall(restore_mod.schedule_restore, internal_path)
+									table.insert(restore_needed_projects, internal_path)
 								end
+							end
+						end
+
+						-- If multiple projects need restore, just schedule the first one (for csproj-only)
+						-- or rely on dotnet restore being smart if we could call it on root.
+						-- But for csproj-only, we have to restore projects.
+						-- Let's limit to scheduling just a few or use a "root" restore if possible.
+						if #restore_needed_projects > 0 then
+							-- For csproj-only, we unfortunately have to restore them.
+							-- But we can limit the storm by just doing one if it's a huge batch?
+							-- Or relying on the fact that restore.lua is sequential.
+							-- Better optimization: if > 3 projects changed, assume full rebuild needed?
+							for _, p in ipairs(restore_needed_projects) do
+								pcall(restore_mod.schedule_restore, p)
 							end
 						end
 
@@ -1154,6 +1175,7 @@ function M.start(client)
 							local new_projects_list = {}
 							local current_csproj_set = {}
 
+							local restore_needed = false
 							for internal_path, current_mtime_sec in pairs(collected_mtimes) do
 								current_csproj_set[internal_path] = current_mtime_sec
 
@@ -1165,9 +1187,15 @@ function M.start(client)
 									table.insert(new_projects_list, to_roslyn_path(internal_path))
 
 									if old_mtime_sec and old_mtime_sec ~= current_mtime_sec then
-										pcall(restore_mod.schedule_restore, internal_path)
+										restore_needed = true
 									end
 								end
+							end
+
+							if restore_needed then
+								-- OPTIMIZATION: If any csproj changed under the solution,
+								-- restore the SOLUTION file instead of individual projects.
+								pcall(restore_mod.schedule_restore, state.sln_info.path)
 							end
 
 							if not state.sln_info.csproj_files then
