@@ -265,6 +265,77 @@ local function scan_csproj_async(root, callback)
 	scan_dir_async(root)
 end
 
+--- Async helper: scan only specific project directories found in SLN
+---@param project_dirs string[] List of project directories to scan
+---@param callback fun(csproj_map: table<string, number>) Called with path -> mtime.sec map
+local function scan_projects_from_sln_async(project_dirs, callback)
+	local results = {}
+	local pending = 0
+	local finished = false
+
+	local function finish()
+		if finished then
+			return
+		end
+		finished = true
+		vim.schedule(function()
+			callback(results)
+		end)
+	end
+
+	if not project_dirs or #project_dirs == 0 then
+		finish()
+		return
+	end
+
+	-- Scan each project directory concurrently
+	for _, dir in ipairs(project_dirs) do
+		pending = pending + 1
+		uv.fs_scandir(dir, function(err, scanner)
+			if err or not scanner then
+				pending = pending - 1
+				if pending == 0 then
+					finish()
+				end
+				return
+			end
+
+			local csproj_found = {}
+			while true do
+				local name, typ = uv.fs_scandir_next(scanner)
+				if not name then
+					break
+				end
+				-- Only look for project files
+				if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
+					table.insert(csproj_found, normalize_path(dir .. "/" .. name))
+				end
+			end
+
+			-- Stat found project files to get mtime
+			for _, p in ipairs(csproj_found) do
+				pending = pending + 1
+				uv.fs_stat(p, function(stat_err, stat)
+					if not stat_err and stat then
+						results[p] = stat.mtime.sec
+					else
+						results[p] = 0
+					end
+					pending = pending - 1
+					if pending == 0 then
+						finish()
+					end
+				end)
+			end
+
+			pending = pending - 1
+			if pending == 0 then
+				finish()
+			end
+		end)
+	end
+end
+
 ------------------------------------------------------
 -- INCREMENTAL SCANNING HELPERS
 ------------------------------------------------------
@@ -942,11 +1013,41 @@ function M.start(client)
 					csproj_files = nil,
 				}
 
-				scan_csproj_async(root, function(initial_csproj)
-					if state.sln_info then
-						state.sln_info.csproj_files = initial_csproj
-					end
-				end)
+				-- OPTIMIZATION: Parse SLN to get project directories directly
+				-- This avoids scanning the entire filesystem recursively
+				local project_dirs = sln_parser.get_project_dirs(sln_info.path, sln_info.type)
+
+				if project_dirs and #project_dirs > 0 then
+					notify(
+						"[SLN] Optimization: Parsing .sln for " .. #project_dirs .. " projects (skipping full scan)",
+						vim.log.levels.DEBUG
+					)
+					scan_projects_from_sln_async(project_dirs, function(initial_csproj)
+						if state.sln_info then
+							state.sln_info.csproj_files = initial_csproj
+
+							-- If we found projects, notify immediately
+							local project_paths = collect_roslyn_project_paths(state.sln_info)
+							if #project_paths > 0 then
+								vim.schedule(function()
+									notify_project_open(client, project_paths, notify)
+									notify(
+										"[STARTUP] Loaded " .. #project_paths .. " projects from SLN",
+										vim.log.levels.INFO
+									)
+								end)
+							end
+						end
+					end)
+				else
+					-- Fallback if parsing failed or returned no projects
+					notify("[SLN] Parser returned no projects, falling back to full scan", vim.log.levels.DEBUG)
+					scan_csproj_async(root, function(initial_csproj)
+						if state.sln_info then
+							state.sln_info.csproj_files = initial_csproj
+						end
+					end)
+				end
 			else
 				-- No solution file - check for csproj-only project
 				notify("[SLN] No solution file found, checking for csproj-only project", vim.log.levels.DEBUG)
