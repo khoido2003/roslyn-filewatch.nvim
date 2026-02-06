@@ -23,6 +23,13 @@ local M = {}
 ---@type table<number, boolean>
 local initial_project_open_sent = {}
 
+-- Track last project reload time per client (debounce)
+---@type table<number, number>
+local last_project_reload_time = {}
+
+-- Debounce interval for project reload on new files (ms)
+local NEW_FILE_PROJECT_RELOAD_DEBOUNCE_MS = 2000
+
 --- Start autocmds for the watcher
 --- Creates a unique autocmd group per client to prevent cross-client triggering
 ---@param client vim.lsp.Client LSP client
@@ -164,41 +171,88 @@ function M.start(client, root, snapshots, deps)
 				-- Queue create event for LSP
 				local events = { { uri = vim.uri_from_fname(npath), type = 1 } }
 
-				-- For source files in csproj-only projects, handle project open (once)
+				-- For source files, ALWAYS reload the project (both solution and csproj-only)
+				-- This ensures Roslyn reloads and recognizes new files
 				if npath:match("%.cs$") or npath:match("%.vb$") or npath:match("%.fs$") then
 					local config = require("roslyn_filewatch.config")
 					if config.options.solution_aware and deps.sln_mtimes then
 						local sln_info = deps.sln_mtimes[client.id]
-						if sln_info and sln_info.csproj_only and sln_info.csproj_files then
-							-- Handle project open (only once per client)
-							handle_csproj_project_open(sln_info)
-
-							-- ALWAYS trigger restore for new source files in csproj-only projects
-							-- This ensures restore happens even if project/open was already sent
-							if config.options.enable_autorestore and deps.restore_mod then
-								for csproj_path, _ in pairs(sln_info.csproj_files) do
-									-- Use schedule to avoid blocking
-									vim.schedule(function()
-										pcall(deps.restore_mod.schedule_restore, csproj_path, 2000)
-									end)
-									break -- Only restore one csproj
-								end
+						-- Handle BOTH solution-based AND csproj-only projects
+						if sln_info and sln_info.csproj_files then
+							-- Handle initial project open (only once per client session for startup)
+							if sln_info.csproj_only then
+								handle_csproj_project_open(sln_info)
 							end
 
-							-- Also send project/open directly for the new file
-							-- This ensures LSP is aware of the new file even after all buffers were deleted
-							local project_paths = collect_project_paths(sln_info)
-							if #project_paths > 0 then
-								vim.schedule(function()
-									notify_project_open(client, project_paths, notify)
-									notify(
-										"[AUTOCMD] New source file detected, sent project/open for "
-											.. #project_paths
-											.. " project(s)",
-										vim.log.levels.DEBUG
-									)
-									request_diagnostics_refresh(client, 1000)
-								end)
+							-- DEBOUNCED: Send csproj change events + project/open for every new source file
+							-- This ensures Roslyn reloads the project and recognizes new files
+							local now = vim.loop.now()
+							local last_reload = last_project_reload_time[client.id] or 0
+
+							if now - last_reload > NEW_FILE_PROJECT_RELOAD_DEBOUNCE_MS then
+								last_project_reload_time[client.id] = now
+
+								local project_paths = collect_project_paths(sln_info)
+								if #project_paths > 0 then
+									-- Queue csproj change events FIRST (triggers project reload in Roslyn)
+									local csproj_events = {}
+									for csproj_path, _ in pairs(sln_info.csproj_files) do
+										table.insert(csproj_events, { uri = vim.uri_from_fname(csproj_path), type = 2 })
+									end
+
+									if deps.queue_events and #csproj_events > 0 then
+										vim.schedule(function()
+											pcall(deps.queue_events, client.id, csproj_events)
+											notify(
+												"[AUTOCMD] Sent csproj change events for "
+													.. #csproj_events
+													.. " project(s)",
+												vim.log.levels.DEBUG
+											)
+										end)
+									end
+
+									-- Then send project/open notification
+									vim.schedule(function()
+										notify_project_open(client, project_paths, notify)
+										notify(
+											"[AUTOCMD] New source file detected, sent project/open for "
+												.. #project_paths
+												.. " project(s)",
+											vim.log.levels.DEBUG
+										)
+									end)
+
+									-- Trigger restore if enabled
+									if config.options.enable_autorestore and deps.restore_mod then
+										-- For solution projects, restore the solution; for csproj-only, restore the csproj
+										local restore_target = sln_info.path or next(sln_info.csproj_files)
+										if restore_target then
+											vim.schedule(function()
+												pcall(deps.restore_mod.schedule_restore, restore_target, function(_)
+													-- After restore, send another project/open and refresh diagnostics
+													vim.defer_fn(function()
+														if client.is_stopped and client.is_stopped() then
+															return
+														end
+														notify_project_open(client, project_paths, notify)
+														request_diagnostics_refresh(client, 500)
+														notify(
+															"[AUTOCMD] Post-restore project reload complete",
+															vim.log.levels.DEBUG
+														)
+													end, 500)
+												end)
+											end)
+										end
+									else
+										-- No restore - just refresh diagnostics after a delay
+										request_diagnostics_refresh(client, 1500)
+									end
+								end
+							else
+								-- Debounced - still refresh diagnostics for responsiveness
+								request_diagnostics_refresh(client, 1000)
 							end
 						end
 					end
@@ -379,6 +433,7 @@ end
 ---@param client_id number
 function M.clear_client(client_id)
 	initial_project_open_sent[client_id] = nil
+	last_project_reload_time[client_id] = nil
 end
 
 return M

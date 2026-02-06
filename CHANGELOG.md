@@ -5,8 +5,24 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.3.7] - 2026-01-27
-### Removed
+## [v0.3.8] - 2026-02-06
+### Fixed
+- **CRITICAL: Fix for Moved/Renamed Files detection**
+  - Fixed issue where moving or renaming C# files was not ignored by the LSP
+  - Implemented proper handle for file moves utilizing `fs_event` renames
+  - Automatically triggers `.csproj` updates when source files are moved or renamed (updates both source and destination projects)
+- **CRITICAL: Fix for New/Deleted Files in Godot/C# Projects**
+  - Fixed issue where created/deleted files were not recognized by Roslyn LSP
+  - Now automatically sends `.csproj` change events (type=2) whenever a source file (`.cs`/`.vb`/`.fs`) is created or deleted
+  - This forces Roslyn to reload the project context and recognize the file changes
+- **Project Reload Logic**
+  - Enhanced `project/open` logic to support both **Solution-based** and **CSPROJ-only** projects
+  - Added debounce (500ms) to project reload notifications to prevent spam during bulk operations
+  - Ensures correct project context even when files are created externally (outside Neovim)
+
+### Improved
+- **Robustness**: Extracted csproj-finding logic into a reusable helper to ensure consistent behavior across all file events (create, delete, move, rename)
+
 - **Snippet Support**: Removed built-in snippet management (`snippets.lua`, commands, and config) to reduce bloat. Users are encouraged to use dedicated snippet plugins (like FriendlySnippets) instead.
 
 ### Fixed
