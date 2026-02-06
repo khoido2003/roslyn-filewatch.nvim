@@ -12,193 +12,193 @@ local info = health.info or health.report_info
 
 --- Check Neovim version
 local function check_neovim_version()
-	local version = vim.version()
-	local version_str = string.format("%d.%d.%d", version.major, version.minor, version.patch)
+  local version = vim.version()
+  local version_str = string.format("%d.%d.%d", version.major, version.minor, version.patch)
 
-	if version.major >= 0 and version.minor >= 10 then
-		ok("Neovim version: " .. version_str .. " (>= 0.10 recommended)")
-	elseif version.major >= 0 and version.minor >= 9 then
-		warn("Neovim version: " .. version_str .. " (0.10+ recommended for best experience)")
-	else
-		error_fn("Neovim version: " .. version_str .. " (0.9+ required)")
-	end
+  if version.major >= 0 and version.minor >= 10 then
+    ok("Neovim version: " .. version_str .. " (>= 0.10 recommended)")
+  elseif version.major >= 0 and version.minor >= 9 then
+    warn("Neovim version: " .. version_str .. " (0.10+ recommended for best experience)")
+  else
+    error_fn("Neovim version: " .. version_str .. " (0.9+ required)")
+  end
 end
 
 --- Check libuv availability
 local function check_libuv()
-	local uv = vim.uv or vim.loop
-	if uv then
-		ok("libuv available via " .. (vim.uv and "vim.uv" or "vim.loop"))
-	else
-		error_fn("libuv not available - file watching will not work")
-		return
-	end
+  local uv = vim.uv or vim.loop
+  if uv then
+    ok("libuv available via " .. (vim.uv and "vim.uv" or "vim.loop"))
+  else
+    error_fn("libuv not available - file watching will not work")
+    return
+  end
 
-	-- Check fs_event capability
-	local test_handle = uv.new_fs_event()
-	if test_handle then
-		ok("uv.new_fs_event() available")
-		pcall(function()
-			test_handle:close()
-		end)
-	else
-		warn("uv.new_fs_event() failed - plugin will use polling fallback")
-	end
+  -- Check fs_event capability
+  local test_handle = uv.new_fs_event()
+  if test_handle then
+    ok("uv.new_fs_event() available")
+    pcall(function()
+      test_handle:close()
+    end)
+  else
+    warn("uv.new_fs_event() failed - plugin will use polling fallback")
+  end
 
-	-- Check fs_poll capability
-	local test_poll = uv.new_fs_poll()
-	if test_poll then
-		ok("uv.new_fs_poll() available")
-		pcall(function()
-			test_poll:close()
-		end)
-	else
-		error_fn("uv.new_fs_poll() failed - polling fallback not available")
-	end
+  -- Check fs_poll capability
+  local test_poll = uv.new_fs_poll()
+  if test_poll then
+    ok("uv.new_fs_poll() available")
+    pcall(function()
+      test_poll:close()
+    end)
+  else
+    error_fn("uv.new_fs_poll() failed - polling fallback not available")
+  end
 end
 
 --- Check platform
 local function check_platform()
-	local utils = require("roslyn_filewatch.watcher.utils")
-	local is_win = utils.is_windows()
+  local utils = require("roslyn_filewatch.watcher.utils")
+  local is_win = utils.is_windows()
 
-	local uv = vim.uv or vim.loop
-	local uname = uv.os_uname()
-	local sysname = uname and uname.sysname or "unknown"
+  local uv = vim.uv or vim.loop
+  local uname = uv.os_uname()
+  local sysname = uname and uname.sysname or "unknown"
 
-	info("Platform: " .. sysname)
+  info("Platform: " .. sysname)
 
-	if is_win then
-		info("Windows detected - fs_event enabled with EPERM error recovery")
-	elseif sysname:match("Darwin") then
-		info("macOS detected - FSEvents may have inherent latency (1-5 seconds)")
-	elseif sysname:match("Linux") then
-		ok("Linux detected - inotify should work well")
+  if is_win then
+    info("Windows detected - fs_event enabled with EPERM error recovery")
+  elseif sysname:match("Darwin") then
+    info("macOS detected - FSEvents may have inherent latency (1-5 seconds)")
+  elseif sysname:match("Linux") then
+    ok("Linux detected - inotify should work well")
 
-		-- Check inotify limits
-		local handle = io.open("/proc/sys/fs/inotify/max_user_watches", "r")
-		if handle then
-			local content = handle:read("*a")
-			handle:close()
-			local limit = tonumber(content)
-			if limit and limit < 524288 then
-				warn("Low fs.inotify.max_user_watches: " .. tostring(limit))
-				info("Suggest increasing limit for large projects:")
-				info("echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p")
-			else
-				ok("fs.inotify.max_user_watches: " .. tostring(limit))
-			end
-		end
-	end
+    -- Check inotify limits
+    local handle = io.open("/proc/sys/fs/inotify/max_user_watches", "r")
+    if handle then
+      local content = handle:read("*a")
+      handle:close()
+      local limit = tonumber(content)
+      if limit and limit < 524288 then
+        warn("Low fs.inotify.max_user_watches: " .. tostring(limit))
+        info("Suggest increasing limit for large projects:")
+        info("echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p")
+      else
+        ok("fs.inotify.max_user_watches: " .. tostring(limit))
+      end
+    end
+  end
 end
 
 --- Check external tools
 local function check_external_tools()
-	if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
-		ok("fd found (accelerated scanning enabled)")
-	else
-		info("fd not found (using standard Lua scanning)")
-		info("Install 'sharkdp/fd' for significantly faster startup on huge projects")
-	end
+  if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
+    ok("fd found (accelerated scanning enabled)")
+  else
+    info("fd not found (using standard Lua scanning)")
+    info("Install 'sharkdp/fd' for significantly faster startup on huge projects")
+  end
 end
 
 --- Check Roslyn LSP clients
 local function check_roslyn_clients()
-	local config = require("roslyn_filewatch.config")
-	local client_names = config.options.client_names or {}
+  local config = require("roslyn_filewatch.config")
+  local client_names = config.options.client_names or {}
 
-	info("Configured client names: " .. vim.inspect(client_names))
+  info("Configured client names: " .. vim.inspect(client_names))
 
-	local clients = vim.lsp.get_clients()
-	local found_roslyn = false
+  local clients = vim.lsp.get_clients()
+  local found_roslyn = false
 
-	for _, client in ipairs(clients) do
-		if vim.tbl_contains(client_names, client.name) then
-			found_roslyn = true
-			ok("Found active Roslyn client: " .. client.name .. " (id: " .. client.id .. ")")
+  for _, client in ipairs(clients) do
+    if vim.tbl_contains(client_names, client.name) then
+      found_roslyn = true
+      ok("Found active Roslyn client: " .. client.name .. " (id: " .. client.id .. ")")
 
-			if client.config and client.config.root_dir then
-				info("  Root directory: " .. client.config.root_dir)
-			end
-		end
-	end
+      if client.config and client.config.root_dir then
+        info("  Root directory: " .. client.config.root_dir)
+      end
+    end
+  end
 
-	if not found_roslyn then
-		if #clients > 0 then
-			warn("No active Roslyn clients found. Active LSP clients:")
-			for _, client in ipairs(clients) do
-				info("  - " .. client.name .. " (id: " .. client.id .. ")")
-			end
-			info("Make sure your Roslyn LSP client name matches one of: " .. vim.inspect(client_names))
-		else
-			warn("No active LSP clients. Open a C# file to attach the Roslyn LSP.")
-		end
-	end
+  if not found_roslyn then
+    if #clients > 0 then
+      warn("No active Roslyn clients found. Active LSP clients:")
+      for _, client in ipairs(clients) do
+        info("  - " .. client.name .. " (id: " .. client.id .. ")")
+      end
+      info("Make sure your Roslyn LSP client name matches one of: " .. vim.inspect(client_names))
+    else
+      warn("No active LSP clients. Open a C# file to attach the Roslyn LSP.")
+    end
+  end
 end
 
 --- Check configuration
 local function check_config()
-	local config = require("roslyn_filewatch.config")
-	local opts = config.options
+  local config = require("roslyn_filewatch.config")
+  local opts = config.options
 
-	info("Batching: " .. (opts.batching and opts.batching.enabled and "enabled" or "disabled"))
-	if opts.batching and opts.batching.enabled then
-		info("  Interval: " .. (opts.batching.interval or 300) .. "ms")
-	end
+  info("Batching: " .. (opts.batching and opts.batching.enabled and "enabled" or "disabled"))
+  if opts.batching and opts.batching.enabled then
+    info("  Interval: " .. (opts.batching.interval or 300) .. "ms")
+  end
 
-	info("Poll interval: " .. (opts.poll_interval or 3000) .. "ms")
-	info("Watchdog idle timeout: " .. (opts.watchdog_idle or 60) .. "s")
-	info("Rename detection window: " .. (opts.rename_detection_ms or 300) .. "ms")
+  info("Poll interval: " .. (opts.poll_interval or 3000) .. "ms")
+  info("Watchdog idle timeout: " .. (opts.watchdog_idle or 60) .. "s")
+  info("Rename detection window: " .. (opts.rename_detection_ms or 300) .. "ms")
 
-	if opts.force_polling then
-		warn("force_polling is enabled - native file watching is disabled")
-	else
-		ok("Native file watching enabled (with polling fallback)")
-	end
+  if opts.force_polling then
+    warn("force_polling is enabled - native file watching is disabled")
+  else
+    ok("Native file watching enabled (with polling fallback)")
+  end
 
-	-- Solution-aware watching status
-	if opts.solution_aware ~= false then
-		ok("Solution-aware watching enabled (parses .sln/.slnx/.slnf for project scope)")
-	else
-		info("Solution-aware watching disabled (scanning entire root)")
-	end
+  -- Solution-aware watching status
+  if opts.solution_aware ~= false then
+    ok("Solution-aware watching enabled (parses .sln/.slnx/.slnf for project scope)")
+  else
+    info("Solution-aware watching disabled (scanning entire root)")
+  end
 
-	-- Gitignore support status
-	if opts.respect_gitignore ~= false then
-		ok("Gitignore support enabled (respects .gitignore patterns)")
-	else
-		info("Gitignore support disabled")
-	end
+  -- Gitignore support status
+  if opts.respect_gitignore ~= false then
+    ok("Gitignore support enabled (respects .gitignore patterns)")
+  else
+    info("Gitignore support disabled")
+  end
 
-	info("Ignored directories: " .. #(opts.ignore_dirs or {}) .. " configured")
-	info("Watch extensions: " .. #(opts.watch_extensions or {}) .. " configured")
+  info("Ignored directories: " .. #(opts.ignore_dirs or {}) .. " configured")
+  info("Watch extensions: " .. #(opts.watch_extensions or {}) .. " configured")
 
-	local log_level = opts.log_level or 3
-	local level_names = { [0] = "TRACE", [1] = "DEBUG", [2] = "INFO", [3] = "WARN", [4] = "ERROR" }
-	info("Log level: " .. (level_names[log_level] or tostring(log_level)))
+  local log_level = opts.log_level or 3
+  local level_names = { [0] = "TRACE", [1] = "DEBUG", [2] = "INFO", [3] = "WARN", [4] = "ERROR" }
+  info("Log level: " .. (level_names[log_level] or tostring(log_level)))
 end
 
 --- Main health check function
 function M.check()
-	start("roslyn-filewatch.nvim")
+  start("roslyn-filewatch.nvim")
 
-	start("Neovim Version")
-	check_neovim_version()
+  start("Neovim Version")
+  check_neovim_version()
 
-	start("libuv Capabilities")
-	check_libuv()
+  start("libuv Capabilities")
+  check_libuv()
 
-	start("Platform Detection")
-	check_platform()
+  start("Platform Detection")
+  check_platform()
 
-	start("Roslyn LSP Clients")
-	check_roslyn_clients()
+  start("Roslyn LSP Clients")
+  check_roslyn_clients()
 
-	start("External Tools")
-	check_external_tools()
+  start("External Tools")
+  check_external_tools()
 
-	start("Configuration")
-	check_config()
+  start("Configuration")
+  check_config()
 end
 
 return M

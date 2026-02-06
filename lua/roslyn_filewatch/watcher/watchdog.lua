@@ -24,95 +24,95 @@ local WATCHDOG_INTERVAL_MS = 15000
 ---@return uv_timer_t|nil timer The watchdog timer, or nil on error
 ---@return string|nil error Error message if failed
 function M.start(client, root, snapshots, deps)
-	deps = deps or {}
-	local notify = deps.notify
-	local restart_watcher = deps.restart_watcher
-	local get_handle = deps.get_handle
-	local last_events = deps.last_events
-	local watchdog_idle = deps.watchdog_idle or 60 -- seconds
+  deps = deps or {}
+  local notify = deps.notify
+  local restart_watcher = deps.restart_watcher
+  local get_handle = deps.get_handle
+  local last_events = deps.last_events
+  local watchdog_idle = deps.watchdog_idle or 60 -- seconds
 
-	-- If the caller explicitly passes use_fs_event = false (poller-only),
-	-- do NOT treat a missing fs_event handle as an error. Default is true if nil.
-	local use_fs_event = true
-	if deps.use_fs_event ~= nil then
-		use_fs_event = deps.use_fs_event
-	end
+  -- If the caller explicitly passes use_fs_event = false (poller-only),
+  -- do NOT treat a missing fs_event handle as an error. Default is true if nil.
+  local use_fs_event = true
+  if deps.use_fs_event ~= nil then
+    use_fs_event = deps.use_fs_event
+  end
 
-	local t = uv.new_timer()
-	if not t then
-		return nil, "failed to create timer"
-	end
+  local t = uv.new_timer()
+  if not t then
+    return nil, "failed to create timer"
+  end
 
-	local ok, err = pcall(function()
-		t:start(WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, function()
-			-- Only act when client is alive
-			if client.is_stopped and client.is_stopped() then
-				return
-			end
+  local ok, err = pcall(function()
+    t:start(WATCHDOG_INTERVAL_MS, WATCHDOG_INTERVAL_MS, function()
+      -- Only act when client is alive
+      if client.is_stopped and client.is_stopped() then
+        return
+      end
 
-			-- LSP client health check: detect silent LSP death
-			-- If the client no longer exists in vim.lsp, it died silently
-			local client_check = vim.lsp.get_client_by_id(client.id)
-			if not client_check then
-				if notify then
-					pcall(notify, "LSP client died silently, stopping watcher", vim.log.levels.WARN)
-				end
-				-- Stop the watchdog timer itself
-				pcall(function()
-					if t and not t:is_closing() then
-						t:stop()
-						t:close()
-					end
-				end)
-				-- Notify via restart_watcher to trigger cleanup
-				if restart_watcher then
-					pcall(restart_watcher, "lsp_client_died", 0)
-				end
-				return
-			end
+      -- LSP client health check: detect silent LSP death
+      -- If the client no longer exists in vim.lsp, it died silently
+      local client_check = vim.lsp.get_client_by_id(client.id)
+      if not client_check then
+        if notify then
+          pcall(notify, "LSP client died silently, stopping watcher", vim.log.levels.WARN)
+        end
+        -- Stop the watchdog timer itself
+        pcall(function()
+          if t and not t:is_closing() then
+            t:stop()
+            t:close()
+          end
+        end)
+        -- Notify via restart_watcher to trigger cleanup
+        if restart_watcher then
+          pcall(restart_watcher, "lsp_client_died", 0)
+        end
+        return
+      end
 
-			local last = (last_events and last_events[client.id]) or 0
-			local now = os.time()
+      local last = (last_events and last_events[client.id]) or 0
+      local now = os.time()
 
-			-- Idle detection
-			if now - last > watchdog_idle then
-				if notify then
-					pcall(notify, "Idle " .. watchdog_idle .. "s, recycling watcher", vim.log.levels.DEBUG)
-				end
-				if restart_watcher then
-					pcall(restart_watcher, "idle_timeout")
-				end
-				return
-			end
+      -- Idle detection
+      if now - last > watchdog_idle then
+        if notify then
+          pcall(notify, "Idle " .. watchdog_idle .. "s, recycling watcher", vim.log.levels.DEBUG)
+        end
+        if restart_watcher then
+          pcall(restart_watcher, "idle_timeout")
+        end
+        return
+      end
 
-			-- Detect dead / closed handle
-			-- Only consider missing/closed handle an error when fs_event is expected
-			if use_fs_event then
-				local h = get_handle and get_handle()
-				if not h or (h.is_closing and h:is_closing()) then
-					if notify then
-						pcall(notify, "Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
-					end
-					if restart_watcher then
-						pcall(restart_watcher, "handle_closed")
-					end
-				end
-			end
-		end)
-	end)
+      -- Detect dead / closed handle
+      -- Only consider missing/closed handle an error when fs_event is expected
+      if use_fs_event then
+        local h = get_handle and get_handle()
+        if not h or (h.is_closing and h:is_closing()) then
+          if notify then
+            pcall(notify, "Watcher handle missing/closed, restarting", vim.log.levels.DEBUG)
+          end
+          if restart_watcher then
+            pcall(restart_watcher, "handle_closed")
+          end
+        end
+      end
+    end)
+  end)
 
-	if not ok then
-		-- Try to close timer in case of error
-		pcall(function()
-			if t and not t:is_closing() then
-				t:stop()
-				t:close()
-			end
-		end)
-		return nil, err
-	end
+  if not ok then
+    -- Try to close timer in case of error
+    pcall(function()
+      if t and not t:is_closing() then
+        t:stop()
+        t:close()
+      end
+    end)
+    return nil, err
+  end
 
-	return t, nil
+  return t, nil
 end
 
 return M
