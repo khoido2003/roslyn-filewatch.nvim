@@ -53,6 +53,7 @@ function M.get_status()
 			force_polling = config.options.force_polling or false,
 			batching = config.options.batching and config.options.batching.enabled or false,
 			poll_interval = config.options.poll_interval or 3000,
+			fd_available = (vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1),
 		},
 	}
 
@@ -177,6 +178,7 @@ function M.show()
 	config_line("Force polling ", status.config_summary.force_polling)
 	config_line("Batching      ", status.config_summary.batching)
 	config_line("Diag throttle ", config.options.diagnostic_throttling and config.options.diagnostic_throttling.enabled)
+	config_line("fd Integration", status.config_summary.fd_available)
 
 	-- Show applied preset
 	local applied_preset = config.options._applied_preset

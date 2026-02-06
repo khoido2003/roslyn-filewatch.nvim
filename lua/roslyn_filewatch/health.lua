@@ -74,6 +74,31 @@ local function check_platform()
 		info("macOS detected - FSEvents may have inherent latency (1-5 seconds)")
 	elseif sysname:match("Linux") then
 		ok("Linux detected - inotify should work well")
+
+		-- Check inotify limits
+		local handle = io.open("/proc/sys/fs/inotify/max_user_watches", "r")
+		if handle then
+			local content = handle:read("*a")
+			handle:close()
+			local limit = tonumber(content)
+			if limit and limit < 524288 then
+				warn("Low fs.inotify.max_user_watches: " .. tostring(limit))
+				info("Suggest increasing limit for large projects:")
+				info("echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p")
+			else
+				ok("fs.inotify.max_user_watches: " .. tostring(limit))
+			end
+		end
+	end
+end
+
+--- Check external tools
+local function check_external_tools()
+	if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
+		ok("fd found (accelerated scanning enabled)")
+	else
+		info("fd not found (using standard Lua scanning)")
+		info("Install 'sharkdp/fd' for significantly faster startup on huge projects")
 	end
 end
 
@@ -168,6 +193,9 @@ function M.check()
 
 	start("Roslyn LSP Clients")
 	check_roslyn_clients()
+
+	start("External Tools")
+	check_external_tools()
 
 	start("Configuration")
 	check_config()

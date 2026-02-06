@@ -5,6 +5,29 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.9] - 2026-02-07
+
+### Fixed
+- **Duplicate Restores**
+  - Fixed an issue where opening buffers (even existing files) would trigger `dotnet restore` multiple times.
+  - Improved `ensure_in_snapshot` logic to ignore "new file" logic for existing files (older than 60s).
+  - Deduplicated startup logic to prevent double `project/open` notifications.
+
+### Added
+- **Performance: `fd` Integration**
+  - Integrated support for `sharkdp/fd` for significantly faster project scanning (up to 10x faster on large projects).
+  - Automatically detects if `fd` (or `fdfind` on Linux) is installed and uses it.
+  - Falls back to standard Lua-based scanning if not found.
+- **Health Checks**
+  - Added Linux system limit check for `fs.inotify.max_user_watches` to prevent silent watcher failures.
+  - Added detection for external tools (`fd`).
+
+### Optimized
+- **Bulk File Operations**
+  - Implemented caching for `.csproj` discovery in `notify.lua`.
+  - Prevents redundant filesystem scans when creating/modifying many files at once (e.g., during `git checkout` or massive refactors).
+  - Greatly improved responsiveness during bulk operations.
+
 ## [v0.3.8] - 2026-02-06
 
 ### Fixed

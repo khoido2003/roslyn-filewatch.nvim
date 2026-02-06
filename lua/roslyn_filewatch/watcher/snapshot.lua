@@ -42,19 +42,183 @@ function M.is_scanning(root)
 	return scanning_in_progress[normalize_path(root)] == true
 end
 
---- Async directory scan that yields to event loop periodically
---- This prevents UI freezes during large scans (Unity regeneration)
+--- Async directory scan using 'fd' (Sharkdp/fd) for high performance
+---@param fd_exe string Path to fd executable
+---@param root string Root directory to scan
+---@param callback fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>)
+---@param on_progress? fun(scanned: number)
+local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
+	root = normalize_path(root)
+	local args = { "--type", "f", "--color", "never", "--absolute-path" }
+
+	-- Handle gitignore
+	if config.options.respect_gitignore == false then
+		table.insert(args, "--no-ignore")
+		table.insert(args, "--hidden")
+	end
+
+	-- Add excludes
+	for _, dir in ipairs(config.options.ignore_dirs or {}) do
+		table.insert(args, "--exclude")
+		table.insert(args, dir)
+	end
+
+	-- Add ignore patterns
+	for _, pattern in ipairs(config.options.ignore_patterns or {}) do
+		table.insert(args, "--exclude")
+		table.insert(args, pattern)
+	end
+
+	-- Add extensions
+	for _, ext in ipairs(config.options.watch_extensions or {}) do
+		local e = ext:gsub("^%.", "")
+		table.insert(args, "--extension")
+		table.insert(args, e)
+	end
+
+	-- Path arguments
+	table.insert(args, ".")
+	table.insert(args, root)
+
+	local out_map = {}
+	local collected_paths = {}
+	local stdout = uv.new_pipe(false)
+	local stderr = uv.new_pipe(false)
+	local buffer = ""
+
+	local handle, pid
+	handle, pid = uv.spawn(fd_exe, {
+		args = args,
+		stdio = { nil, stdout, stderr },
+	}, function(code, signal)
+		stdout:read_stop()
+		stderr:read_stop()
+		stdout:close()
+		stderr:close()
+		handle:close()
+
+		-- Process collected paths asynchronously using stat
+		vim.schedule(function()
+			-- If fd failed, fallback to empty map or partial results
+			if code ~= 0 then
+				-- Fallback logic could go here, but for now just process what we got
+				if #collected_paths == 0 then
+					if callback then
+						callback(out_map)
+					end
+					return
+				end
+			end
+
+			-- Check if scan was cancelled during fd execution
+			if not scanning_in_progress[root] then
+				return
+			end
+
+			-- Stat all collected files in chunks
+			local pending = #collected_paths
+			local processed = 0
+			local CHUNK_SIZE = 50
+			local current_idx = 1
+
+			if pending == 0 then
+				scanning_in_progress[root] = nil
+				if callback then
+					callback(out_map)
+				end
+				return
+			end
+
+			local function stat_chunk()
+				-- Check cancellation again
+				if not scanning_in_progress[root] then
+					return
+				end
+
+				local end_idx = math.min(current_idx + CHUNK_SIZE - 1, pending)
+				for i = current_idx, end_idx do
+					local fullpath = collected_paths[i]
+					uv.fs_stat(fullpath, function(err, st)
+						if not err and st then
+							out_map[fullpath] = {
+								mtime = mtime_ns(st),
+								size = st.size,
+								ino = st.ino,
+								dev = st.dev,
+							}
+						end
+						processed = processed + 1
+
+						-- Report progress occasionally
+						if on_progress and processed % 1000 == 0 then
+							vim.schedule(function()
+								pcall(on_progress, processed)
+							end)
+						end
+
+						if processed == pending then
+							scanning_in_progress[root] = nil
+							vim.schedule(function()
+								if callback then
+									callback(out_map)
+								end
+							end)
+						end
+					end)
+				end
+				current_idx = end_idx + 1
+				if current_idx <= pending then
+					-- Yield to keep UI responsive
+					vim.defer_fn(stat_chunk, 5)
+				end
+			end
+
+			stat_chunk()
+		end)
+	end)
+
+	if not handle then
+		-- Failed to spawn, cleanup
+		scanning_in_progress[root] = nil
+		if stdout then
+			stdout:close()
+		end
+		if stderr then
+			stderr:close()
+		end
+		return
+	end
+
+	-- Read stdout
+	uv.read_start(stdout, function(err, data)
+		if err or not data then
+			return
+		end
+		buffer = buffer .. data
+
+		while true do
+			local line_end = buffer:find("\n")
+			if not line_end then
+				break
+			end
+
+			local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
+			buffer = buffer:sub(line_end + 1)
+
+			if #line > 0 then
+				local fullpath = normalize_path(line)
+				table.insert(collected_paths, fullpath)
+			end
+		end
+	end)
+end
+
+--- Standard Lua-based async directory scan (fallback)
 ---@param root string Root directory to scan
 ---@param callback fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>) Called when scan completes
 ---@param on_progress? fun(scanned: number) Optional progress callback
-function M.scan_tree_async(root, callback, on_progress)
+local function scan_tree_async_lua(root, callback, on_progress)
 	root = normalize_path(root)
-
-	-- Prevent duplicate concurrent scans
-	if scanning_in_progress[root] then
-		return
-	end
-	scanning_in_progress[root] = true
 
 	local ignore_dirs = config.options.ignore_dirs or {}
 	local watch_extensions = config.options.watch_extensions or {}
@@ -221,6 +385,34 @@ function M.scan_tree_async(root, callback, on_progress)
 
 	-- Start processing
 	vim.defer_fn(process_chunk, 0)
+end
+
+--- Async directory scan that yields to event loop periodically
+--- Dispatches to 'fd' if available, otherwise uses Lua fallback
+---@param root string Root directory to scan
+---@param callback fun(out_map: table<string, roslyn_filewatch.SnapshotEntry>) Called when scan completes
+---@param on_progress? fun(scanned: number) Optional progress callback
+function M.scan_tree_async(root, callback, on_progress)
+	root = normalize_path(root)
+
+	-- Prevent duplicate concurrent scans
+	if scanning_in_progress[root] then
+		return
+	end
+	scanning_in_progress[root] = true
+
+	local fd_exe = nil
+	if vim.fn.executable("fd") == 1 then
+		fd_exe = "fd"
+	elseif vim.fn.executable("fdfind") == 1 then
+		fd_exe = "fdfind"
+	end
+
+	if fd_exe then
+		scan_tree_async_fd(fd_exe, root, callback, on_progress)
+	else
+		scan_tree_async_lua(root, callback, on_progress)
+	end
 end
 
 --- Directory scan (for poller snapshot) — writes normalized paths into out_map
