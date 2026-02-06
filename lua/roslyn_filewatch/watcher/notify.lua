@@ -130,7 +130,7 @@ end
 --- If new source files are created OR deleted, also send csproj change events to trigger project reload
 ---@param changes roslyn_filewatch.FileChange[]
 function M.roslyn_changes(changes)
-  if not changes or #changes == 0 then
+  if not changes or type(changes) ~= "table" or #changes == 0 then
     return
   end
 

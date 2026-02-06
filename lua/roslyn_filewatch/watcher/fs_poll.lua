@@ -41,6 +41,34 @@ end
 
 local M = {}
 
+--- Per-client trailing timer tracking for proper cleanup
+---@type table<number, uv_timer_t>
+local trailing_timers = {}
+
+--- Safely stop and close a timer
+---@param timer uv_timer_t|nil
+local function safe_close_timer(timer)
+  if not timer then
+    return
+  end
+  pcall(function()
+    if not timer:is_closing() then
+      timer:stop()
+      timer:close()
+    end
+  end)
+end
+
+--- Stop and clean up trailing timer for a client
+---@param client_id number
+function M.stop(client_id)
+  local timer = trailing_timers[client_id]
+  if timer then
+    safe_close_timer(timer)
+    trailing_timers[client_id] = nil
+  end
+end
+
 --- Start a fs_poll watcher for `client` at `root`.
 ---@param client vim.lsp.Client LSP client
 ---@param root string Root directory path
@@ -65,7 +93,10 @@ function M.start(client, root, snapshots, deps)
   end
 
   -- Timer for trailing check (throttling safety)
+  -- Clean up any existing timer for this client first
+  M.stop(client.id)
   local trailing_timer = uv.new_timer()
+  trailing_timers[client.id] = trailing_timer
 
   local ok, start_err = pcall(function()
     poller:start(root, poll_interval, function(errp, prev, curr)
@@ -96,7 +127,7 @@ function M.start(client, root, snapshots, deps)
       local last_event_time = (deps.last_events and deps.last_events[client.id]) or 0
 
       -- ============================================
-      -- ACTIVITY-BASED THROTTLING (VS Code-like behavior)
+      -- ACTIVITY-BASED THROTTLING
       -- Skip expensive scans during heavy file activity
       -- Unity regeneration can last 5-30 seconds, so we need
       -- a longer quiet period before triggering scans
@@ -424,12 +455,13 @@ function M.start(client, root, snapshots, deps)
   end)
 
   if not ok then
-    -- Close poller if start failed
+    -- Close poller and trailing timer if start failed
     pcall(function()
       if poller and poller.close then
         poller:close()
       end
     end)
+    M.stop(client.id)
     return nil, start_err
   end
 

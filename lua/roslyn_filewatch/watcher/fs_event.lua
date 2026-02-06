@@ -128,6 +128,8 @@ local FLUSH_CHUNK_DELAY_MS = 5
 local RAW_PROCESS_CHUNK_SIZE = 50
 -- Raw event processing delay
 local RAW_PROCESS_DELAY_MS = 5
+-- Maximum raw events to queue (prevents memory explosion during Unity regeneration)
+local MAX_RAW_QUEUE_SIZE = 5000
 
 -- Error/resync throttle knobs
 
@@ -601,6 +603,12 @@ function M.start(client, root, snapshots, deps)
         end
 
         table.insert(q.events, filename)
+
+        -- Bound queue size to prevent memory issues during heavy regeneration
+        -- Oldest events are dropped (they'll be caught by poller resync)
+        while #q.events > MAX_RAW_QUEUE_SIZE do
+          table.remove(q.events, 1)
+        end
 
         -- Trigger processing if not already running
         if not q.processing then

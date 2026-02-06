@@ -668,6 +668,13 @@ local function cleanup_client(client_id)
     end
   end)
 
+  -- Clear fs_poll trailing timer
+  pcall(function()
+    if fs_poll_mod and fs_poll_mod.stop then
+      fs_poll_mod.stop(client_id)
+    end
+  end)
+
   -- Close all handles
   safe_close_handle(state.watcher)
   state.watcher = nil
