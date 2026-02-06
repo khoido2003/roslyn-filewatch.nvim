@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [v0.3.8] - 2026-02-06
+
 ### Fixed
 - **CRITICAL: Fix for Moved/Renamed Files detection**
   - Fixed issue where moving or renaming C# files was not ignored by the LSP
@@ -23,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Improved
 - **Robustness**: Extracted csproj-finding logic into a reusable helper to ensure consistent behavior across all file events (create, delete, move, rename)
 
+## [v0.3.7] - 2026-01-27
+
+### Removed
 - **Snippet Support**: Removed built-in snippet management (`snippets.lua`, commands, and config) to reduce bloat. Users are encouraged to use dedicated snippet plugins (like FriendlySnippets) instead.
 
 ### Fixed
