@@ -67,6 +67,9 @@ end
 local function find_csproj_changes(source_files, additional_changes)
 	local uv = vim.uv or vim.loop
 	local seen_csproj = {}
+	-- Cache directory scan results to avoid redundant fs calls for files in same dir
+	-- Key: directory path, Value: list of csproj paths found (or empty table)
+	local dir_cache = {}
 
 	for _, source_file in ipairs(source_files) do
 		-- Search up to 3 directories up for .csproj files
@@ -74,26 +77,45 @@ local function find_csproj_changes(source_files, additional_changes)
 		local search_depth = 0
 
 		while dir and search_depth < 3 do
-			local handle = uv.fs_scandir(dir)
-			if handle then
-				while true do
-					local name, typ = uv.fs_scandir_next(handle)
-					if not name then
-						break
+			-- Check cache first
+			local cached = dir_cache[dir]
+			if cached then
+				for _, csproj_path in ipairs(cached) do
+					if not seen_csproj[csproj_path] then
+						seen_csproj[csproj_path] = true
+						table.insert(additional_changes, {
+							uri = vim.uri_from_fname(csproj_path),
+							type = 2, -- Changed
+						})
 					end
-					if typ == "file" and name:match("%.csproj$") then
-						local csproj_path = dir .. "/" .. name
-						-- Normalize path separators
-						csproj_path = csproj_path:gsub("\\", "/")
-						if not seen_csproj[csproj_path] then
-							seen_csproj[csproj_path] = true
-							table.insert(additional_changes, {
-								uri = vim.uri_from_fname(csproj_path),
-								type = 2, -- Changed
-							})
+				end
+			else
+				-- Not in cache, scan directory
+				local found_in_dir = {}
+				local handle = uv.fs_scandir(dir)
+				if handle then
+					while true do
+						local name, typ = uv.fs_scandir_next(handle)
+						if not name then
+							break
+						end
+						if typ == "file" and name:match("%.csproj$") then
+							local csproj_path = dir .. "/" .. name
+							-- Normalize path separators
+							csproj_path = csproj_path:gsub("\\", "/")
+							table.insert(found_in_dir, csproj_path)
+
+							if not seen_csproj[csproj_path] then
+								seen_csproj[csproj_path] = true
+								table.insert(additional_changes, {
+									uri = vim.uri_from_fname(csproj_path),
+									type = 2, -- Changed
+								})
+							end
 						end
 					end
 				end
+				dir_cache[dir] = found_in_dir
 			end
 
 			-- Move to parent directory
