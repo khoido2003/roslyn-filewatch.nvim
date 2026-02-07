@@ -236,6 +236,25 @@ function M.start(client, root, snapshots, deps)
               end
 
               local async_processed_old = {}
+              local is_initial_scan = next(async_old_map) == nil
+
+              if is_initial_scan then
+                if deps.notify then
+                  pcall(
+                    deps.notify,
+                    "Initial scan complete: " .. vim.tbl_count(async_new_map) .. " files",
+                    vim.log.levels.DEBUG
+                  )
+                end
+                -- Optimization: On initial scan, just populate the snapshot.
+                -- Do NOT send thousands of "Created" events, as Roslyn loads the project structure itself.
+                -- sending 30k+ events causes massive lag and RPC timeout.
+                snapshots[client.id] = async_new_map
+                if deps.last_events then
+                  deps.last_events[client.id] = os.time()
+                end
+                return
+              end
 
               -- Detect creates / renames / changes
               for path, mt in pairs(async_new_map) do
@@ -395,6 +414,22 @@ function M.start(client, root, snapshots, deps)
         -- Track processed old paths to avoid double-processing
         ---@type table<string, boolean>
         local processed_old = {}
+
+        local is_initial_scan = next(old_map) == nil
+        if is_initial_scan then
+          if deps.notify then
+            pcall(
+              deps.notify,
+              "Initial scan (sync) complete: " .. vim.tbl_count(new_map) .. " files",
+              vim.log.levels.DEBUG
+            )
+          end
+          snapshots[client.id] = new_map
+          if deps.last_events then
+            deps.last_events[client.id] = os.time()
+          end
+          return
+        end
 
         -- Detect creates / renames / changes
         for path, mt in pairs(new_map) do

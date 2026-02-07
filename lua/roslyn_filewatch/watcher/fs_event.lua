@@ -609,6 +609,13 @@ function M.start(client, root, snapshots, deps)
         local regen = get_regen_detector()
         if regen then
           pcall(regen.on_event, client.id)
+
+          -- If in regeneration mode (burst detected), DROP events.
+          -- Processing thousands of events (stats + queueing) causes massive lag.
+          -- The fs_poll loop will resync the state once regeneration finishes.
+          if regen.is_regenerating(client.id) then
+            return
+          end
         end
 
         local q = raw_event_queues[client.id]

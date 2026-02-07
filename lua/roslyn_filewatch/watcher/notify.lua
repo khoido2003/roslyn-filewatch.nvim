@@ -176,8 +176,16 @@ function M.roslyn_changes(changes)
   end
 
   -- If source files were modified, find nearby csproj files and add change events
+  -- OPTIMIZATION: In solution-aware mode, we rely on standard mechanisms.
+  -- Scanning for csproj files synchronously causes blocking IO and UI freeze.
+  -- SDK-style projects (like Unity) don't need explicit csproj touches for new files.
   local additional_changes = {}
-  local seen_csproj = find_csproj_changes(modified_source_files, additional_changes)
+  local seen_csproj = {}
+
+  local skip_csproj_search = config.options.solution_aware
+  if not skip_csproj_search then
+    seen_csproj = find_csproj_changes(modified_source_files, additional_changes)
+  end
 
   -- Merge additional changes with original changes
   local all_changes = vim.list_extend({}, changes)

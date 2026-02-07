@@ -1128,6 +1128,21 @@ function M.start(client)
               scan_csproj_async(root, function(initial_csproj)
                 if state.sln_info then
                   state.sln_info.csproj_files = initial_csproj
+
+                  -- Even if sln parser returned no dirs (triggers full scan),
+                  -- we still need to notify LSP about the projects we found via csproj scan.
+                  -- This ensures the LSP knows about the projects even in fallback mode.
+                  local project_paths = collect_roslyn_project_paths(state.sln_info)
+                  if #project_paths > 0 then
+                    vim.schedule(function()
+                      notify_project_open(client, project_paths, notify)
+                      notify(
+                        "[STARTUP] Fallback: Loaded " .. #project_paths .. " projects from recursive scan",
+                        vim.log.levels.DEBUG
+                      )
+                      request_diagnostics_refresh(client, 2000)
+                    end)
+                  end
                 end
               end)
             end
@@ -1262,12 +1277,15 @@ function M.start(client)
   state.poller = poller
 
   -- Create solution/csproj poll timer
-  if config.options.solution_aware and state.sln_info then
+  -- NOTE: Start the timer unconditionally. The sln_info may be set asynchronously
+  -- after this code runs (during get_sln_info_async callback). The timer callback
+  -- will check for sln_info existence each tick, allowing it to work even when
+  -- sln_info is populated later.
+  if config.options.solution_aware then
     local sln_timer = uv.new_timer()
     if sln_timer then
-      local is_csproj_only = state.sln_info.csproj_only == true
       notify(
-        "[PROJECT] Started project watcher (mode: " .. (is_csproj_only and "csproj-only" or "solution") .. ")",
+        "[PROJECT] Starting project watcher timer (will activate when sln_info is available)",
         vim.log.levels.DEBUG
       )
 
@@ -1280,6 +1298,8 @@ function M.start(client)
 
         local cached = state.sln_info
         if not cached then
+          -- sln_info not yet available (still being parsed asynchronously)
+          -- This is normal during startup - just skip this tick
           return
         end
 

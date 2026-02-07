@@ -256,10 +256,12 @@ M.options = {
   recovery_max_delay_ms = 30000,
 
   --- Fast watchdog check interval (ms) - checks handle health and event flow
-  watchdog_fast_interval_ms = 5000,
+  --- Increased from 5000 to 10000 to reduce overhead on medium-sized projects
+  watchdog_fast_interval_ms = 10000,
 
   --- Deep watchdog check interval (ms) - async snapshot verification
-  watchdog_deep_interval_ms = 30000,
+  --- Increased from 30000 to 60000 to reduce I/O overhead during normal operation
+  watchdog_deep_interval_ms = 60000,
 
   --- Number of sample files to verify during deep health check
   recovery_sample_size = 5,
