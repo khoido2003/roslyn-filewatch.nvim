@@ -6,6 +6,12 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 ---
 
+> [!WARNING]
+> **v0.4.0 Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
+> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#-migration-guide-v040).
+
+---
+
 ## ⚡ Why?
 
 Roslyn does not watch your project files by default in Neovim/Linux/Mac. Without this, you often need to `:edit!` or restart the LSP to make Roslyn notice file creation, deletion, renaming, or solution changes.
@@ -35,13 +41,7 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 - **Godot**: Handles `project.godot` and `.godot/`.
 - **Stride**, **MonoGame**, **FNA**: Preset configurations included.
 
-### 🛠️ Integrated Tooling (Opt-in)
-Enable these features in your config to get a full C# IDE experience:
-- **Dotnet CLI**: Build, Run, Watch, Clean, and create Projects directly from Neovim.
-- **NuGet**: Manage packages (Add/Remove/Restore) interactively.
-- **Auto-Restore**: Automatically runs `dotnet restore` when `.csproj` files are modified (opt-in).
 
-- **Solution Explorer**: A tree-view picker to navigate your solution (`:RoslynExplorer`).
 
 ---
 
@@ -55,6 +55,13 @@ Enable these features in your config to get a full C# IDE experience:
 ---
 
 ## 📦 Installation
+
+### ⚠️ Migration Guide (v0.4.0)
+
+If you rely on the removed CLI/Explorer features, pin your plugin version:
+```lua
+{ "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
+```
 
 ### lazy.nvim
 ```lua
@@ -158,13 +165,6 @@ require("roslyn_filewatch").setup({
   
   -- Force non-native polling mode (not recommended unless fs_event fails)
   force_polling = false,
-  
-  -- === Optional Features (Default: false) ===
-  -- Enable built-in Dotnet CLI commands (:RoslynBuild, :RoslynRun, etc.)
-  enable_dotnet_commands = false,
-  
-  -- Enable NuGet package management commands
-  enable_nuget_commands = false,
 
   -- Enable auto-restore of NuGet packages on .csproj change
   enable_autorestore = true,
@@ -175,21 +175,9 @@ require("roslyn_filewatch").setup({
 
 ### 2. Common Workflows
 
-#### **A. Starting a New Project**
-1.  Run `:RoslynNewProject`.
-2.  Select a template (e.g., `console`, `webapi`, `classlib`).
-3.  Enter a name.
-4.  The plugin creates the project folder and file.
-5.  *(Optional)* Open it immediately with `:RoslynOpenCsproj`.
 
-#### **B. Adding a Dependency**
-Instead of switching to the terminal:
-1.  Run `:RoslynNuget`.
-2.  Type `Newtonsoft.Json`.
-3.  The plugin finds the nearest `.csproj` and installs the package.
-4.  Roslyn automatically picks up the reference because the file watcher sees the change.
 
-#### **C. Working with Unity**
+#### **Working with Unity**
 1.  Open your Unity project folder in Neovim.
 2.  The plugin detects `Assets/` and `ProjectSettings/`.
 3.  It automatically switches to the **Unity Preset**:
@@ -198,12 +186,6 @@ Instead of switching to the terminal:
     *   Adds `UNT` analyzer rules to your LSP configuration.
 4.  **Tip**: Use `:RoslynEngineInfo` to confirm Unity mode is active.
 
-#### **D. Navigating Large Solutions**
-1.  Run `:RoslynExplorer`.
-2.  You see a tree view: `Solution` -> `Project A` -> `Folder` -> `File.cs`.
-3.  Select a file to open.
-4.  *Note*: This respects `.sln` structure, so it's cleaner than a raw file tree.
-
 ---
 
 ## 🧭 Command Reference
@@ -211,116 +193,65 @@ Instead of switching to the terminal:
 Most commands are **interactive**—if you run them without arguments, a selection menu will appear.
 
 ### 📂 Core (Always Available)
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `:RoslynExplorer` | `:RoslynExplorer` | Interactive Solution/Project explorer. |
-| `:RoslynFiles` | `:RoslynFiles` | Fuzzy find C# files within the solution scope. |
-| `:RoslynStatus` | `:RoslynStatus` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
-| `:RoslynReloadProjects` | `:RoslynReloadProjects` | **Emergency Fix**: Forces Roslyn to reload all project files. Use if Intellisense breaks. |
-| `:RoslynEngineInfo`| `:RoslynEngineInfo`| Shows detected game engine and active settings. |
-
-### 🔨 Build & Run (`enable_dotnet_commands = true`)
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `:RoslynBuild` | `:RoslynBuild [Release/Debug]` | Builds the solution. |
-| `:RoslynRun` | `:RoslynRun [ProjectName]` | Runs a project. Interactive if multiple executable projects exist. |
-| `:RoslynWatch` | `:RoslynWatch` | Starts `dotnet watch` in a terminal buffer for Hot Reload. |
-| `:RoslynClean` | `:RoslynClean` | Deletes `bin/` and `obj/` folders. |
-
-### 📦 NuGet (`enable_nuget_commands = true`)
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `:RoslynNuget` | `:RoslynNuget [PackageName]` | Adds a NuGet package to the current project. |
-| `:RoslynNugetRemove`| `:RoslynNugetRemove` | Shows a list of installed packages to remove. |
-| `:RoslynRestore` | `:RoslynRestore` | Runs `dotnet restore` to download missing packages. |
-
----
+| Command | Description |
+|---------|-------------|
+| `:RoslynStatus` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
+| `:RoslynFilewatchResync` | **Recovery**: Forces a full snapshot resync. |
+| `:RoslynReloadProjects` | **Emergency Fix**: Forces Roslyn to reload all project files. |
+| `:checkhealth roslyn_filewatch` | Shows detailed health and recovery status. |---
 
 ## � Maintainer Guide
 
 For developers contributing to `roslyn-filewatch.nvim`, this section details the architecture.
 
-### 🗺️ The Code Map
+### 🗺️ Architecture Overview
 
-#### Project Structure
+The plugin follows a **Unidirectional Data Flow** pattern to maintain synchronization between the File System and Roslyn with minimal latency.
 
-This plugin keeps Roslyn aware of **file system changes**:
+```mermaid
+flowchart TD
+    FS[File System] -->|Events| FS_Event[fs_event.lua]
+    FS_Event -->|Debounce| Buffer[Event Buffer]
+    Buffer -->|Flush| Watcher[watcher.lua]
+    Watcher -->|Scan| Snapshot[snapshot.lua]
+    Snapshot -->|Diff| Changes[Detected Changes]
+    Changes -->|Heuristic| Rename[rename.lua]
+    Rename -->|Notification| Notify[notify.lua]
+    Notify -->|LSP JSON| Roslyn[Roslyn LSP]
+```
 
-*   `lua/roslyn_filewatch/`
-    *   **Core Logic**:
-        *   `init.lua`: The entry point. Handles setup and command registration.
-        *   `watcher.lua`: The brain. Manages `uv.fs_event` handles and the polling loop.
-        *   `snapshot.lua`: The memory. Maintains the state of the filesystem (`path -> {mtime, size, inode}`). Computes diffs.
-        *   `config.lua`: Validation and default options.
-    *   **Features**:
-        *   `dotnet_cli.lua`: Wraps the `dotnet` binary. Handles messy job of parsing CLI output.
-        *   `explorer.lua`: Implements the Tree View UI (using `vim.ui.select` or Telescope if available).
+#### Core Components
+*   **`watcher.lua`**: The orchestrator. Manages the lifecycle of `uv.fs_event` handles, `uv.fs_poll` fallbacks, and the **Self-Healing Watchdog** that restarts frozen listeners.
+*   **`fs_event.lua`**: Handles low-level libuv events. Implements **Dynamic Debounce** (switching between 50ms and 300ms+ latency based on event pressure).
+*   **`snapshot.lua`**: The source of truth. Maintains an in-memory mirror of the filesystem (`path -> {mtime, size, inode}`). Uses **parallelized `fs_stat`** batches for high-performance scanning of large repos.
+*   **`sln_parser.lua`**: Async parser for `.sln`, `.slnx`, and `.slnf` files. Determines the "Watch Scope" to strictly ignore unrelated files.
+*   **`notify.lua`**: Handles LSP communication, batching `workspace/didChangeWatchedFiles` notifications to prevent flooding.
+*   **`restore.lua`**: Manages `dotnet restore` execution sequence to prevent "Thundering Herd" issues during massive file changes.
 
-    *   **Engine Support**:
-        *   `presets.lua`: Registry of game engines.
-        *   `game_engines/`: Individual logic for Unity, Godot, etc. detection.
+### ⚙️ The Watch Cycle
 
-1. **fs_event** (`uv.fs_event`)  
-   - Listens for low-level file changes.  
-   - Fast and efficient where supported.  
+**1. Startup & Initialization**
+*   **Async Parsing**: On `LspAttach`, the watcher parses the solution file asynchronously to find project roots without blocking the UI.
+*   **Parallel Hydration**: It performs a **parallel full scan** (utilizing `fd` if available, or parallel `fs_stat`) to build the initial in-memory snapshot.
+*   **Notification**: Sends the first `project/open` to wake up Roslyn.
 
-2. **fs_poll** (`uv.fs_poll`)  
-   - Polls periodically as a fallback.  
-   - Detects missed events and validates file integrity.  
+**2. Event Detection**
+*   **Trigger**: `libuv` signals a file change.
+*   **Dynamic Debounce**:
+    *   **Single File**: Processed in **~50ms** (Instant feel).
+    *   **Batch (Git/Unity)**: If event density is high, the timer automatically extends to **~300ms** (or configured interval) to coalesce changes.
+*   **Resilience**: If the watcher freezes or errors, the **Watchdog** detects the stall and seamlessly restarts the handle with exponential backoff.
 
-3. **Snapshots** (`snapshot.lua`)  
-   - Keeps an in-memory map of files and their metadata (mtime, inode, size).  
-   - Allows diffing to detect *created*, *deleted*, or *changed* files.  
+**3. Diffing & Heuristics**
+*   **Partial Scan**: Only the affected directories are rescanned to minimize I/O.
+*   **Diff Logic**: Compares New Snapshot vs Old Snapshot to detect `Created`, `Deleted`, or `Changed` (Mtime/Size) events.
+*   **Rename Detection**:
+    *   A `Delete` and `Create` occurring in the same batch are analyzed.
+    *   If `inode` matches (or `size` + `basename` heuristic for poor filesystems), it is promoted to a **Rename** event.
 
-4. **Rename detection** (`rename.lua`)  
-   - If a file is deleted and a new one created within a short window → treat as **rename**.  
-   - Sends Roslyn `workspace/didRenameFiles` instead of separate delete/create.  
-
-5. **Batching**  
-   - Groups multiple events into a single LSP notification to reduce traffic.  
-
-6. **Watchdog**  
-   - Restarts the watcher if no events are seen for too long (e.g. Unity reload).  
-   - Ensures resilience against dropped events.  
-
-7. **Autocmds**  
-   - Hooks into Neovim’s buffer lifecycle (`BufWritePost`, `BufDelete`, etc.).  
-   - Keeps open buffers and file state in sync.  
-
-8. **Notifications**  
-   - Translates events into Roslyn-compatible LSP notifications:  
-     - `workspace/didChangeWatchedFiles`  
-     - `workspace/didRenameFiles`
-
-
-### ⚙️ The Watch Cycle (How it actually works)
-
-1.  **Startup**:
-    *   `LspAttach` autocmd triggers `watcher.start()`.
-    *   `snapshot.create()` scans the root dir recursively (respecting `.gitignore` and `ignore_dirs`).
-    *   Initial state is stored.
-
-2.  **Monitoring**:
-    *   Attempts to attach a `uv.fs_event` to the root directory (recursive).
-    *   **Windows Quirk**: `uv.fs_event` on Windows is recursive by default.
-    *   **Linux/Mac Quirk**: `uv.fs_event` is NOT recursive. Falls back to `uv.fs_poll` or recursive watching (depending on implementation version).
-
-3.  **The Event Loop**:
-    *   **Event**: File system event fires (or poll interval ticks).
-    *   **Debounce**: Waits `processing_debounce_ms` (default 150ms) to let bursts settle (e.g., `git checkout`).
-    *   **Scan**: Scans the *affected path* (or full tree if path unknown).
-    *   **Diff**: Compares new scan vs old snapshot.
-        *   `Snapshot: nil`, `Disk: exists` -> **Created**
-        *   `Snapshot: exists`, `Disk: nil` -> **Deleted**
-        *   `Snapshot: mtime=X`, `Disk: mtime=Y` -> **Changed**
-    *   **Rename Heuristic**:
-        *   If `Delete(A)` and `Create(B)` occur in the same batch...
-        *   AND `inode(A) == inode(B)` (if supported) OR `size(A) == size(B)`...
-        *   The events are marked as **Renamed**.
-
-4.  **Notification**:
-    *   Changes are formatted into LSP `FileEvent` objects.
-    *   `workspace/didChangeWatchedFiles` or `workspace/didRenameFiles` notifications are sent to Roslyn.
+**4. Synchronization**
+*   **LSP Protocol**: Events are converted to standard `FileEvent` objects.
+*   **Dispatch**: Sent to Roslyn via `workspace/didChangeWatchedFiles` or `workspace/didRenameFiles`.
 
 ### ❓ Troubleshooting & Debugging
 
@@ -336,21 +267,7 @@ This plugin keeps Roslyn aware of **file system changes**:
 2.  Increase `poll_interval` or `processing_debounce_ms`.
 3.  Ensure `ignore_dirs` includes your build artifacts (`bin`, `obj`).
 
-### ➕ How to add a new Game Engine
 
-1.  **Create file**: `lua/roslyn_filewatch/game_engines/my_engine.lua`.
-2.  **Implement**:
-    ```lua
-    local M = {}
-    M.detect = function(root)
-      return vim.fn.filereadable(root .. "/my_engine_config.json") == 1
-    end
-    M.get_config = function()
-       return { ignore_dirs = { "EngineCache" } }
-    end
-    return M
-    ```
-3.  **Register**: Add it to `lua/roslyn_filewatch/presets.lua` in the `engine_check_order` list.
 
 ---
 

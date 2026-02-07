@@ -5,6 +5,38 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - 2026-02-07
+
+### ⚠️ BREAKING CHANGES
+- **Streamlined Scope**: Removed all non-file-watching features to focus on core performance and stability.
+  - Removed **Dotnet CLI** commands (`:RoslynBuild`, `:RoslynRun`, etc.) and module.
+  - Removed **NuGet** commands (`:RoslynNuget`, `:RoslynRestore`) and module.
+  - Removed **Solution Explorer** (`:RoslynExplorer`) and module.
+  - Removed **Game Engine Context** (`game_context.lua`) mechanics (presets for performance still exist).
+  - Removed **Project Warmup** module.
+- **Configuration**: Removed `enable_dotnet_commands` and `enable_nuget_commands` options.
+
+### Added
+- **Dynamic Debounce**: "Smart" latency control.
+  - **Instant (~50ms)** detection for single file edits.
+  - **Efficient (~1000ms)** batching for mass changes (Unity regeneration, git checkout).
+- **Recovery System**:
+  - **Self-Healing**: Automatically detects and restarts frozen watchers.
+  - **Exponential Backoff**: Prevents restart loops during persistent failures.
+  - **Status Checks**: `:checkhealth` now tracks recovery stats and notification throughput.
+- **Recovery Config**: New options (`recovery_verify_enabled`, `recovery_max_retries`) to tune resilience.
+
+### Optimized
+- **Async Startup**: `.sln`/`.slnx` parsing is now fully asynchronous, unblocking the UI during startup.
+- **Parallel Scanning**: Initial file scan uses parallel `fs_stat` batches, drastically reducing load time for large projects.
+- **Reduced Bloat**: Cleaned up ~15 commands and related files to lower memory footprint and maintenance surface.
+
+### Migration Guide
+If you rely on the removed CLI/Explorer features, you can pin your plugin version to v0.3.9:
+```lua
+{ "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
+```
+
 ## [v0.3.9] - 2026-02-07
 
 ### Fixed

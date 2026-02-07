@@ -22,8 +22,6 @@
 ---@field deferred_loading? boolean Defer project/open until first C# file opened
 ---@field deferred_loading_delay_ms? number Delay before sending deferred project/open (default: 500)
 ---@field diagnostic_throttling? roslyn_filewatch.DiagnosticThrottlingOptions
----@field enable_dotnet_commands? boolean Enable dotnet CLI commands (default: false)
----@field enable_nuget_commands? boolean Enable NuGet commands (default: false)
 ---@field enable_snippets? boolean Enable snippets (default: false)
 
 ---@class roslyn_filewatch.BatchingOptions
@@ -218,11 +216,8 @@ M.options = {
     visible_only = true, -- Only request diagnostics for visible buffers
   },
 
-  --- Enable dotnet CLI commands (build, run, watch, etc.)
-  enable_dotnet_commands = false,
-
-  --- Enable NuGet commands (restore, add, remove)
-  enable_nuget_commands = false,
+  --- Enable snippets (default: false)
+  enable_snippets = false,
 
   --- Enable auto-restore of NuGet packages on .csproj change (default: true)
   enable_autorestore = true,

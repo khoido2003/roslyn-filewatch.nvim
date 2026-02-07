@@ -115,10 +115,11 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
         return
       end
 
-      -- Stat all collected files in chunks
+      -- Stat all collected files in PARALLEL batches
+      -- Libuv thread pool defaults to 4, but we can queue more to keep it busy
       local pending = #collected_paths
       local processed = 0
-      local CHUNK_SIZE = 50
+      local BATCH_SIZE = 200 -- significantly increased from 50
       local current_idx = 1
 
       if pending == 0 then
@@ -129,13 +130,17 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
         return
       end
 
-      local function stat_chunk()
-        -- Check cancellation again
+      local function process_batch()
+        -- Check cancellation
         if not scanning_in_progress[root] then
           return
         end
 
-        local end_idx = math.min(current_idx + CHUNK_SIZE - 1, pending)
+        local end_idx = math.min(current_idx + BATCH_SIZE - 1, pending)
+        local batch_completed = 0
+        local batch_total = end_idx - current_idx + 1
+
+        -- Launch stats in parallel for this batch
         for i = current_idx, end_idx do
           local fullpath = collected_paths[i]
           uv.fs_stat(fullpath, function(err, st)
@@ -147,33 +152,38 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
                 dev = st.dev,
               }
             end
+
             processed = processed + 1
+            batch_completed = batch_completed + 1
 
             -- Report progress occasionally
-            if on_progress and processed % 1000 == 0 then
+            if on_progress and processed % 2000 == 0 then
               vim.schedule(function()
                 pcall(on_progress, processed)
               end)
             end
 
-            if processed == pending then
-              scanning_in_progress[root] = nil
-              vim.schedule(function()
-                if callback then
-                  callback(out_map)
-                end
-              end)
+            -- When batch finishes, schedule next batch
+            if batch_completed == batch_total then
+              current_idx = end_idx + 1
+              if current_idx <= pending then
+                -- Yield slightly to avoid starving main loop, then next batch
+                vim.defer_fn(process_batch, 2)
+              else
+                -- All done
+                scanning_in_progress[root] = nil
+                vim.schedule(function()
+                  if callback then
+                    callback(out_map)
+                  end
+                end)
+              end
             end
           end)
         end
-        current_idx = end_idx + 1
-        if current_idx <= pending then
-          -- Yield to keep UI responsive
-          vim.defer_fn(stat_chunk, 5)
-        end
       end
 
-      stat_chunk()
+      process_batch()
     end)
   end)
 

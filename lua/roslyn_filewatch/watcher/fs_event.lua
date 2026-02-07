@@ -518,7 +518,22 @@ function M.start(client, root, snapshots, deps)
     if not buf.timer then
       local t = uv.new_timer()
       buf.timer = t
-      t:start(processing_debounce_ms, 0, function()
+
+      -- Dynamic debounce calculation
+      -- If raw queue is empty and buffer is small, trigger fast (for single file edits)
+      -- If queues have many items, use full debounce (for bursts/regeneration)
+      local raw_q = raw_event_queues[client_id]
+      local raw_count = raw_q and #raw_q.events or 0
+      local buf_count = vim.tbl_count(buf.map)
+
+      local effective_debounce = processing_debounce_ms
+      -- If total pending events are small (< 5), use lower latency (50ms)
+      -- This makes "create file" -> "LSP detect" feel instant
+      if raw_count == 0 and buf_count < 5 then
+        effective_debounce = math.min(50, processing_debounce_ms)
+      end
+
+      t:start(effective_debounce, 0, function()
         pcall(function()
           flush_client_buffer(client_id)
         end)

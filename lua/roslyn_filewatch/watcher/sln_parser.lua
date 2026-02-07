@@ -60,6 +60,56 @@ function M.find_sln(root)
   return nil, nil
 end
 
+--- Find .sln, .slnx, or .slnf file asynchronously
+---@param root string Root directory path
+---@param callback fun(sln_path: string|nil, sln_type: "sln"|"slnx"|"slnf"|nil)
+function M.find_sln_async(root, callback)
+  if not root or root == "" then
+    callback(nil, nil)
+    return
+  end
+
+  root = utils.normalize_path(root)
+
+  -- Use uv.fs_scandir for async finding
+  uv.fs_scandir(root, function(err, fd)
+    if err or not fd then
+      callback(nil, nil)
+      return
+    end
+
+    local candidates = {}
+    while true do
+      local name, typ = uv.fs_scandir_next(fd)
+      if not name then
+        break
+      end
+      if typ == "file" then
+        if name:match("%.slnf$") then
+          table.insert(candidates, { name = name, type = "slnf", score = 3 })
+        elseif name:match("%.slnx$") then
+          table.insert(candidates, { name = name, type = "slnx", score = 2 })
+        elseif name:match("%.sln$") then
+          table.insert(candidates, { name = name, type = "sln", score = 1 })
+        end
+      end
+    end
+
+    if #candidates == 0 then
+      callback(nil, nil)
+      return
+    end
+
+    -- Sort by priority (slnf > slnx > sln)
+    table.sort(candidates, function(a, b)
+      return a.score > b.score
+    end)
+
+    local best = candidates[1]
+    callback(utils.normalize_path(root .. "/" .. best.name), best.type)
+  end)
+end
+
 --- Parse traditional .sln file content and extract project paths
 ---@param content string Content of the .sln file
 ---@param sln_dir string Directory containing the .sln file
@@ -168,13 +218,14 @@ local function parse_slnx_content(content, sln_dir)
   return project_dirs
 end
 
---- Get project directories from a .sln, .slnx, or .slnf file
+--- Get project directories from a .sln, .slnx, or .slnf file asynchronously
 ---@param sln_path string Path to the solution file
----@param sln_type? "sln"|"slnx"|"slnf" Type of solution file (auto-detected if nil)
----@return string[] project_dirs List of absolute project directory paths
-function M.get_project_dirs(sln_path, sln_type)
+---@param sln_type? "sln"|"slnx"|"slnf" Type of solution file
+---@param callback fun(project_dirs: string[]) Called with list of project directories
+function M.get_project_dirs_async(sln_path, sln_type, callback)
   if not sln_path or sln_path == "" then
-    return {}
+    callback({})
+    return
   end
 
   sln_path = utils.normalize_path(sln_path)
@@ -190,83 +241,79 @@ function M.get_project_dirs(sln_path, sln_type)
     end
   end
 
-  -- Read the solution file
-  local ok, content = pcall(function()
-    local fd = uv.fs_open(sln_path, "r", 438)
-    if not fd then
-      return nil
+  -- Read file asynchronously
+  uv.fs_open(sln_path, "r", 438, function(err, fd)
+    if err or not fd then
+      callback({})
+      return
     end
 
-    local stat = uv.fs_fstat(fd)
-    if not stat then
-      uv.fs_close(fd)
-      return nil
-    end
-
-    local data = uv.fs_read(fd, stat.size, 0)
-    uv.fs_close(fd)
-    return data
-  end)
-
-  if not ok or not content then
-    return {}
-  end
-
-  -- Get the directory containing the solution file
-  local sln_dir = sln_path:match("^(.+)/[^/]+$") or sln_path:match("^(.+)$")
-  if not sln_dir then
-    return {}
-  end
-
-  -- Parse based on file type
-  if sln_type == "slnf" then
-    -- .slnf is JSON format: { "solution": { "path": "x.sln", "projects": ["a.csproj", "b.csproj"] } }
-    local decode_ok, json = pcall(vim.json.decode, content)
-    if not decode_ok or not json or not json.solution then
-      return {}
-    end
-
-    local project_dirs = {}
-    local seen = {}
-    local has_subdirectory_projects = false
-
-    -- Parse project paths from the filter
-    local projects = json.solution.projects or {}
-    for _, project_path in ipairs(projects) do
-      -- Normalize path separators
-      local normalized = project_path:gsub("\\", "/")
-
-      -- Get the directory containing the project file
-      local project_dir = normalized:match("^(.+)/[^/]+$")
-      if project_dir then
-        has_subdirectory_projects = true
-        -- Make absolute path
-        local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
-
-        if not seen[abs_dir] then
-          seen[abs_dir] = true
-          table.insert(project_dirs, abs_dir)
-        end
-      else
-        -- Project file is in sln directory
-        if not seen[sln_dir] then
-          seen[sln_dir] = true
-          table.insert(project_dirs, sln_dir)
-        end
+    uv.fs_fstat(fd, function(err_stat, stat)
+      if err_stat or not stat then
+        uv.fs_close(fd)
+        callback({})
+        return
       end
-    end
 
-    -- Unity-style fix: if all projects are at root level, trigger full scan
-    if not has_subdirectory_projects and #project_dirs == 1 then
-      return {}
-    end
+      uv.fs_read(fd, stat.size, 0, function(err_read, data)
+        uv.fs_close(fd)
 
-    return project_dirs
-  elseif sln_type == "slnx" then
-    return parse_slnx_content(content, sln_dir)
-  else
-    return parse_sln_content(content, sln_dir)
-  end
+        if err_read or not data then
+          callback({})
+          return
+        end
+
+        -- Schedule parsing on main thread to avoid blocking uv loop
+        vim.schedule(function()
+          local sln_dir = sln_path:match("^(.+)/[^/]+$") or sln_path:match("^(.+)$")
+          if not sln_dir then
+            callback({})
+            return
+          end
+
+          local dirs
+          if sln_type == "slnf" then
+            local decode_ok, json = pcall(vim.json.decode, data)
+            if not decode_ok or not json or not json.solution then
+              callback({})
+              return
+            end
+
+            dirs = {}
+            local seen = {}
+            local has_sub = false
+            local projects = json.solution.projects or {}
+
+            for _, project_path in ipairs(projects) do
+              local normalized = project_path:gsub("\\", "/")
+              local project_dir = normalized:match("^(.+)/[^/]+$")
+              if project_dir then
+                has_sub = true
+                local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+                if not seen[abs_dir] then
+                  seen[abs_dir] = true
+                  table.insert(dirs, abs_dir)
+                end
+              elseif not seen[sln_dir] then
+                seen[sln_dir] = true
+                table.insert(dirs, sln_dir)
+              end
+            end
+
+            if not has_sub and #dirs == 1 then
+              dirs = {}
+            end
+          elseif sln_type == "slnx" then
+            dirs = parse_slnx_content(data, sln_dir)
+          else
+            dirs = parse_sln_content(data, sln_dir)
+          end
+
+          callback(dirs or {})
+        end)
+      end)
+    end)
+  end)
 end
 
 --- Find .csproj and .vbproj files in the given root directory
@@ -408,6 +455,31 @@ function M.get_sln_info(root)
     type = sln_type,
     mtime = mtime,
   }
+end
+
+--- Get solution file information asynchronously
+---@param root string Root directory path
+---@param callback fun(info: {path: string, type: "sln"|"slnx"|"slnf", mtime: number}|nil)
+function M.get_sln_info_async(root, callback)
+  M.find_sln_async(root, function(sln_path, sln_type)
+    if not sln_path then
+      callback(nil)
+      return
+    end
+
+    uv.fs_stat(sln_path, function(err, stat)
+      if err or not stat then
+        callback(nil)
+        return
+      end
+
+      callback({
+        path = sln_path,
+        type = sln_type,
+        mtime = stat.mtime and (stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)) or 0,
+      })
+    end)
+  end)
 end
 
 return M

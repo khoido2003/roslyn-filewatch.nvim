@@ -1090,80 +1090,79 @@ function M.start(client)
   -- Setup solution/csproj tracking
   if config.options.solution_aware then
     local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
-    if ok and sln_parser and sln_parser.get_sln_info then
-      local sln_info = sln_parser.get_sln_info(root)
-      if sln_info then
-        state.sln_info = {
-          path = sln_info.path,
-          mtime = sln_info.mtime,
-          csproj_files = nil,
-        }
+    if ok and sln_parser and sln_parser.get_sln_info_async then
+      -- Async SLN info retrieval to avoid blocking startup
+      sln_parser.get_sln_info_async(root, function(sln_info)
+        if sln_info then
+          state.sln_info = {
+            path = sln_info.path,
+            mtime = sln_info.mtime,
+            csproj_files = nil,
+          }
 
-        -- OPTIMIZATION: Parse SLN to get project directories directly
-        -- This avoids scanning the entire filesystem recursively
-        local project_dirs = sln_parser.get_project_dirs(sln_info.path, sln_info.type)
+          -- OPTIMIZATION: Parse SLN to get project directories directly (ASYNC)
+          -- This avoids scanning the entire filesystem recursively
+          sln_parser.get_project_dirs_async(sln_info.path, sln_info.type, function(project_dirs)
+            if project_dirs and #project_dirs > 0 then
+              notify(
+                "[SLN] Optimization: Parsing .sln for " .. #project_dirs .. " projects (skipping full scan)",
+                vim.log.levels.DEBUG
+              )
+              scan_projects_from_sln_async(project_dirs, function(initial_csproj)
+                if state.sln_info then
+                  state.sln_info.csproj_files = initial_csproj
 
-        if project_dirs and #project_dirs > 0 then
-          notify(
-            "[SLN] Optimization: Parsing .sln for " .. #project_dirs .. " projects (skipping full scan)",
-            vim.log.levels.DEBUG
-          )
-          scan_projects_from_sln_async(project_dirs, function(initial_csproj)
-            if state.sln_info then
-              state.sln_info.csproj_files = initial_csproj
-
-              -- If we found projects, notify immediately
-              local project_paths = collect_roslyn_project_paths(state.sln_info)
-              if #project_paths > 0 then
-                vim.schedule(function()
-                  notify_project_open(client, project_paths, notify)
-                  notify("[STARTUP] Loaded " .. #project_paths .. " projects from SLN", vim.log.levels.INFO)
-                end)
-              end
+                  -- If we found projects, notify immediately
+                  local project_paths = collect_roslyn_project_paths(state.sln_info)
+                  if #project_paths > 0 then
+                    vim.schedule(function()
+                      notify_project_open(client, project_paths, notify)
+                      notify("[STARTUP] Loaded " .. #project_paths .. " projects from SLN", vim.log.levels.DEBUG)
+                    end)
+                  end
+                end
+              end)
+            else
+              -- Fallback if parsing failed or returned no projects
+              notify("[SLN] Parser returned no projects, falling back to full scan", vim.log.levels.DEBUG)
+              scan_csproj_async(root, function(initial_csproj)
+                if state.sln_info then
+                  state.sln_info.csproj_files = initial_csproj
+                end
+              end)
             end
           end)
         else
-          -- Fallback if parsing failed or returned no projects
-          notify("[SLN] Parser returned no projects, falling back to full scan", vim.log.levels.DEBUG)
-          scan_csproj_async(root, function(initial_csproj)
-            if state.sln_info then
-              state.sln_info.csproj_files = initial_csproj
+          -- No solution file - check for csproj-only project
+          notify("[SLN] No solution file found, checking for csproj-only project", vim.log.levels.DEBUG)
+
+          scan_csproj_async(root, function(csproj_files)
+            if not csproj_files or vim.tbl_count(csproj_files) == 0 then
+              vim.schedule(function()
+                -- Only warn if we really found nothing, but don't spam
+                notify("[roslyn-filewatch] No solution or csproj files found in: " .. root, vim.log.levels.DEBUG)
+              end)
+              return
+            end
+
+            state.sln_info = {
+              path = nil,
+              mtime = 0,
+              csproj_files = csproj_files,
+              csproj_only = true,
+            }
+
+            local project_paths = collect_roslyn_project_paths(state.sln_info)
+            if #project_paths > 0 then
+              vim.schedule(function()
+                -- Notify found projects
+                notify_project_open(client, project_paths, notify)
+                request_diagnostics_refresh(client, 2000)
+              end)
             end
           end)
         end
-      else
-        -- No solution file - check for csproj-only project
-        notify("[SLN] No solution file found, checking for csproj-only project", vim.log.levels.DEBUG)
-
-        scan_csproj_async(root, function(csproj_files)
-          if not csproj_files or vim.tbl_count(csproj_files) == 0 then
-            vim.schedule(function()
-              vim.notify("[roslyn-filewatch] No solution or csproj files found in: " .. root, vim.log.levels.WARN)
-            end)
-            return
-          end
-
-          state.sln_info = {
-            path = nil,
-            mtime = 0,
-            csproj_files = csproj_files,
-            csproj_only = true,
-          }
-
-          local project_paths = collect_roslyn_project_paths(state.sln_info)
-          if #project_paths > 0 then
-            vim.schedule(function()
-              local clients_list = vim.lsp.get_clients()
-              for _, c in ipairs(clients_list) do
-                if vim.tbl_contains(config.options.client_names, c.name) then
-                  notify_project_open(c, project_paths, notify)
-                  request_diagnostics_refresh(c, 2000)
-                end
-              end
-            end)
-          end
-        end)
-      end
+      end)
     else
       vim.schedule(function()
         vim.notify("[roslyn-filewatch] Failed to load sln_parser", vim.log.levels.WARN)
@@ -1476,18 +1475,6 @@ function M.start(client)
 
   notify("Watcher started for client " .. client.name .. " at root: " .. root, vim.log.levels.DEBUG)
 
-  -- Project warm-up
-  local ok_warmup, warmup_mod = pcall(require, "roslyn_filewatch.project_warmup")
-  if ok_warmup and warmup_mod and warmup_mod.warmup then
-    warmup_mod.warmup(client)
-  end
-
-  -- Game engine context
-  local ok_context, context_mod = pcall(require, "roslyn_filewatch.game_context")
-  if ok_context and context_mod and context_mod.setup then
-    context_mod.setup(client)
-  end
-
   -- LspDetach cleanup - only cleanup when client actually stops
   vim.api.nvim_create_autocmd("LspDetach", {
     callback = function(args)
@@ -1514,12 +1501,6 @@ function M.start(client)
           local diag_mod = get_diagnostics_mod()
           if diag_mod and diag_mod.clear_client then
             pcall(diag_mod.clear_client, client.id)
-          end
-
-          -- Clear project warmup state
-          local ok_w, w_mod = pcall(require, "roslyn_filewatch.project_warmup")
-          if ok_w and w_mod and w_mod.clear_client then
-            pcall(w_mod.clear_client, client.id)
           end
 
           -- Cleanup
