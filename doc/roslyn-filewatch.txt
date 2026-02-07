@@ -83,9 +83,33 @@ engine and applies optimized presets (scan intervals, ignore patterns): -
 📦 INSTALLATION   *roslyn-filewatch-roslyn-filewatch.nvim-📦-installation*
 
 
-⚠️ MIGRATION GUIDE (V0.4.0) ~
+MIGRATION GUIDE (V0.4.X) ~
 
-If you rely on the removed CLI/Explorer features, pin your plugin version:
+**Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync**
+tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been
+removed to minimize bloat and maximize performance.
+
+  ------------------------------------------------------------------------
+  Feature           v0.3.x (Legacy)   v0.4.x (Current)   Replacement
+  ----------------- ----------------- ------------------ -----------------
+  Project Watching  Good              Instant            -
+                                      (Async+Parallel)   
+
+  Dotnet CLI        :RoslynBuild,     ❌ Removed         Use dispatch.nvim
+                    :RoslynRun                           or toggleterm
+
+  NuGet             :RoslynNuget      ❌ Removed         Use CLI or
+                                                         nuget.nvim
+
+  Explorer          :RoslynExplorer   ❌ Removed         Use neo-tree or
+                                                         nvim-tree
+
+  Game Detection    Complex Context   Presets Only       Presets are
+                                      (Performance)      auto-applied
+  ------------------------------------------------------------------------
+**Recommendation:** * **Stay on v0.4.x** if you want the fastest, most reliable
+Roslyn experience. * **Pin to v0.3.9** if you absolutely rely on the built-in
+CLI/Explorer commands:
 
 >lua
     { "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
