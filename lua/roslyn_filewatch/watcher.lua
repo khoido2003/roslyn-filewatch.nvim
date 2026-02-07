@@ -1523,6 +1523,11 @@ function M.start(client)
             pcall(diag_mod.clear_client, client.id)
           end
 
+          -- Clear fs_event state (including fast-path flags)
+          if fs_event_mod and fs_event_mod.clear then
+            pcall(fs_event_mod.clear, client.id)
+          end
+
           -- Cleanup
           cleanup_client(client.id)
           client_states[client.id] = nil

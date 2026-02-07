@@ -85,6 +85,17 @@ local event_buffers = {}
 ---@type table<number, RawEventQueue>
 local raw_event_queues = {}
 
+-- Fast-path regeneration flags: checked BEFORE any callback work to minimize overhead
+-- When true, callback does almost nothing (just increments counter every Nth event)
+---@type table<number, boolean>
+local fast_regen_flags = {}
+
+-- Event counters for sample-based regen detection during regeneration
+-- Only process every Nth event to check if still regenerating
+---@type table<number, number>
+local event_sample_counters = {}
+local EVENT_SAMPLE_RATE = 10 -- Check regeneration status every 10th event
+
 --- Stop and close timer safely
 ---@param t uv_timer_t|nil
 local function local_stop_close(t)
@@ -304,7 +315,7 @@ local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
     for i = 1, chunk_size do
       chunk[i] = q_next.events[i]
     end
-    
+
     -- Bulk remove from front (more efficient than repeated table.remove)
     local new_events = {}
     for i = chunk_size + 1, #q_next.events do
@@ -577,6 +588,25 @@ function M.start(client, root, snapshots, deps)
   -- Start the fs_event watch with a fully protected callback
   local ok_start, start_err = pcall(function()
     handle:start(root, { recursive = true }, function(err2, filename, events)
+      -- FAST PATH: If in regeneration mode, do minimal work
+      -- This check happens BEFORE any pcall/function overhead
+      if fast_regen_flags[client.id] then
+        -- Sample-based check: only verify regen status every Nth event
+        event_sample_counters[client.id] = (event_sample_counters[client.id] or 0) + 1
+        if event_sample_counters[client.id] >= EVENT_SAMPLE_RATE then
+          event_sample_counters[client.id] = 0
+          -- Quick check if still regenerating
+          local regen = get_regen_detector()
+          if regen then
+            pcall(regen.on_event, client.id)
+            if not regen.is_regenerating(client.id) then
+              fast_regen_flags[client.id] = false
+            end
+          end
+        end
+        return -- Skip all other processing
+      end
+
       -- Wrap entire callback to ensure nothing bubbles
       local ok_cb, cb_err = pcall(function()
         if err2 then
@@ -643,10 +673,12 @@ function M.start(client, root, snapshots, deps)
         if regen then
           pcall(regen.on_event, client.id)
 
-          -- If in regeneration mode (burst detected), DROP events.
+          -- If in regeneration mode (burst detected), DROP events and set fast flag.
           -- Processing thousands of events (stats + queueing) causes massive lag.
           -- The fs_poll loop will resync the state once regeneration finishes.
           if regen.is_regenerating(client.id) then
+            fast_regen_flags[client.id] = true
+            event_sample_counters[client.id] = 0
             return
           end
         end
@@ -694,6 +726,30 @@ function M.start(client, root, snapshots, deps)
   end
 
   return handle, nil
+end
+
+--- Clear client state (including fast-path flags)
+---@param client_id number
+function M.clear(client_id)
+  if raw_event_queues[client_id] then
+    raw_event_queues[client_id] = nil
+  end
+  if event_buffers[client_id] then
+    local buf = event_buffers[client_id]
+    if buf.timer then
+      local_stop_close(buf.timer)
+    end
+    event_buffers[client_id] = nil
+  end
+  if fast_regen_flags[client_id] then
+    fast_regen_flags[client_id] = nil
+  end
+  if event_sample_counters[client_id] then
+    event_sample_counters[client_id] = nil
+  end
+  if last_resync_ts[client_id] then
+    last_resync_ts[client_id] = nil
+  end
 end
 
 return M
