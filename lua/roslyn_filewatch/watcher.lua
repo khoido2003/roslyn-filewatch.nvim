@@ -52,6 +52,8 @@ local M = {}
 ---@field csproj_reload_pending { timer: uv_timer_t|nil, pending: boolean }|nil
 ---@field root string|nil -- Root directory path for cleanup
 ---@field autocmd_ids number[]|nil
+---@field recovery_consecutive_failures number -- Consecutive restart failures
+---@field recovery_current_backoff number -- Current backoff delay in ms
 
 ---@type table<number, ClientState>
 local client_states = {}
@@ -81,6 +83,8 @@ local function get_client_state(client_id)
       csproj_reload_pending = nil,
       autocmd_ids = nil,
       root = nil,
+      recovery_consecutive_failures = 0,
+      recovery_current_backoff = config.options.recovery_initial_delay_ms or 300,
     }
   end
   return client_states[client_id]
@@ -734,6 +738,11 @@ local function cleanup_client(client_id)
       regen_detector.clear(client_id)
     end
   end)
+
+  -- Clear watchdog recovery state
+  pcall(function()
+    watchdog_mod.clear(client_id)
+  end)
 end
 
 ------------------------------------------------------
@@ -852,12 +861,32 @@ function M.start(client)
     notify("[PRESET] Applied '" .. applied_preset .. "' preset for project", vim.log.levels.DEBUG)
   end
 
-  --- Restart watcher with backoff
+  --- Calculate exponential backoff delay with jitter
+  ---@return number delay_ms
+  local function calculate_backoff_delay()
+    local initial = config.options.recovery_initial_delay_ms or 300
+    local max_delay = config.options.recovery_max_delay_ms or 30000
+    local failures = state.recovery_consecutive_failures
+
+    -- Exponential: 2^failures * initial, capped at max
+    local base_delay = math.min(initial * math.pow(2, failures), max_delay)
+
+    -- Add jitter (±20%) to prevent thundering herd
+    local jitter = base_delay * 0.2 * (math.random() * 2 - 1)
+    local final_delay = math.floor(base_delay + jitter)
+
+    return math.max(initial, math.min(final_delay, max_delay))
+  end
+
+  --- Restart watcher with exponential backoff and recovery verification
   ---@param reason? string
-  ---@param delay_ms? number
+  ---@param delay_ms? number If nil, uses exponential backoff
   ---@param disable_fs_event? boolean
   local function restart_watcher(reason, delay_ms, disable_fs_event)
-    delay_ms = delay_ms or 300
+    -- Use exponential backoff if no delay specified
+    if not delay_ms then
+      delay_ms = calculate_backoff_delay()
+    end
 
     if state.restart_scheduled then
       return
@@ -876,6 +905,16 @@ function M.start(client)
     end
 
     state.restart_backoff_until = now + math.ceil(delay_ms / 1000)
+
+    notify(
+      string.format(
+        "Scheduling restart (reason: %s, delay: %dms, attempt: %d)",
+        tostring(reason or "unspecified"),
+        delay_ms,
+        state.recovery_consecutive_failures + 1
+      ),
+      vim.log.levels.DEBUG
+    )
 
     vim.defer_fn(function()
       state.restart_scheduled = false
@@ -901,9 +940,11 @@ function M.start(client)
         use_fs_event = false
       end
 
+      local restart_success = false
+
       if use_fs_event then
         -- Create proxy for snapshots
-        local snapshots_proxy = setmetatable({}, {
+        local snapshots_proxy_inner = setmetatable({}, {
           __index = function(_, k)
             return client_states[k] and client_states[k].snapshot
           end,
@@ -914,7 +955,7 @@ function M.start(client)
           end,
         })
 
-        local handle, err = fs_event_mod.start(client, root, snapshots_proxy, {
+        local handle, err = fs_event_mod.start(client, root, snapshots_proxy_inner, {
           notify = notify,
           queue_events = queue_events,
           notify_roslyn_renames = notify_roslyn_renames,
@@ -923,8 +964,50 @@ function M.start(client)
         })
         if handle then
           state.watcher = handle
+          restart_success = true
+          notify("fs_event handle recreated successfully", vim.log.levels.DEBUG)
         else
           notify("Failed to recreate fs_event: " .. tostring(err), vim.log.levels.DEBUG)
+        end
+      else
+        -- Poller-only mode is considered success
+        restart_success = true
+      end
+
+      -- Track recovery success/failure
+      if restart_success then
+        state.recovery_consecutive_failures = 0
+        state.recovery_current_backoff = config.options.recovery_initial_delay_ms or 300
+        notify("Watcher restart successful", vim.log.levels.DEBUG)
+
+        -- Async verification if enabled
+        if config.options.recovery_verify_enabled then
+          vim.defer_fn(function()
+            if client.is_stopped() then
+              return
+            end
+            -- Request a full scan to ensure snapshot is fresh after restart
+            state.needs_full_scan = true
+            state.last_event = os.time()
+            notify("Scheduled post-restart verification scan", vim.log.levels.DEBUG)
+          end, 500)
+        end
+      else
+        state.recovery_consecutive_failures = state.recovery_consecutive_failures + 1
+        state.recovery_current_backoff = calculate_backoff_delay()
+
+        local max_retries = config.options.recovery_max_retries or 5
+        if state.recovery_consecutive_failures >= max_retries then
+          vim.schedule(function()
+            vim.notify(
+              "[roslyn-filewatch] Watcher recovery failed after "
+                .. max_retries
+                .. " attempts. Run :checkhealth roslyn_filewatch",
+              vim.log.levels.WARN
+            )
+          end)
+          -- Reset counter to prevent spam, but keep higher backoff
+          state.recovery_consecutive_failures = 0
         end
       end
     end, delay_ms)
@@ -1343,12 +1426,21 @@ function M.start(client)
     end
   end
 
-  -- Watchdog
+  -- Watchdog with multi-level health checks
   local watchdog, watchdog_err = watchdog_mod.start(client, root, snapshots_proxy, {
     notify = notify,
     restart_watcher = restart_watcher,
     get_handle = function()
       return state.watcher
+    end,
+    get_poller = function()
+      return state.poller
+    end,
+    get_snapshot = function()
+      return state.snapshot
+    end,
+    mark_needs_full_scan = function()
+      state.needs_full_scan = true
     end,
     last_events = last_events_proxy,
     watchdog_idle = WATCHDOG_IDLE,

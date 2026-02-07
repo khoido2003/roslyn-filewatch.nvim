@@ -17,6 +17,35 @@ local M = {}
 
 local config = require("roslyn_filewatch.config")
 
+------------------------------------------------------
+-- NOTIFICATION TRACKING
+------------------------------------------------------
+
+---@class NotifyStats
+---@field last_success_time number Timestamp of last successful notification
+---@field total_notifications number Total notifications sent
+---@field last_notification_time number Timestamp of last notification attempt
+
+---@type NotifyStats
+local notify_stats = {
+  last_success_time = 0,
+  total_notifications = 0,
+  last_notification_time = 0,
+}
+
+--- Get notification statistics for health check
+---@return NotifyStats
+function M.get_stats()
+  return notify_stats
+end
+
+--- Reset notification statistics
+function M.reset_stats()
+  notify_stats.last_success_time = 0
+  notify_stats.total_notifications = 0
+  notify_stats.last_notification_time = 0
+end
+
 --- Get the configured log level
 ---@return number
 local function configured_log_level()
@@ -157,9 +186,17 @@ function M.roslyn_changes(changes)
   local clients = vim.lsp.get_clients()
   for _, client in ipairs(clients) do
     if vim.tbl_contains(config.options.client_names, client.name) then
-      pcall(function()
+      -- Track notification attempt
+      notify_stats.last_notification_time = os.time()
+      notify_stats.total_notifications = notify_stats.total_notifications + 1
+
+      local success = pcall(function()
         client.notify("workspace/didChangeWatchedFiles", { changes = all_changes })
       end)
+
+      if success then
+        notify_stats.last_success_time = os.time()
+      end
 
       -- If source files were modified, also trigger project/open after a delay
       if #modified_source_files > 0 and #additional_changes > 0 then
