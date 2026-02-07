@@ -8,7 +8,7 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 > [!WARNING]
 > **v0.4.0 Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
-> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v040).
+> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v04x).
 
 ---
 
