@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.4.1] - 2026-02-08
 
 ### Performance
+- **Zero-Overhead Regeneration**: Implemented ultra-fast path for Unity regeneration that drops events with near-zero CPU cost, eliminating UI freezes.
+- **Sample-Based Detection**: Regeneration detector now uses sample-based checking (every 10th event) instead of checking every single file.
+- **Immediate Queue Clearing**: Event queues are instantly wiped when regeneration bursts are detected, preventing 15-30s lag after regeneration finishes.
+- **Optimized Event Processing**:
+  - Replaced O(n²) queue removal with O(1) index-based extraction.
+  - Reduced default debounce from 300ms to 150ms for snappier response.
+  - Increased raw processing chunk size (50 -> 100) for better throughput.
+- **Faster Scanning**: Reduced async yield times (12ms -> 5ms) and increased batch sizes (50 -> 200) for faster project scanning.
+
+### Fixed
+- **Queue Backlog**: Fixed issue where events queued before regeneration detection kicks in would cause a massive backlog processing spike.
+- **Timer Churn**: Fixed regeneration detector creating/destroying timers on every event (now reuses timers).
+
+## [v0.4.0] - 2026-02-07
+
+### Performance (Initial Release)
 - **Instant Startup**: Fixed a critical issue where initial scan generated ~30k events, flooding the LSP and freezing Neovim. Startup is now silent and instant.
 - **Non-blocking Notifications**: Disabled synchronous directory scans when detecting new files in Unity projects, eliminating UI freeze on file creation.
 - **Unity Regeneration**: Fixed "whole editor freeze" during Unity asset reimports by dropping events during regeneration bursts.
