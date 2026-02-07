@@ -35,6 +35,31 @@ local function get_regen_detector()
     local ok, mod = pcall(require, "roslyn_filewatch.watcher.regen_detector")
     if ok then
       regen_detector = mod
+      -- Register callback to clear event queues when regeneration is detected
+      -- This prevents processing the burst of events that triggered detection
+      if mod.set_on_regen_start then
+        mod.set_on_regen_start(function(client_id)
+          local q = raw_event_queues[client_id]
+          if q then
+            q.events = {}
+            q.processing = false
+          end
+          -- Also clear the event buffer
+          local buf = event_buffers[client_id]
+          if buf then
+            if buf.timer then
+              pcall(function()
+                if not buf.timer:is_closing() then
+                  buf.timer:stop()
+                  buf.timer:close()
+                end
+              end)
+              buf.timer = nil
+            end
+            buf.map = {}
+          end
+        end)
+      end
     else
       regen_detector = false -- Mark as failed to avoid repeated attempts
     end
@@ -116,20 +141,20 @@ function M.clear(client_id)
 end
 
 -- Default debounce for processing fs_event bursts (ms)
--- Higher values coalesce more events (better for Unity regeneration)
-local DEFAULT_PROCESSING_DEBOUNCE_MS = 300
+-- Balance between coalescing events and responsiveness
+local DEFAULT_PROCESSING_DEBOUNCE_MS = 150
 
 -- Async flush processing chunk size (files per chunk)
 local FLUSH_CHUNK_SIZE = 25
 -- Delay between chunks (ms) - allows UI to remain responsive
 local FLUSH_CHUNK_DELAY_MS = 5
 
--- Raw event processing chunk size
-local RAW_PROCESS_CHUNK_SIZE = 50
+-- Raw event processing chunk size (larger = faster but less responsive)
+local RAW_PROCESS_CHUNK_SIZE = 100
 -- Raw event processing delay
 local RAW_PROCESS_DELAY_MS = 5
 -- Maximum raw events to queue (prevents memory explosion during Unity regeneration)
-local MAX_RAW_QUEUE_SIZE = 5000
+local MAX_RAW_QUEUE_SIZE = 500
 
 -- Error/resync throttle knobs
 
@@ -274,10 +299,18 @@ local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
       return
     end
 
+    -- Extract chunk efficiently: copy to new table then bulk remove
     local chunk = {}
-    for _ = 1, chunk_size do
-      table.insert(chunk, table.remove(q_next.events, 1))
+    for i = 1, chunk_size do
+      chunk[i] = q_next.events[i]
     end
+    
+    -- Bulk remove from front (more efficient than repeated table.remove)
+    local new_events = {}
+    for i = chunk_size + 1, #q_next.events do
+      new_events[#new_events + 1] = q_next.events[i]
+    end
+    q_next.events = new_events
 
     -- Process the chunk synchronously
     local added_any = false
@@ -303,7 +336,7 @@ local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
       schedule_flush_fn(client_id)
     end
 
-    -- If more events, schedule next chunk
+    -- If more events (including newly added ones), schedule next chunk
     if #q_next.events > 0 then
       vim.defer_fn(process_next_chunk, RAW_PROCESS_DELAY_MS)
     else

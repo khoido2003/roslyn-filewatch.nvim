@@ -121,8 +121,8 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
       -- Libuv thread pool defaults to 4, but we can queue more to keep it busy
       local pending = #collected_paths
       local processed = 0
-      -- OPTIMIZATION: Reduce batch size to prevent thread pool saturation
-      local BATCH_SIZE = 50
+      -- Increased batch size for faster scanning
+      local BATCH_SIZE = 200
       local current_idx = 1
 
       if pending == 0 then
@@ -171,8 +171,8 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
               current_idx = end_idx + 1
               if current_idx <= pending then
                 -- Yield to avoid starving main loop, then next batch
-                -- OPTIMIZATION: Increase yield time to 12ms to let UI breathe
-                vim.defer_fn(process_batch, 12)
+                -- Balanced yield time: faster than 12ms but avoids freezing
+                vim.defer_fn(process_batch, 5)
               else
                 -- All done
                 scanning_in_progress[root] = nil
@@ -811,8 +811,8 @@ function M.partial_scan_async(dirs, existing_map, root, callback)
       current_index = chunk_end + 1
       if current_index <= #files_to_stat then
         -- Yield between chunks to keep UI responsive
-        -- OPTIMIZATION: Increase yield to 5ms (was 1ms)
-        vim.defer_fn(stat_chunk, 5)
+        -- Balanced yield time for responsiveness
+        vim.defer_fn(stat_chunk, 3)
       end
     end
 

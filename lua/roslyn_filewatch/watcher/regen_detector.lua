@@ -9,10 +9,20 @@ local config = require("roslyn_filewatch.config")
 local M = {}
 
 -- Configuration defaults (can be overridden via config)
-local DEFAULT_BURST_THRESHOLD = 30 -- Events in window to trigger regeneration mode
-local DEFAULT_BURST_WINDOW_MS = 500 -- Time window for burst detection
-local DEFAULT_QUIET_PERIOD_MS = 2000 -- Quiet time before exiting regeneration mode
-local DEFAULT_MAX_REGEN_DURATION_MS = 60000 -- Maximum regeneration mode duration (1 minute)
+local DEFAULT_BURST_THRESHOLD = 10 -- Events in window to trigger regeneration mode (lowered for faster detection)
+local DEFAULT_BURST_WINDOW_MS = 300 -- Time window for burst detection (tighter window)
+local DEFAULT_QUIET_PERIOD_MS = 3000 -- Quiet time before exiting regeneration mode (increased)
+local DEFAULT_MAX_REGEN_DURATION_MS = 120000 -- Maximum regeneration mode duration (2 minutes for large projects)
+
+-- Callback to notify when regeneration starts (allows clearing event queues)
+---@type fun(client_id: number)|nil
+local on_regen_start_callback = nil
+
+--- Set callback for when regeneration starts
+---@param callback fun(client_id: number)|nil
+function M.set_on_regen_start(callback)
+  on_regen_start_callback = callback
+end
 
 ---@class RegenState
 ---@field events number[] Timestamps of recent events (ms)
@@ -86,6 +96,11 @@ local function start_regen_mode(client_id, state)
   state.is_regenerating = true
   state.regen_start_time = now_ms()
 
+  -- Notify callback to clear event queues immediately
+  if on_regen_start_callback then
+    pcall(on_regen_start_callback, client_id)
+  end
+
   -- Log at debug level
   local notify_fn = nil
   pcall(function()
@@ -142,41 +157,35 @@ end
 ---@param state RegenState
 ---@param quiet_period_ms number
 local function schedule_quiet_exit(client_id, state, quiet_period_ms)
-  -- Cancel existing timer
-  if state.quiet_timer then
+  -- Reuse existing timer if possible to avoid timer churn
+  local timer = state.quiet_timer
+  if timer then
+    -- Just stop and restart the existing timer
     pcall(function()
-      if not state.quiet_timer:is_closing() then
-        state.quiet_timer:stop()
-        state.quiet_timer:close()
+      if not timer:is_closing() then
+        timer:stop()
       end
     end)
-    state.quiet_timer = nil
+  else
+    timer = uv.new_timer()
+    if not timer then
+      return
+    end
+    state.quiet_timer = timer
   end
 
-  -- Create new timer
-  local timer = uv.new_timer()
-  if timer then
-    state.quiet_timer = timer
-    timer:start(quiet_period_ms, 0, function()
-      state.quiet_timer = nil
-      -- Check if still in regen mode and enough quiet time has passed
-      if state.is_regenerating then
-        local current = now_ms()
-        local time_since_last = current - state.last_event_time
-        if time_since_last >= quiet_period_ms then
-          vim.schedule(function()
-            stop_regen_mode(client_id, state)
-          end)
-        end
+  timer:start(quiet_period_ms, 0, function()
+    -- Check if still in regen mode and enough quiet time has passed
+    if state.is_regenerating then
+      local current = now_ms()
+      local time_since_last = current - state.last_event_time
+      if time_since_last >= quiet_period_ms then
+        vim.schedule(function()
+          stop_regen_mode(client_id, state)
+        end)
       end
-      -- Clean up timer
-      pcall(function()
-        if timer and not timer:is_closing() then
-          timer:close()
-        end
-      end)
-    end)
-  end
+    end
+  end)
 end
 
 --- Record an event for burst detection
