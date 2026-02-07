@@ -8,7 +8,7 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 > [!WARNING]
 > **v0.4.0 Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
-> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#-migration-guide-v040).
+> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v040).
 
 ---
 
@@ -56,9 +56,22 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 
 ## 📦 Installation
 
-### ⚠️ Migration Guide (v0.4.0)
+### Migration Guide (v0.4.x)
 
-If you rely on the removed CLI/Explorer features, pin your plugin version:
+**Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync** tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been removed to minimize bloat and maximize performance.
+
+| Feature | v0.3.x (Legacy) | v0.4.x (Current) | Replacement |
+| :--- | :--- | :--- | :--- |
+| **Project Watching** | Good | **Instant** (Async+Parallel) | - |
+| **Dotnet CLI** | `:RoslynBuild`, `:RoslynRun` | ❌ Removed | Use `dispatch.nvim` or `toggleterm` |
+| **NuGet** | `:RoslynNuget` | ❌ Removed | Use CLI or `nuget.nvim` |
+| **Explorer** | `:RoslynExplorer` | ❌ Removed | Use `neo-tree` or `nvim-tree` |
+| **Game Detection** | Complex Context | **Presets Only** (Performance) | Presets are auto-applied |
+
+**Recommendation:**
+*   **Stay on v0.4.x** if you want the fastest, most reliable Roslyn experience.
+*   **Pin to v0.3.9** if you absolutely rely on the built-in CLI/Explorer commands:
+
 ```lua
 { "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
 ```
