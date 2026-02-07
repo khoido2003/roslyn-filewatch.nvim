@@ -5,6 +5,19 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.1] - 2026-02-08
+
+### Performance
+- **Instant Startup**: Fixed a critical issue where initial scan generated ~30k events, flooding the LSP and freezing Neovim. Startup is now silent and instant.
+- **Non-blocking Notifications**: Disabled synchronous directory scans when detecting new files in Unity projects, eliminating UI freeze on file creation.
+- **Unity Regeneration**: Fixed "whole editor freeze" during Unity asset reimports by dropping events during regeneration bursts.
+- **Optimized Scanning**: Tuned `fd` integration to prevent thread pool saturation (reduced batch size, increased yield), ensuring UI responsiveness during massive scans.
+
+### Fixed
+- **Unity .slnx**: Fixed project detection fallback for Unity `.slnx` projects (now correctly notifies LSP).
+- **Race Condition**: Fixed `sln_poll_timer` failing to start due to race condition on startup.
+- **Config**: Optimized default watchdog intervals (10s/60s) to reduce background I/O.
+
 ## [v0.4.0] - 2026-02-07
 
 ### ⚠️ BREAKING CHANGES
