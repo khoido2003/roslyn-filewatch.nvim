@@ -61,7 +61,7 @@ Enable these features in your config to get a full C# IDE experience:
 > ### Migration Guide (v0.4.x)
 >**Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync** tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been removed to minimize bloat and maximize performance(Not a stable release yet). Main branch will stay on v0.3.x until v0.4.x stable.
 >
->| Feature | v0.3.x (Legacy) | v0.4.x (Current) | Replacement |
+>| Feature | v0.3.x (Stable) | v0.4.x (Latest) | Replacement |
 >| :--- | :--- | :--- | :--- |
 >| **Project Watching** | Good | **Instant** (Async+Parallel) | - |
 >| **Dotnet CLI** | `:RoslynBuild`, `:RoslynRun` | ❌ Removed | Use `dispatch.nvim` or `toggleterm` |
@@ -70,8 +70,8 @@ Enable these features in your config to get a full C# IDE experience:
 >| **Game Detection** | Complex Context | **Presets Only** (Performance) | Presets are auto-applied |
 >
 >**Recommendation:**
->*   **Stay on v0.4.x** if you want the fastest and latest Roslyn filewatch.
->*   **Pin to v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands and stable releases:
+>*   **Move to v0.4.x** if you want the fastest and latest Roslyn filewatch features.
+>*   **Stay on v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands and stable releases:
 >
 >  #### How to use v0.4.x
 >  ```lua
