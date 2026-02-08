@@ -39,6 +39,40 @@ function M.reset_stats()
   notify_stats.last_notification_time = 0
 end
 
+local pending_opens = {}
+local open_timer = nil
+
+local function schedule_project_open(client, csproj_path)
+  local utils = require("roslyn_filewatch.watcher.utils")
+  local path = utils.to_roslyn_path(csproj_path)
+
+  if not pending_opens[client.id] then
+    pending_opens[client.id] = {}
+  end
+  pending_opens[client.id][path] = true
+
+  if open_timer then
+    return
+  end
+
+  open_timer = vim.defer_fn(function()
+    open_timer = nil
+    for client_id, paths in pairs(pending_opens) do
+      local c = vim.lsp.get_client_by_id(client_id)
+      if c and not (c.is_stopped and c.is_stopped()) then
+        local project_list = {}
+        for p in pairs(paths) do
+          table.insert(project_list, p)
+        end
+        if #project_list > 0 then
+          pcall(c.notify, "project/open", { projects = project_list })
+        end
+      end
+    end
+    pending_opens = {}
+  end, 500)
+end
+
 local function configured_log_level()
   local ok, lvl = pcall(function()
     return config and config.options and config.options.log_level
@@ -130,12 +164,9 @@ function M.roslyn_changes(changes)
       end
 
       if #modified_source_files > 0 and #additional_changes > 0 then
-        vim.defer_fn(function()
-          local utils = require("roslyn_filewatch.watcher.utils")
-          for csproj_path in pairs(seen_csproj or {}) do
-            pcall(client.notify, "project/open", { projects = { utils.to_roslyn_path(csproj_path) } })
-          end
-        end, 500)
+        for csproj_path in pairs(seen_csproj or {}) do
+          schedule_project_open(client, csproj_path)
+        end
       end
     end
   end
@@ -177,12 +208,9 @@ function M.roslyn_renames(files)
         end
 
         if #modified_source_files > 0 and #additional_changes > 0 then
-          vim.defer_fn(function()
-            local utils = require("roslyn_filewatch.watcher.utils")
-            for csproj_path in pairs(seen_csproj or {}) do
-              pcall(client.notify, "project/open", { projects = { utils.to_roslyn_path(csproj_path) } })
-            end
-          end, 500)
+          for csproj_path in pairs(seen_csproj or {}) do
+            schedule_project_open(client, csproj_path)
+          end
         end
       end)
     end

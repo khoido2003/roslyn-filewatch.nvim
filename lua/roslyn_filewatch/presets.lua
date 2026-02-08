@@ -7,12 +7,17 @@ local uv = vim.uv or vim.loop
 ---@type table<string, roslyn_filewatch.Options>
 M.presets = {
   unity = {
-    batching = { enabled = true, interval = 800 },
+    batching = { enabled = true, interval = 1000 },
+    max_events_per_batch = 1000,
     activity_quiet_period = 15,
     poll_interval = 15000,
     processing_debounce_ms = 500,
     watchdog_idle = 120,
     ignore_dirs = {
+      ".history",
+      ".svn",
+      ".hg",
+      "__pycache__",
       "Library",
       "Temp",
       "Logs",
@@ -57,6 +62,7 @@ M.presets = {
 
   console = {
     batching = { enabled = true, interval = 200 },
+    max_events_per_batch = 200,
     activity_quiet_period = 3,
     poll_interval = 3000,
     processing_debounce_ms = 100,
@@ -66,6 +72,7 @@ M.presets = {
 
   large = {
     batching = { enabled = true, interval = 1000 },
+    max_events_per_batch = 1000,
     activity_quiet_period = 10,
     poll_interval = 10000,
     processing_debounce_ms = 300,
@@ -75,11 +82,15 @@ M.presets = {
   },
 
   godot = {
-    batching = { enabled = true, interval = 350 },
+    batching = { enabled = true, interval = 500 },
+    max_events_per_batch = 500,
     activity_quiet_period = 5,
     poll_interval = 5000,
     processing_debounce_ms = 150,
     ignore_dirs = {
+      ".history",
+      ".svn",
+      ".hg",
       ".godot",
       ".import",
       "addons",

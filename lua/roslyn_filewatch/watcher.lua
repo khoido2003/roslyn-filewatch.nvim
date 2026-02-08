@@ -489,17 +489,31 @@ local function queue_events(client_id, evs)
         safe_close_handle(queue.timer)
         queue.timer = nil
         if #changes > 0 then
-          local max_events = config.options.max_events_per_batch or 100
-          if #changes > max_events then
-            notify("[BATCH] Limiting batch from " .. #changes .. " to " .. max_events, vim.log.levels.DEBUG)
-            local limited = {}
-            for i = 1, max_events do
-              limited[i] = changes[i]
+          local max_events = config.options.max_events_per_batch or 200
+
+          local function send_chunk(idx)
+            if idx > #changes then
+              return
             end
-            changes = limited
+
+            local end_idx = math.min(idx + max_events - 1, #changes)
+            local chunk = {}
+            for i = idx, end_idx do
+              table.insert(chunk, changes[i])
+            end
+
+            pcall(notify_roslyn, chunk)
+
+            if end_idx < #changes then
+              -- Yield to main loop to prevent freezing UI during massive updates
+              vim.defer_fn(function()
+                send_chunk(end_idx + 1)
+              end, 10)
+            end
           end
+
           vim.schedule(function()
-            pcall(notify_roslyn, changes)
+            send_chunk(1)
           end)
         end
       end)

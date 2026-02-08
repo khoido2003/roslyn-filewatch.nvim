@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 - **Zero-Block Startup**: Removed all remaining synchronous I/O from the startup path (`presets.lua`, `snapshot.lua`), ensuring LSP initialization is 100% non-blocking.
 
+- **Massive Event Handling**: Fixed a critical issue where events exceeding the batch limit (default 100) were silently dropped. Now implements smart chunking (processing 200-1000 events per chunk with UI yielding), ensuring no data loss during Unity regeneration or git checkout.
+- **Notification Deduplication**: Implemented global debouncing for `project/open` notifications, preventing redundant LSP requests during bulk file updates.
+- **Preset Tuning**:
+  - Increased batch limits for Unity (1000 events) and Godot (500 events).
+  - Added common ignore patterns (`.history`, `__pycache__`, etc.) to default presets to reduce noise.
 
 ## [v0.4.1] - 2026-02-08
 
