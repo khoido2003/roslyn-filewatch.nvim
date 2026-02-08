@@ -68,47 +68,26 @@ end
 ---@param additional_changes table
 ---@return table seen_csproj
 local function find_csproj_changes(source_files, additional_changes)
-  local uv = vim.uv or vim.loop
   local seen_csproj = {}
-  local dir_cache = {}
+  local checked_dirs = {}
 
   for _, source_file in ipairs(source_files) do
     local dir = source_file:match("^(.+)[/\\][^/\\]+$")
-    local search_depth = 0
+    if dir and not checked_dirs[dir] then
+      checked_dirs[dir] = true
 
-    while dir and search_depth < 3 do
-      local cached = dir_cache[dir]
-      if cached then
-        for _, csproj_path in ipairs(cached) do
-          if not seen_csproj[csproj_path] then
-            seen_csproj[csproj_path] = true
-            table.insert(additional_changes, { uri = vim.uri_from_fname(csproj_path), type = 2 })
-          end
+      -- Efficient upward search for .csproj using vim.fs.find
+      local found = vim.fs.find(function(name)
+        return name:match("%.csproj$")
+      end, { path = dir, upward = true, limit = 2, type = "file" })
+
+      for _, path in ipairs(found) do
+        local normalized = path:gsub("\\", "/")
+        if not seen_csproj[normalized] then
+          seen_csproj[normalized] = true
+          table.insert(additional_changes, { uri = vim.uri_from_fname(normalized), type = 2 })
         end
-      else
-        local found_in_dir = {}
-        local handle = uv.fs_scandir(dir)
-        if handle then
-          while true do
-            local name, typ = uv.fs_scandir_next(handle)
-            if not name then
-              break
-            end
-            if typ == "file" and name:match("%.csproj$") then
-              local csproj_path = (dir .. "/" .. name):gsub("\\", "/")
-              table.insert(found_in_dir, csproj_path)
-              if not seen_csproj[csproj_path] then
-                seen_csproj[csproj_path] = true
-                table.insert(additional_changes, { uri = vim.uri_from_fname(csproj_path), type = 2 })
-              end
-            end
-          end
-        end
-        dir_cache[dir] = found_in_dir
       end
-
-      dir = dir:match("^(.+)[/\\][^/\\]+$")
-      search_depth = search_depth + 1
     end
   end
   return seen_csproj

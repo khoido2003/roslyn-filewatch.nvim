@@ -56,17 +56,17 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
   local stderr = uv.new_pipe(false)
   local buffer = ""
 
-  local handle = uv.spawn(fd_exe, {
-    args = args,
-    stdio = { nil, stdout, stderr },
-  }, function(code)
-    stdout:read_stop()
-    stderr:read_stop()
-    stdout:close()
-    stderr:close()
+  local exit_code = nil
+  local stdout_closed = false
+  local handle_closed = false
+
+  local function on_finish()
+    if not stdout_closed or not handle_closed then
+      return
+    end
 
     vim.schedule(function()
-      if code ~= 0 and #collected_paths == 0 then
+      if exit_code ~= 0 and #collected_paths == 0 then
         scanning_in_progress[root] = nil
         if callback then
           callback(out_map)
@@ -139,6 +139,17 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
 
       process_batch()
     end)
+  end
+
+  local handle
+  handle = uv.spawn(fd_exe, {
+    args = args,
+    stdio = { nil, stdout, stderr },
+  }, function(code)
+    exit_code = code
+    handle:close()
+    handle_closed = true
+    on_finish()
   end)
 
   if not handle then
@@ -153,23 +164,49 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
   end
 
   uv.read_start(stdout, function(err, data)
-    if err or not data then
+    if err then
+      stdout:read_stop()
+      stdout:close()
+      stdout_closed = true
+      on_finish()
       return
     end
-    buffer = buffer .. data
 
-    while true do
-      local line_end = buffer:find("\n")
-      if not line_end then
-        break
+    if data then
+      buffer = buffer .. data
+      while true do
+        local line_end = buffer:find("\n")
+        if not line_end then
+          break
+        end
+
+        local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
+        buffer = buffer:sub(line_end + 1)
+
+        if #line > 0 then
+          table.insert(collected_paths, normalize_path(line))
+        end
       end
-
-      local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
-      buffer = buffer:sub(line_end + 1)
-
-      if #line > 0 then
-        table.insert(collected_paths, normalize_path(line))
+    else
+      -- EOF
+      if #buffer > 0 then
+        local line = buffer:gsub("\r$", "")
+        if #line > 0 then
+          table.insert(collected_paths, normalize_path(line))
+        end
       end
+      stdout:read_stop()
+      stdout:close()
+      stdout_closed = true
+      on_finish()
+    end
+  end)
+
+  -- Also read stderr to prevent buffer blocking, but ignore output
+  uv.read_start(stderr, function(err, data)
+    if not data then
+      stderr:read_stop()
+      stderr:close()
     end
   end)
 end
