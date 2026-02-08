@@ -1,23 +1,6 @@
 ---@class roslyn_filewatch.fs_event
----@field start fun(client: vim.lsp.Client, root: string, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, deps: roslyn_filewatch.FsEventDeps): uv_fs_event_t|nil, string|nil
+---@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv_fs_event_t|nil, string|nil
 ---@field clear fun(client_id: number)
-
----@class roslyn_filewatch.FsEventDeps
----@field config roslyn_filewatch.config
----@field rename_mod roslyn_filewatch.rename
----@field snapshot_mod roslyn_filewatch.snapshot
----@field notify fun(msg: string, level?: number)
----@field notify_roslyn_renames fun(files: roslyn_filewatch.RenameEntry[])
----@field queue_events fun(client_id: number, evs: roslyn_filewatch.FileChange[])
----@field close_deleted_buffers? fun(path: string) -- DEPRECATED: no longer used
----@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
----@field mark_dirty_dir fun(client_id: number, path: string)|nil
----@field mtime_ns fun(stat: any): number
----@field identity_from_stat fun(st: any): string|nil
----@field same_file_info fun(a: any, b: any): boolean
----@field normalize_path fun(path: string): string
----@field last_events table<number, number>
----@field rename_window_ms number
 
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
@@ -28,15 +11,14 @@ local notify_mod = require("roslyn_filewatch.watcher.notify")
 
 local notify = notify_mod and notify_mod.user or function() end
 
--- Lazy load regeneration detector to avoid circular dependencies
+local M = {}
+
 local regen_detector = nil
 local function get_regen_detector()
   if regen_detector == nil then
     local ok, mod = pcall(require, "roslyn_filewatch.watcher.regen_detector")
     if ok then
       regen_detector = mod
-      -- Register callback to clear event queues when regeneration is detected
-      -- This prevents processing the burst of events that triggered detection
       if mod.set_on_regen_start then
         mod.set_on_regen_start(function(client_id)
           local q = raw_event_queues[client_id]
@@ -44,142 +26,79 @@ local function get_regen_detector()
             q.events = {}
             q.processing = false
           end
-          -- Also clear the event buffer
           local buf = event_buffers[client_id]
           if buf then
-            if buf.timer then
-              pcall(function()
-                if not buf.timer:is_closing() then
-                  buf.timer:stop()
-                  buf.timer:close()
-                end
-              end)
-              buf.timer = nil
+            if buf.timer and not buf.timer:is_closing() then
+              buf.timer:stop()
+              buf.timer:close()
             end
+            buf.timer = nil
             buf.map = {}
           end
         end)
       end
     else
-      regen_detector = false -- Mark as failed to avoid repeated attempts
+      regen_detector = false
     end
   end
   return regen_detector or nil
 end
 
-local M = {}
-
----@class EventBuffer
----@field map table<string, boolean>
----@field timer uv_timer_t|nil
-
---- Per-client event buffer
----@type table<number, EventBuffer>
+---@type table<number, {map: table, timer: uv_timer_t|nil}>
 local event_buffers = {}
 
----@class RawEventQueue
----@field events string[] Raw filenames from fs_event
----@field processing boolean
-
---- Per-client raw event queue
----@type table<number, RawEventQueue>
+---@type table<number, {events: string[], processing: boolean}>
 local raw_event_queues = {}
 
--- Fast-path regeneration flags: checked BEFORE any callback work to minimize overhead
--- When true, callback does almost nothing (just increments counter every Nth event)
 ---@type table<number, boolean>
 local fast_regen_flags = {}
 
--- Event counters for sample-based regen detection during regeneration
--- Only process every Nth event to check if still regenerating
 ---@type table<number, number>
 local event_sample_counters = {}
-local EVENT_SAMPLE_RATE = 10 -- Check regeneration status every 10th event
+local EVENT_SAMPLE_RATE = 10
 
---- Stop and close timer safely
----@param t uv_timer_t|nil
-local function local_stop_close(t)
-  if not t then
-    return
-  end
-  pcall(function()
-    if not t:is_closing() then
-      t:stop()
-    end
-    t:close()
-  end)
-end
-
--- Error/resync throttle knobs
-local ERROR_WINDOW_SEC = 2
-local ERROR_THRESHOLD = 2
-local RESYNC_MIN_INTERVAL_SEC = 2
-
----@type table<number, { count: number, since: number }>
+---@type table<number, {count: number, since: number}>
 local error_counters = {}
 
 ---@type table<number, number>
 local last_resync_ts = {}
 
---- Clear event buffer for a client
----@param client_id number
+local ERROR_WINDOW_SEC = 2
+local ERROR_THRESHOLD = 2
+local RESYNC_MIN_INTERVAL_SEC = 2
+local DEFAULT_PROCESSING_DEBOUNCE_MS = 150
+local FLUSH_CHUNK_SIZE = 25
+local FLUSH_CHUNK_DELAY_MS = 5
+local RAW_PROCESS_CHUNK_SIZE = 100
+local RAW_PROCESS_DELAY_MS = 5
+local MAX_RAW_QUEUE_SIZE = 500
+
+local function stop_close_timer(t)
+  if t and not t:is_closing() then
+    pcall(t.stop, t)
+    pcall(t.close, t)
+  end
+end
+
 function M.clear(client_id)
   local buf = event_buffers[client_id]
-  if not buf then
-    -- Still clean up error tracking tables even if no buffer
-    error_counters[client_id] = nil
-    last_resync_ts[client_id] = nil
-    return
+  if buf then
+    stop_close_timer(buf.timer)
+    event_buffers[client_id] = nil
   end
-  if buf.timer then
-    pcall(function()
-      if not buf.timer:is_closing() then
-        buf.timer:stop()
-        buf.timer:close()
-      end
-    end)
-    buf.timer = nil
-  end
-  buf.map = nil
-  event_buffers[client_id] = nil
-
-  -- Clear raw queue
   raw_event_queues[client_id] = nil
-
-  -- Clean up error tracking tables to prevent memory leaks
+  fast_regen_flags[client_id] = nil
+  event_sample_counters[client_id] = nil
   error_counters[client_id] = nil
   last_resync_ts[client_id] = nil
 end
 
--- Default debounce for processing fs_event bursts (ms)
--- Balance between coalescing events and responsiveness
-local DEFAULT_PROCESSING_DEBOUNCE_MS = 150
-
--- Async flush processing chunk size (files per chunk)
-local FLUSH_CHUNK_SIZE = 25
--- Delay between chunks (ms) - allows UI to remain responsive
-local FLUSH_CHUNK_DELAY_MS = 5
-
--- Raw event processing chunk size (larger = faster but less responsive)
-local RAW_PROCESS_CHUNK_SIZE = 100
--- Raw event processing delay
-local RAW_PROCESS_DELAY_MS = 5
--- Maximum raw events to queue (prevents memory explosion during Unity regeneration)
-local MAX_RAW_QUEUE_SIZE = 500
-
--- Error/resync throttle knobs
-
---- Check if path should be watched with early extension check for performance
----@param fullpath string Normalized path
----@param cfg roslyn_filewatch.config
----@return boolean
 local function should_watch_path(fullpath, cfg)
   local opts = cfg.options
   if not opts then
     return false
   end
 
-  -- Early extension check for performance (avoid full path processing if extension doesn't match)
   local ext = utils.get_extension(fullpath)
   if not ext then
     return false
@@ -190,8 +109,8 @@ local function should_watch_path(fullpath, cfg)
 
   local ext_match = false
   for _, watch_ext in ipairs(opts.watch_extensions or {}) do
-    local compare_watch = is_win and watch_ext:lower() or watch_ext
-    if compare_ext == compare_watch then
+    local cmp = is_win and watch_ext:lower() or watch_ext
+    if compare_ext == cmp then
       ext_match = true
       break
     end
@@ -201,144 +120,94 @@ local function should_watch_path(fullpath, cfg)
     return false
   end
 
-  -- Check ignore dirs using the shared utility function
   return utils.should_watch_path(fullpath, opts.ignore_dirs or {}, opts.watch_extensions or {})
 end
 
---- Record error and maybe escalate to restart
----@param client_id number
----@param msg string
----@param notify_fn fun(msg: string, level: number)
----@param restart_fn fun(reason: string, delay_ms: number, disable_fs_event: boolean)
----@return boolean escalated
-local function record_error_and_maybe_escalate(client_id, msg, notify_fn, restart_fn)
+local function record_error(client_id, msg, notify_fn, restart_fn)
   local now = os.time()
   local ec = error_counters[client_id] or { count = 0, since = now }
   if now - (ec.since or 0) > ERROR_WINDOW_SEC then
-    ec.count = 0
-    ec.since = now
+    ec = { count = 0, since = now }
   end
   ec.count = ec.count + 1
-  ec.since = ec.since or now
   error_counters[client_id] = ec
 
-  local looks_like_perm = (msg and (msg:match("EPERM") or msg:lower():match("permission"))) and true or false
+  local is_perm_error = msg and (msg:match("EPERM") or msg:lower():match("permission"))
 
-  if looks_like_perm then
-    if ec.count >= ERROR_THRESHOLD then
-      pcall(function()
-        notify_fn("Persistent EPERM errors; restarting watcher", vim.log.levels.ERROR)
-      end)
-      error_counters[client_id] = nil
-      vim.defer_fn(function()
-        if restart_fn then
-          pcall(function()
-            restart_fn("EPERM_escalated", 1200, true)
-          end)
-        end
-      end, 50)
-      return true
-    else
-      pcall(function()
-        notify_fn("EPERM error (will escalate on repeated): " .. tostring(msg), vim.log.levels.WARN)
-      end)
-      return false
-    end
-  else
-    pcall(function()
-      notify_fn("fs_event error: " .. tostring(msg), vim.log.levels.ERROR)
-    end)
-    return false
+  if is_perm_error and ec.count >= ERROR_THRESHOLD then
+    pcall(notify_fn, "Persistent EPERM errors; restarting watcher", vim.log.levels.ERROR)
+    error_counters[client_id] = nil
+    vim.defer_fn(function()
+      if restart_fn then
+        pcall(restart_fn, "EPERM_escalated", 1200, true)
+      end
+    end, 50)
+    return true
   end
+
+  if is_perm_error then
+    pcall(notify_fn, "EPERM error: " .. tostring(msg), vim.log.levels.WARN)
+  else
+    pcall(notify_fn, "fs_event error: " .. tostring(msg), vim.log.levels.ERROR)
+  end
+  return false
 end
 
----@param client_id number
----@param notify_fn fun(msg: string, level: number)
----@param restart_fn fun(reason: string, delay_ms: number)
----@return boolean restarted
-local function may_restart_due_to_nil_filename(client_id, notify_fn, restart_fn)
+local function maybe_restart_nil_filename(client_id, notify_fn, restart_fn)
   local now = os.time()
   local last = last_resync_ts[client_id] or 0
   if now - last < RESYNC_MIN_INTERVAL_SEC then
-    pcall(function()
-      notify_fn("Skipping frequent restart (recently restarted)", vim.log.levels.DEBUG)
-    end)
     return false
   end
   last_resync_ts[client_id] = now
   vim.defer_fn(function()
-    pcall(function()
-      notify_fn("fs_event filename=nil -> restart", vim.log.levels.DEBUG)
-    end)
+    pcall(notify_fn, "fs_event filename=nil -> restart", vim.log.levels.DEBUG)
     if restart_fn then
-      pcall(function()
-        restart_fn("filename_nil", 800)
-      end)
+      pcall(restart_fn, "filename_nil", 800)
     end
   end, 50)
   return true
 end
 
---- Schedule processing of raw events for a client
----@param client_id number
----@param root string
----@param cfg roslyn_filewatch.config
----@param schedule_flush_fn fun(client_id: number)
 local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
   local q = raw_event_queues[client_id]
-  if not q or q.processing then
-    return
-  end
-
-  -- If queue is empty, nothing to do
-  if #q.events == 0 then
+  if not q or q.processing or #q.events == 0 then
     return
   end
 
   q.processing = true
 
-  local function process_next_chunk()
-    local q_next = raw_event_queues[client_id]
-    -- Client might have been cleared
-    if not q_next then
+  local function process_chunk()
+    local queue = raw_event_queues[client_id]
+    if not queue then
       return
     end
 
-    local chunk_size = math.min(#q_next.events, RAW_PROCESS_CHUNK_SIZE)
+    local chunk_size = math.min(#queue.events, RAW_PROCESS_CHUNK_SIZE)
     if chunk_size == 0 then
-      q_next.processing = false
+      queue.processing = false
       return
     end
 
-    -- Extract chunk efficiently: copy to new table then bulk remove
     local chunk = {}
     for i = 1, chunk_size do
-      chunk[i] = q_next.events[i]
+      chunk[i] = queue.events[i]
     end
 
-    -- Bulk remove from front (more efficient than repeated table.remove)
     local new_events = {}
-    for i = chunk_size + 1, #q_next.events do
-      new_events[#new_events + 1] = q_next.events[i]
+    for i = chunk_size + 1, #queue.events do
+      new_events[#new_events + 1] = queue.events[i]
     end
-    q_next.events = new_events
+    queue.events = new_events
 
-    -- Process the chunk synchronously
     local added_any = false
     for _, filename in ipairs(chunk) do
       if filename then
-        -- Expensive string ops happen here, spread out over time
         local fullpath = utils.normalize_path(root .. "/" .. filename)
-
-        -- Quick extension check first
-        local ext = utils.get_extension(fullpath)
-        if ext then
-          -- Full path check
-          if should_watch_path(fullpath, cfg) then
-            event_buffers[client_id] = event_buffers[client_id] or { map = {}, timer = nil }
-            event_buffers[client_id].map[fullpath] = true
-            added_any = true
-          end
+        if utils.get_extension(fullpath) and should_watch_path(fullpath, cfg) then
+          event_buffers[client_id] = event_buffers[client_id] or { map = {}, timer = nil }
+          event_buffers[client_id].map[fullpath] = true
+          added_any = true
         end
       end
     end
@@ -347,38 +216,23 @@ local function schedule_raw_processing(client_id, root, cfg, schedule_flush_fn)
       schedule_flush_fn(client_id)
     end
 
-    -- If more events (including newly added ones), schedule next chunk
-    if #q_next.events > 0 then
-      vim.defer_fn(process_next_chunk, RAW_PROCESS_DELAY_MS)
+    if #queue.events > 0 then
+      vim.defer_fn(process_chunk, RAW_PROCESS_DELAY_MS)
     else
-      q_next.processing = false
+      queue.processing = false
     end
   end
 
-  vim.defer_fn(process_next_chunk, RAW_PROCESS_DELAY_MS)
+  vim.defer_fn(process_chunk, RAW_PROCESS_DELAY_MS)
 end
 
---- Start fs_event watcher
----@param client vim.lsp.Client LSP client
----@param root string Root directory path
----@param snapshots table<number, table<string, roslyn_filewatch.SnapshotEntry>> Shared snapshots table
----@param deps roslyn_filewatch.FsEventDeps Dependencies
----@return uv_fs_event_t|nil handle The event handle, or nil on error
----@return string|nil error Error message if failed
 function M.start(client, root, snapshots, deps)
-  if not client then
-    return nil, "missing client"
-  end
-  if not root then
-    return nil, "missing root"
-  end
-  if not deps then
-    return nil, "missing deps"
+  if not client or not root or not deps then
+    return nil, "missing required arguments"
   end
 
   local cfg = deps.config or config
   local rename_m = deps.rename_mod or rename_mod
-  local snapshot_m = deps.snapshot_mod or snapshot_mod
   local notify_fn = deps.notify or notify
   local notify_roslyn_renames = deps.notify_roslyn_renames
   local queue_events = deps.queue_events
@@ -389,18 +243,8 @@ function M.start(client, root, snapshots, deps)
   local normalize_path = deps.normalize_path or utils.normalize_path
   local last_events = deps.last_events
   local rename_window_ms = deps.rename_window_ms or 300
-  local processing_debounce_ms = (cfg and cfg.options and cfg.options.processing_debounce_ms)
-    or DEFAULT_PROCESSING_DEBOUNCE_MS
+  local processing_debounce_ms = (cfg.options and cfg.options.processing_debounce_ms) or DEFAULT_PROCESSING_DEBOUNCE_MS
   local mark_dirty_dir = deps.mark_dirty_dir
-
-  ---@type roslyn_filewatch.Helpers
-  local helpers = {
-    notify = notify_fn,
-    notify_roslyn_renames = notify_roslyn_renames,
-    queue_events = queue_events,
-    restart_watcher = restart_watcher,
-    last_events = last_events,
-  }
 
   snapshots[client.id] = snapshots[client.id] or {}
 
@@ -409,42 +253,28 @@ function M.start(client, root, snapshots, deps)
     return nil, err or "uv.new_fs_event failed"
   end
 
-  --- Flush buffered events for client - ASYNC CHUNKED VERSION
-  --- Processes files in chunks to prevent UI freezes during heavy activity
-  ---@param client_id number
   local function flush_client_buffer(client_id)
     local buf = event_buffers[client_id]
     if not buf or not buf.map then
       return
     end
 
-    ---@type string[]
     local paths = {}
-    for p, _ in pairs(buf.map) do
+    for p in pairs(buf.map) do
       table.insert(paths, p)
     end
     buf.map = {}
+    stop_close_timer(buf.timer)
+    buf.timer = nil
 
-    if buf.timer then
-      local_stop_close(buf.timer)
-      buf.timer = nil
-    end
-
-    -- If no paths, nothing to do
     if #paths == 0 then
       return
     end
 
-    -- Accumulated events (shared across async chunks)
-    ---@type roslyn_filewatch.FileChange[]
     local all_evs = {}
-    local current_index = 1
+    local idx = 1
 
-    --- Process a single file asynchronously
-    ---@param fullpath string
-    ---@param on_done fun()
-    local function process_file_async(fullpath, on_done)
-      -- Mark directory as dirty for incremental scanning
+    local function process_file(fullpath, on_done)
       if mark_dirty_dir then
         pcall(mark_dirty_dir, client_id, fullpath)
       end
@@ -456,26 +286,19 @@ function M.start(client, root, snapshots, deps)
 
       local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
 
-      -- Use async fs_stat
-      uv.fs_stat(fullpath, function(err, st)
+      uv.fs_stat(fullpath, function(stat_err, st)
         vim.schedule(function()
-          if not err and st then
-            local mt = mtime_ns(st)
-            ---@type roslyn_filewatch.SnapshotEntry
-            local new_entry = { mtime = mt, size = st.size, ino = st.ino, dev = st.dev }
-
+          if not stat_err and st then
+            local new_entry = { mtime = mtime_ns(st), size = st.size, ino = st.ino, dev = st.dev }
             local matched = false
+
             if rename_m and rename_m.on_create then
               local ok, res = pcall(rename_m.on_create, client.id, fullpath, st, snapshots, {
                 notify = notify_fn,
                 notify_roslyn_renames = notify_roslyn_renames,
               })
-              if not ok then
-                pcall(notify_fn, "rename_mod.on_create error: " .. tostring(res), vim.log.levels.ERROR)
-              else
-                if res then
-                  matched = true
-                end
+              if ok and res then
+                matched = true
               end
             end
 
@@ -484,12 +307,11 @@ function M.start(client, root, snapshots, deps)
               snapshots[client.id][fullpath] = new_entry
               if not prev_mt then
                 table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 1 })
-              elseif not same_file_info(prev_mt, snapshots[client.id][fullpath]) then
+              elseif not same_file_info(prev_mt, new_entry) then
                 table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 2 })
               end
             end
           else
-            -- Missing -> possible delete
             if prev_mt then
               local buffered = false
               if rename_m and rename_m.on_delete then
@@ -498,10 +320,8 @@ function M.start(client, root, snapshots, deps)
                   notify = notify_fn,
                   rename_window_ms = rename_window_ms,
                 })
-                if not ok then
-                  pcall(notify_fn, "rename_mod.on_delete error: " .. tostring(res), vim.log.levels.ERROR)
-                else
-                  buffered = res and true or false
+                if ok and res then
+                  buffered = true
                 end
               end
 
@@ -509,49 +329,38 @@ function M.start(client, root, snapshots, deps)
                 if snapshots[client.id] then
                   snapshots[client.id][fullpath] = nil
                 end
-
                 table.insert(all_evs, { uri = vim.uri_from_fname(fullpath), type = 3 })
               end
             end
           end
-
           on_done()
         end)
       end)
     end
 
-    --- Process a chunk of files and schedule next chunk
     local function process_chunk()
-      local chunk_end = math.min(current_index + FLUSH_CHUNK_SIZE - 1, #paths)
-      local pending = chunk_end - current_index + 1
+      local chunk_end = math.min(idx + FLUSH_CHUNK_SIZE - 1, #paths)
+      local pending = chunk_end - idx + 1
       local completed = 0
 
-      for i = current_index, chunk_end do
-        process_file_async(paths[i], function()
+      for i = idx, chunk_end do
+        process_file(paths[i], function()
           completed = completed + 1
           if completed == pending then
-            -- All files in chunk completed
-            current_index = chunk_end + 1
-            if current_index <= #paths then
-              -- More files to process - schedule next chunk with small delay
+            idx = chunk_end + 1
+            if idx <= #paths then
               vim.defer_fn(process_chunk, FLUSH_CHUNK_DELAY_MS)
-            else
-              -- All done - send accumulated events
-              if #all_evs > 0 then
-                pcall(queue_events, client.id, all_evs)
-              end
+            elseif #all_evs > 0 then
+              pcall(queue_events, client.id, all_evs)
             end
           end
         end)
       end
     end
 
-    -- Start processing first chunk
     process_chunk()
   end
 
-  --- Schedule a flush after debounce
-  ---@param client_id number
   local function schedule_flush(client_id)
     local buf = event_buffers[client_id]
     if not buf then
@@ -563,39 +372,27 @@ function M.start(client, root, snapshots, deps)
       local t = uv.new_timer()
       buf.timer = t
 
-      -- Dynamic debounce calculation
-      -- If raw queue is empty and buffer is small, trigger fast (for single file edits)
-      -- If queues have many items, use full debounce (for bursts/regeneration)
       local raw_q = raw_event_queues[client_id]
       local raw_count = raw_q and #raw_q.events or 0
       local buf_count = vim.tbl_count(buf.map)
 
-      local effective_debounce = processing_debounce_ms
-      -- If total pending events are small (< 5), use lower latency (50ms)
-      -- This makes "create file" -> "LSP detect" feel instant
+      local debounce = processing_debounce_ms
       if raw_count == 0 and buf_count < 5 then
-        effective_debounce = math.min(50, processing_debounce_ms)
+        debounce = math.min(50, processing_debounce_ms)
       end
 
-      t:start(effective_debounce, 0, function()
-        pcall(function()
-          flush_client_buffer(client_id)
-        end)
+      t:start(debounce, 0, function()
+        pcall(flush_client_buffer, client_id)
       end)
     end
   end
 
-  -- Start the fs_event watch with a fully protected callback
   local ok_start, start_err = pcall(function()
-    handle:start(root, { recursive = true }, function(err2, filename, events)
-      -- FAST PATH: If in regeneration mode, do minimal work
-      -- This check happens BEFORE any pcall/function overhead
+    handle:start(root, { recursive = true }, function(err2, filename, _)
       if fast_regen_flags[client.id] then
-        -- Sample-based check: only verify regen status every Nth event
         event_sample_counters[client.id] = (event_sample_counters[client.id] or 0) + 1
         if event_sample_counters[client.id] >= EVENT_SAMPLE_RATE then
           event_sample_counters[client.id] = 0
-          -- Quick check if still regenerating
           local regen = get_regen_detector()
           if regen then
             pcall(regen.on_event, client.id)
@@ -604,78 +401,45 @@ function M.start(client, root, snapshots, deps)
             end
           end
         end
-        return -- Skip all other processing
+        return
       end
 
-      -- Wrap entire callback to ensure nothing bubbles
-      local ok_cb, cb_err = pcall(function()
+      local ok_cb, _ = pcall(function()
         if err2 then
-          -- Handle libuv-level error (often EPERM on Windows dir delete race)
-          local msg = tostring(err2)
-          local escalated = record_error_and_maybe_escalate(
-            client.id,
-            msg,
-            notify_fn,
-            function(reason, delay_ms, disable)
-              if restart_watcher then
-                pcall(function()
-                  restart_watcher(reason or "EPERM", delay_ms or 1200, disable)
-                end)
-              end
+          record_error(client.id, tostring(err2), notify_fn, function(reason, delay_ms, disable)
+            if restart_watcher then
+              pcall(restart_watcher, reason, delay_ms, disable)
             end
-          )
+          end)
 
-          -- Schedule a deferred stop+restart if not escalated
-          if not escalated then
-            vim.defer_fn(function()
-              pcall(function()
-                -- Stop/close the handle safely
-                if handle and handle.stop and not handle:is_closing() then
-                  pcall(handle.stop, handle)
-                end
-                if handle and handle.close and not handle:is_closing() then
-                  pcall(handle.close, handle)
-                end
-              end)
-              -- Schedule restart with a small delay and request fs_event disabled for a bit
-              if restart_watcher then
-                pcall(function()
-                  restart_watcher("EPERM", 800, true)
-                end)
-              end
-            end, 50)
-          end
+          vim.defer_fn(function()
+            if handle and not handle:is_closing() then
+              pcall(handle.stop, handle)
+              pcall(handle.close, handle)
+            end
+            if restart_watcher then
+              pcall(restart_watcher, "EPERM", 800, true)
+            end
+          end, 50)
           return
         end
 
-        -- Filename missing: rate-limit restarts
         if not filename then
-          may_restart_due_to_nil_filename(client.id, notify_fn, function(reason, delay_ms)
+          maybe_restart_nil_filename(client.id, notify_fn, function(reason, delay_ms)
             if restart_watcher then
-              pcall(function()
-                restart_watcher(reason or "filename_nil", delay_ms or 800)
-              end)
+              pcall(restart_watcher, reason, delay_ms)
             end
           end)
           return
         end
 
-        -- RAW EVENT QUEUE:
-        -- Push raw filename to queue immediately.
-        -- Do NOT perform string manipulation or filtering here on the hot path.
-
         if last_events then
           last_events[client.id] = os.time()
         end
 
-        -- Track event for regeneration detection (Unity/Godot burst detection)
         local regen = get_regen_detector()
         if regen then
           pcall(regen.on_event, client.id)
-
-          -- If in regeneration mode (burst detected), DROP events and set fast flag.
-          -- Processing thousands of events (stats + queueing) causes massive lag.
-          -- The fs_poll loop will resync the state once regeneration finishes.
           if regen.is_regenerating(client.id) then
             fast_regen_flags[client.id] = true
             event_sample_counters[client.id] = 0
@@ -691,25 +455,19 @@ function M.start(client, root, snapshots, deps)
 
         table.insert(q.events, filename)
 
-        -- Bound queue size to prevent memory issues during heavy regeneration
-        -- Oldest events are dropped (they'll be caught by poller resync)
         while #q.events > MAX_RAW_QUEUE_SIZE do
           table.remove(q.events, 1)
         end
 
-        -- Trigger processing if not already running
         if not q.processing then
           schedule_raw_processing(client.id, root, cfg, schedule_flush)
         end
       end)
 
       if not ok_cb then
-        local msg = tostring(cb_err)
-        record_error_and_maybe_escalate(client.id, msg, notify_fn, function(reason, delay_ms, disable)
+        record_error(client.id, "callback error", notify_fn, function(reason, delay_ms, disable)
           if restart_watcher then
-            pcall(function()
-              restart_watcher(reason or "callback_error", delay_ms or 800, disable)
-            end)
+            pcall(restart_watcher, reason, delay_ms, disable)
           end
         end)
       end
@@ -718,38 +476,12 @@ function M.start(client, root, snapshots, deps)
 
   if not ok_start then
     if handle and handle.close then
-      pcall(function()
-        handle:close()
-      end)
+      pcall(handle.close, handle)
     end
     return nil, start_err
   end
 
   return handle, nil
-end
-
---- Clear client state (including fast-path flags)
----@param client_id number
-function M.clear(client_id)
-  if raw_event_queues[client_id] then
-    raw_event_queues[client_id] = nil
-  end
-  if event_buffers[client_id] then
-    local buf = event_buffers[client_id]
-    if buf.timer then
-      local_stop_close(buf.timer)
-    end
-    event_buffers[client_id] = nil
-  end
-  if fast_regen_flags[client_id] then
-    fast_regen_flags[client_id] = nil
-  end
-  if event_sample_counters[client_id] then
-    event_sample_counters[client_id] = nil
-  end
-  if last_resync_ts[client_id] then
-    last_resync_ts[client_id] = nil
-  end
 end
 
 return M
