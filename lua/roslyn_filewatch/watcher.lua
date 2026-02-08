@@ -145,12 +145,19 @@ pcall(function()
       end,
     })
 
+    local sln_info_proxy = setmetatable({}, {
+      __index = function(_, k)
+        return client_states[k] and client_states[k].sln_info
+      end,
+    })
+
     status_mod.register_refs({
       watchers = watchers_proxy,
       pollers = pollers_proxy,
       watchdogs = watchdogs_proxy,
       snapshots = snapshots_proxy,
       last_events = last_events_proxy,
+      sln_infos = sln_info_proxy,
       dirty_dirs = dirty_dirs_proxy,
     })
   end
@@ -584,8 +591,29 @@ function M.resync()
   for _, client in ipairs(clients) do
     if vim.tbl_contains(config.options.client_names, client.name) then
       local state = get_client_state(client.id)
-      state.snapshot = {}
-      state.needs_full_scan = true
+
+      -- If using poller, flag is enough
+      if state.poller then
+        state.needs_full_scan = true
+      else
+        -- If using fs_event, we must trigger scan manually
+        local helpers = {
+          queue_events = queue_events,
+          notify = notify,
+          notify_roslyn_renames = notify_roslyn_renames,
+          last_events = nil, -- Don't pass client_states here! state.last_event is updated below
+        }
+        -- Mock snapshots table structure for resync_snapshot_for
+        local snapshots_wrapper = {
+          [client.id] = state.snapshot,
+        }
+
+        snapshot_mod.resync_snapshot_for(client.id, state.root, snapshots_wrapper, helpers)
+
+        -- Update state with result
+        state.snapshot = snapshots_wrapper[client.id]
+      end
+
       state.dirty_dirs = {}
       state.last_event = os.time()
 
@@ -814,6 +842,15 @@ function M.start(client)
   end
 
   state.needs_full_scan = true
+
+  -- Perform initial scan if using fs_event (as it has no poll loop)
+  if not state.poller and state.watcher then
+    snapshot_mod.scan_tree_async(root, function(new_map)
+      state.snapshot = new_map
+      state.needs_full_scan = false
+      notify("Initial scan complete: " .. vim.tbl_count(new_map) .. " files", vim.log.levels.DEBUG)
+    end)
+  end
 
   if config.options.solution_aware then
     local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
@@ -1094,6 +1131,16 @@ function M.start(client)
     end,
     mark_needs_full_scan = function()
       state.needs_full_scan = true
+      if not state.poller and state.watcher then
+        -- Trigger manual resync for watchdog
+        local helpers = {
+          queue_events = queue_events,
+          notify = notify,
+          notify_roslyn_renames = notify_roslyn_renames,
+          last_events = last_events_proxy,
+        }
+        snapshot_mod.resync_snapshot_for(client.id, root, snapshots_proxy, helpers)
+      end
     end,
     last_events = last_events_proxy,
     watchdog_idle = WATCHDOG_IDLE,

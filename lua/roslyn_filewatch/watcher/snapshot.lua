@@ -45,7 +45,7 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
 
   for _, ext in ipairs(config.options.watch_extensions or {}) do
     table.insert(args, "--extension")
-    table.insert(args, ext:gsub("^%.", ""))
+    table.insert(args, (ext:gsub("^%.", "")))
   end
 
   table.insert(args, root)
