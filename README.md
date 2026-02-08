@@ -56,6 +56,34 @@ Enable these features in your config to get a full C# IDE experience:
 
 ## 📦 Installation
 
+
+> [!IMPORTANT]
+> ### Migration Guide (v0.4.x)
+>**Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync** tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been removed to minimize bloat and maximize performance(Not a stable release yet). Main branch will stay on v0.3.x until v0.4.x stable.
+>
+>| Feature | v0.3.x (Legacy) | v0.4.x (Current) | Replacement |
+>| :--- | :--- | :--- | :--- |
+>| **Project Watching** | Good | **Instant** (Async+Parallel) | - |
+>| **Dotnet CLI** | `:RoslynBuild`, `:RoslynRun` | ❌ Removed | Use `dispatch.nvim` or `toggleterm` |
+>| **NuGet** | `:RoslynNuget` | ❌ Removed | Use CLI or `nuget.nvim` |
+>| **Explorer** | `:RoslynExplorer` | ❌ Removed | Use `neo-tree` or `nvim-tree` |
+>| **Game Detection** | Complex Context | **Presets Only** (Performance) | Presets are auto-applied |
+>
+>**Recommendation:**
+>*   **Stay on v0.4.x** if you want the fastest and latest Roslyn filewatch.
+>*   **Pin to v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands and stable releases:
+>
+>  #### How to use v0.4.x
+>  ```lua
+> {
+>    "khoido2003/roslyn-filewatch.nvim",
+>    branch = "v0.4.x",
+>    config = function()
+>      require("roslyn_filewatch").setup()
+>    end,
+> }
+> ```
+
 ### lazy.nvim
 ```lua
 {
