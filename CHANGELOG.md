@@ -5,6 +5,21 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.2] - 2026-02-09
+
+### Fixed
+- **Recovery & Resync**: Fixed critical bug where `:RoslynFilewatchResync` and the automatic watchdog were ineffective in `fs_event` mode (default). They now properly trigger a full manual scan to recover from missed events.
+- **Godot Support**: Restored `.csproj` detection for Godot projects using efficient `vim.fs.find` (replacing the blocking scan from v0.4.1).
+- **Snapshot Race Condition**: Fixed a race condition in asynchronous scanning that could result in empty file snapshots on startup.
+- **Crash Fixes**:
+  - Fixed `table.insert` error in `snapshot.lua` caused by multiple return values.
+  - Fixed `:RoslynFilewatchStatus` crashing due to a missing synchronous helper function (now uses cached async data).
+- **Stability**: `fs_event` mode now performs an explicit initial scan on startup to ensure a correct baseline snapshot.
+
+### Performance
+- **Zero-Block Startup**: Removed all remaining synchronous I/O from the startup path (`presets.lua`, `snapshot.lua`), ensuring LSP initialization is 100% non-blocking.
+
+
 ## [v0.4.1] - 2026-02-08
 
 ### Performance
