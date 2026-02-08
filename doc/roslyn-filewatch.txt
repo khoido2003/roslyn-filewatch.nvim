@@ -94,7 +94,7 @@ modified (opt-in).
   maximize performance(Not a stable release yet). Main branch will stay on v0.3.x
   until v0.4.x stable.
     ------------------------------------------------------------------------
-    Feature           v0.3.x (Legacy)   v0.4.x (Current)   Replacement
+    Feature           v0.3.x (Stable)   v0.4.x (Latest)    Replacement
     ----------------- ----------------- ------------------ -----------------
     Project Watching  Good              Instant            -
                                         (Async+Parallel)   
@@ -107,9 +107,9 @@ modified (opt-in).
     Game Detection    Complex Context   Presets Only       Presets are
                                         (Performance)      auto-applied
     ------------------------------------------------------------------------
-  **Recommendation:** * **Stay on v0.4.x** if you want the fastest and latest
-  Roslyn filewatch. * **Pin to v0.3.x** if you absolutely rely on the built-in
-  CLI/Explorer commands and stable releases:
+  **Recommendation:** * **Move to v0.4.x** if you want the fastest and latest
+  Roslyn filewatch features. * **Stay on v0.3.x** if you absolutely rely on the
+  built-in CLI/Explorer commands and stable releases:
   #### How to use v0.4.x `lua { "khoido2003/roslyn-filewatch.nvim", branch =
   "v0.4.x", config = function() require("roslyn_filewatch").setup() end, }`
 
