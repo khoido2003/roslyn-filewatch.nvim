@@ -7,7 +7,7 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 ---
 
 > [!WARNING]
-> **v0.4.0 Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
+> **v0.4.x Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
 > If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v04x).
 
 ---
@@ -69,11 +69,11 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 | **Game Detection** | Complex Context | **Presets Only** (Performance) | Presets are auto-applied |
 
 **Recommendation:**
-*   **Stay on v0.4.x** if you want the fastest, most reliable Roslyn experience.
-*   **Pin to v0.3.9** if you absolutely rely on the built-in CLI/Explorer commands:
+*   **Stay on v0.4.x** if you want the fastest and newest Roslyn experience.
+*   **Pin to v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands and stable releases:
 
 ```lua
-{ "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
+{ "khoido2003/roslyn-filewatch.nvim", branch = "v0.3.x" }
 ```
 
 ### lazy.nvim
@@ -162,6 +162,10 @@ require("roslyn_filewatch").setup({
     interval = 300, -- Window to coalesce events (ms)
   },
   
+  -- Max events to process per chunk (prevent UI freeze)
+  -- Default: 1000 (Unity), 100 (others)
+  max_events_per_batch = 1000,
+  
   -- Debounce time for processing file system events
   processing_debounce_ms = 150,
   
@@ -188,8 +192,6 @@ require("roslyn_filewatch").setup({
 
 ### 2. Common Workflows
 
-
-
 #### **Working with Unity**
 1.  Open your Unity project folder in Neovim.
 2.  The plugin detects `Assets/` and `ProjectSettings/`.
@@ -213,58 +215,48 @@ Most commands are **interactive**—if you run them without arguments, a selecti
 | `:RoslynReloadProjects` | **Emergency Fix**: Forces Roslyn to reload all project files. |
 | `:checkhealth roslyn_filewatch` | Shows detailed health and recovery status. |---
 
-## � Maintainer Guide
+##  Maintainer Guide
 
 For developers contributing to `roslyn-filewatch.nvim`, this section details the architecture.
 
 ### 🗺️ Architecture Overview
 
-The plugin follows a **Unidirectional Data Flow** pattern to maintain synchronization between the File System and Roslyn with minimal latency.
+The plugin follows a **Unidirectional Data Flow** pattern to maintain synchronization between the File System and Roslyn with minimal latency and memory usage.
 
 ```mermaid
 flowchart TD
     FS[File System] -->|Events| FS_Event[fs_event.lua]
-    FS_Event -->|Debounce| Buffer[Event Buffer]
-    Buffer -->|Flush| Watcher[watcher.lua]
-    Watcher -->|Scan| Snapshot[snapshot.lua]
+    FS_Event -->|Burst Detection| Regen[regen_detector.lua]
+    Regen -->|Filter/Debounce| Buffer[Event Buffer]
+    Buffer -->|Chunked Flush| Watcher[watcher.lua]
+    Watcher -->|Process Queue| Snapshot[snapshot.lua]
     Snapshot -->|Diff| Changes[Detected Changes]
     Changes -->|Heuristic| Rename[rename.lua]
-    Rename -->|Notification| Notify[notify.lua]
+    Rename -->|Batch Notify| Notify[notify.lua]
     Notify -->|LSP JSON| Roslyn[Roslyn LSP]
 ```
 
 #### Core Components
-*   **`watcher.lua`**: The orchestrator. Manages the lifecycle of `uv.fs_event` handles, `uv.fs_poll` fallbacks, and the **Self-Healing Watchdog** that restarts frozen listeners.
-*   **`fs_event.lua`**: Handles low-level libuv events. Implements **Dynamic Debounce** (switching between 50ms and 300ms+ latency based on event pressure).
-*   **`snapshot.lua`**: The source of truth. Maintains an in-memory mirror of the filesystem (`path -> {mtime, size, inode}`). Uses **parallelized `fs_stat`** batches for high-performance scanning of large repos.
-*   **`sln_parser.lua`**: Async parser for `.sln`, `.slnx`, and `.slnf` files. Determines the "Watch Scope" to strictly ignore unrelated files.
-*   **`notify.lua`**: Handles LSP communication, batching `workspace/didChangeWatchedFiles` notifications to prevent flooding.
-*   **`restore.lua`**: Manages `dotnet restore` execution sequence to prevent "Thundering Herd" issues during massive file changes.
+*   **`watcher.lua`**: The orchestrator. Manages the lifecycle of `uv.fs_event` handles and the **Self-Healing Watchdog** that restarts frozen listeners. Implements **Chunked Processing** to handle thousands of events without freezing the UI.
+*   **`fs_event.lua`**: Handles low-level libuv events. Implements **Dynamic Debounce** and feeds events into the regeneration detector.
+*   **`regen_detector.lua`**: **(New in v0.4.3)** Detects massive file operations (like Unity Asset re-imports or `git checkout`). It automatically switches the watcher to "Low-Overhead Mode" to prevent memory allocation bombs, reducing GC pressure by 99% during bursts.
+*   **`snapshot.lua`**: The source of truth. Maintains an in-memory mirror of the filesystem using **parallelized `fs_stat`**.
+*   **`notify.lua`**: Handles LSP communication with **Global Deduplication**. Merges redundant `project/open` requests and batches file changes.
+*   **`restore.lua`**: Manages `dotnet restore` execution sequence. Uses a **Sequential Queue** to ensure only one restore process runs at a time, preventing system-wide OOM.
 
 ### ⚙️ The Watch Cycle
 
 **1. Startup & Initialization**
-*   **Async Parsing**: On `LspAttach`, the watcher parses the solution file asynchronously to find project roots without blocking the UI.
-*   **Parallel Hydration**: It performs a **parallel full scan** (utilizing `fd` if available, or parallel `fs_stat`) to build the initial in-memory snapshot.
-*   **Notification**: Sends the first `project/open` to wake up Roslyn.
+*   **Async Parsing**: On `LspAttach`, the watcher parses solution files asynchronously.
+*   **Zero-Block Scan**: Performs a background scan to build the initial snapshot. The UI remains fully responsive.
 
-**2. Event Detection**
-*   **Trigger**: `libuv` signals a file change.
-*   **Dynamic Debounce**:
-    *   **Single File**: Processed in **~50ms** (Instant feel).
-    *   **Batch (Git/Unity)**: If event density is high, the timer automatically extends to **~300ms** (or configured interval) to coalesce changes.
-*   **Resilience**: If the watcher freezes or errors, the **Watchdog** detects the stall and seamlessly restarts the handle with exponential backoff.
+**2. Event Detection & Optimization**
+*   **Burst Handling**: If 10,000 files change (Unity Regen), `regen_detector` kicks in, disabling expensive per-file tracking and only marking dirty directories.
+*   **Chunked Processing**: Events are processed in chunks of 200-1000 (configurable) with 10ms yields to the main loop, ensuring Neovim never freezes.
 
-**3. Diffing & Heuristics**
-*   **Partial Scan**: Only the affected directories are rescanned to minimize I/O.
-*   **Diff Logic**: Compares New Snapshot vs Old Snapshot to detect `Created`, `Deleted`, or `Changed` (Mtime/Size) events.
-*   **Rename Detection**:
-    *   A `Delete` and `Create` occurring in the same batch are analyzed.
-    *   If `inode` matches (or `size` + `basename` heuristic for poor filesystems), it is promoted to a **Rename** event.
-
-**4. Synchronization**
-*   **LSP Protocol**: Events are converted to standard `FileEvent` objects.
-*   **Dispatch**: Sent to Roslyn via `workspace/didChangeWatchedFiles` or `workspace/didRenameFiles`.
+**3. Synchronization**
+*   **Changes**: Detected changes are sent to Roslyn via `workspace/didChangeWatchedFiles`.
+*   **Smart Restore**: If a `.csproj` is touched, a restore is queued. If 50 projects change, they are restored one by one.
 
 ### ❓ Troubleshooting & Debugging
 
@@ -322,4 +314,4 @@ MIT License.
 ## ❤️ Acknowledgements
 
 - Inspired by the pain of using Roslyn in Neovim without file watchers 😅  
-- Thanks to Neovim’s `vim.uv` for making cross-platform file watching possible.
+- Thanks to Neovim’s `vim.uv` and [sharkdp/fd](https://github.com/sharkdp/fd) for making cross-platform file watching possible.
