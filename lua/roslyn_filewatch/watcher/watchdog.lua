@@ -404,6 +404,7 @@ function M.start(client, root, snapshots, deps)
               -- Healthy deep check
               if recovery_state.stale_detections > 0 then
                 recovery_state.stale_detections = 0
+                recovery_state.health_status = "healthy"
                 pcall(notify, "Snapshot verification passed", vim.log.levels.DEBUG)
               end
             end

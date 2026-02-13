@@ -179,7 +179,7 @@ function M.on_create(client_id, path, st, snapshots, callbacks)
     pcall(callbacks.notify, "Detected rename: " .. del_ent.path .. " -> " .. path, vim.log.levels.DEBUG)
   end
   if callbacks and callbacks.notify_roslyn_renames then
-    pcall(callbacks.notify_roslyn_renames, { { old = del_ent.path, ["new"] = path } })
+    pcall(callbacks.notify_roslyn_renames, { { old = del_ent.path, new_path = path } })
   end
 
   return true

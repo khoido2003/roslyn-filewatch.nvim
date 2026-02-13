@@ -210,10 +210,11 @@ Most commands are **interactive**—if you run them without arguments, a selecti
 ### 📂 Core (Always Available)
 | Command | Description |
 |---------|-------------|
-| `:RoslynStatus` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
+| `:RoslynFilewatchStatus` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
 | `:RoslynFilewatchResync` | **Recovery**: Forces a full snapshot resync. |
 | `:RoslynReloadProjects` | **Emergency Fix**: Forces Roslyn to reload all project files. |
-| `:checkhealth roslyn_filewatch` | Shows detailed health and recovery status. |---
+| `:checkhealth roslyn_filewatch` | Shows detailed health and recovery status. |
+|---|---|
 
 ##  Maintainer Guide
 

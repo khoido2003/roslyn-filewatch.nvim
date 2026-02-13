@@ -149,11 +149,12 @@ function M.on_event(client_id)
   end
 
   if state.is_regenerating then
-    schedule_quiet_exit(client_id, state, quiet_period_ms)
-
     if state.regen_start_time and (current_time - state.regen_start_time) >= max_duration_ms then
       stop_regen_mode(client_id, state)
+      return
     end
+
+    schedule_quiet_exit(client_id, state, quiet_period_ms)
   end
 end
 

@@ -13,6 +13,12 @@ local notify = notify_mod and notify_mod.user or function() end
 
 local M = {}
 
+---@type table<number, {map: table, timer: uv_timer_t|nil}>
+local event_buffers = {}
+
+---@type table<number, {events: string[], processing: boolean}>
+local raw_event_queues = {}
+
 local regen_detector = nil
 local function get_regen_detector()
   if regen_detector == nil then
@@ -43,12 +49,6 @@ local function get_regen_detector()
   end
   return regen_detector or nil
 end
-
----@type table<number, {map: table, timer: uv_timer_t|nil}>
-local event_buffers = {}
-
----@type table<number, {events: string[], processing: boolean}>
-local raw_event_queues = {}
 
 ---@type table<number, boolean>
 local fast_regen_flags = {}

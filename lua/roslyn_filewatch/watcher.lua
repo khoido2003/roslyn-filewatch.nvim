@@ -220,7 +220,9 @@ local function scan_csproj_async(root, callback)
       for _, csproj_path in ipairs(csproj_paths) do
         pending_dirs = pending_dirs + 1
         uv.fs_stat(csproj_path, function(stat_err, stat)
-          results[csproj_path] = (not stat_err and stat) and stat.mtime.sec or 0
+          if not stat_err and stat then
+            results[csproj_path] = stat.mtime.sec
+          end
           pending_dirs = pending_dirs - 1
           if pending_dirs == 0 then
             finish_scan()
@@ -289,7 +291,9 @@ local function scan_projects_from_sln_async(project_dirs, callback)
       for _, p in ipairs(csproj_found) do
         pending = pending + 1
         uv.fs_stat(p, function(stat_err, stat)
-          results[p] = (not stat_err and stat) and stat.mtime.sec or 0
+          if not stat_err and stat then
+            results[p] = stat.mtime.sec
+          end
           pending = pending - 1
           if pending == 0 then
             finish()
@@ -618,6 +622,10 @@ function M.resync()
           last_events = nil, -- Don't pass client_states here! state.last_event is updated below
         }
         -- Mock snapshots table structure for resync_snapshot_for
+        -- We can pass the state directly if the structure matches, but here we just
+        -- pass the state.snapshot directly since resync_snapshot_for expects snapshots[client_id]
+        -- But wait, resync_snapshot_for takes `snapshots` table as arg and uses `snapshots[client_id]`
+        -- To simplify:
         local snapshots_wrapper = {
           [client.id] = state.snapshot,
         }
@@ -792,7 +800,9 @@ function M.start(client)
               vim.log.levels.WARN
             )
           end)
-          state.recovery_consecutive_failures = 0
+          -- Do not reset failures immediately to prevent restart loop
+          -- Instead we set a long backoff or let the user manually intervene
+          state.recovery_current_backoff = config.options.recovery_max_delay_ms or 30000
         end
       end
     end, delay_ms)
@@ -1194,7 +1204,7 @@ function M.start(client)
       if args.data.client_id == client.id then
         vim.schedule(function()
           local still_active = vim.lsp.get_client_by_id(client.id)
-          if still_active and not (still_active.is_stopped and still_active:is_stopped()) then
+          if still_active and not (still_active.is_stopped and still_active.is_stopped()) then
             pcall(autocmds_mod.clear_client, client.id)
             notify("LspDetach: Buffer detached, client still active", vim.log.levels.DEBUG)
             return

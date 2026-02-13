@@ -9,7 +9,7 @@
 
 ---@class roslyn_filewatch.RenameEntry
 ---@field old string
----@field new string
+---@field new_path string
 ---@field oldUri? string
 ---@field newUri? string
 
@@ -19,7 +19,7 @@ local config = require("roslyn_filewatch.config")
 
 ---@class NotifyStats
 ---@field last_success_time number
----@field total_notifications number
+---@field total_notifications number Total number of notification attempts (regardless of success)
 ---@field last_notification_time number
 
 ---@type NotifyStats
@@ -182,8 +182,8 @@ function M.roslyn_renames(files)
     if p.old:match("%.cs$") or p.old:match("%.vb$") or p.old:match("%.fs$") then
       table.insert(modified_source_files, p.old)
     end
-    if p["new"]:match("%.cs$") or p["new"]:match("%.vb$") or p["new"]:match("%.fs$") then
-      table.insert(modified_source_files, p["new"])
+    if p.new_path:match("%.cs$") or p.new_path:match("%.vb$") or p.new_path:match("%.fs$") then
+      table.insert(modified_source_files, p.new_path)
     end
   end
 
@@ -197,7 +197,7 @@ function M.roslyn_renames(files)
       for _, p in ipairs(files) do
         table.insert(payload.files, {
           oldUri = p.oldUri or vim.uri_from_fname(p.old),
-          newUri = p.newUri or vim.uri_from_fname(p["new"]),
+          newUri = p.newUri or vim.uri_from_fname(p.new_path),
         })
       end
 
