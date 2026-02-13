@@ -382,6 +382,10 @@ local function handle_csproj_reload(client, sln_info)
 
   pending.pending = true
   local timer = uv.new_timer()
+  if not timer then
+    pending.pending = false
+    return
+  end
   pending.timer = timer
 
   timer:start(500, 0, function()
