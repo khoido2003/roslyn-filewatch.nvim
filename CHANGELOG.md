@@ -5,6 +5,85 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.2] - 2026-02-09
+
+### Fixed
+- **Recovery & Resync**: Fixed critical bug where `:RoslynFilewatchResync` and the automatic watchdog were ineffective in `fs_event` mode (default). They now properly trigger a full manual scan to recover from missed events.
+- **Godot Support**: Restored `.csproj` detection for Godot projects using efficient `vim.fs.find` (replacing the blocking scan from v0.4.1).
+- **Snapshot Race Condition**: Fixed a race condition in asynchronous scanning that could result in empty file snapshots on startup.
+- **Crash Fixes**:
+  - Fixed `table.insert` error in `snapshot.lua` caused by multiple return values.
+  - Fixed `:RoslynFilewatchStatus` crashing due to a missing synchronous helper function (now uses cached async data).
+- **Stability**: `fs_event` mode now performs an explicit initial scan on startup to ensure a correct baseline snapshot.
+
+### Performance
+- **Zero-Block Startup**: Removed all remaining synchronous I/O from the startup path (`presets.lua`, `snapshot.lua`), ensuring LSP initialization is 100% non-blocking.
+
+- **Massive Event Handling**: Fixed a critical issue where events exceeding the batch limit (default 100) were silently dropped. Now implements smart chunking (processing 200-1000 events per chunk with UI yielding), ensuring no data loss during Unity regeneration or git checkout.
+- **Notification Deduplication**: Implemented global debouncing for `project/open` notifications, preventing redundant LSP requests during bulk file updates.
+- **Preset Tuning**:
+  - Increased batch limits for Unity (1000 events) and Godot (500 events).
+  - Added common ignore patterns (`.history`, `__pycache__`, etc.) to default presets to reduce noise.
+
+## [v0.4.1] - 2026-02-08
+
+### Performance
+- **Zero-Overhead Regeneration**: Implemented ultra-fast path for Unity regeneration that drops events with near-zero CPU cost, eliminating UI freezes.
+- **Sample-Based Detection**: Regeneration detector now uses sample-based checking (every 10th event) instead of checking every single file.
+- **Immediate Queue Clearing**: Event queues are instantly wiped when regeneration bursts are detected, preventing 15-30s lag after regeneration finishes.
+- **Optimized Event Processing**:
+  - Replaced O(n²) queue removal with O(1) index-based extraction.
+  - Reduced default debounce from 300ms to 150ms for snappier response.
+  - Increased raw processing chunk size (50 -> 100) for better throughput.
+- **Faster Scanning**: Reduced async yield times (12ms -> 5ms) and increased batch sizes (50 -> 200) for faster project scanning.
+
+### Fixed
+- **Queue Backlog**: Fixed issue where events queued before regeneration detection kicks in would cause a massive backlog processing spike.
+- **Timer Churn**: Fixed regeneration detector creating/destroying timers on every event (now reuses timers).
+
+## [v0.4.0] - 2026-02-07
+
+### ⚠️ BREAKING CHANGES
+- **Streamlined Scope**: Removed all non-file-watching features to focus on core performance and stability.
+  - Removed **Dotnet CLI** commands (`:RoslynBuild`, `:RoslynRun`, etc.) and module.
+  - Removed **NuGet** commands (`:RoslynNuget`, `:RoslynRestore`) and module.
+  - Removed **Solution Explorer** (`:RoslynExplorer`) and module.
+  - Removed **Game Engine Context** (`game_context.lua`) mechanics (presets for performance still exist).
+  - Removed **Project Warmup** module.
+- **Configuration**: Removed `enable_dotnet_commands` and `enable_nuget_commands` options.
+
+### Added
+- **Dynamic Debounce**: "Smart" latency control.
+  - **Instant (~50ms)** detection for single file edits.
+  - **Efficient (~1000ms)** batching for mass changes (Unity regeneration, git checkout).
+- **Recovery System**:
+  - **Self-Healing**: Automatically detects and restarts frozen watchers.
+  - **Exponential Backoff**: Prevents restart loops during persistent failures.
+  - **Status Checks**: `:checkhealth` now tracks recovery stats and notification throughput.
+- **Recovery Config**: New options (`recovery_verify_enabled`, `recovery_max_retries`) to tune resilience.
+
+### Performance (Initial Release)
+- **Instant Startup**: Fixed a critical issue where initial scan generated ~30k events, flooding the LSP and freezing Neovim. Startup is now silent and instant.
+- **Non-blocking Notifications**: Disabled synchronous directory scans when detecting new files in Unity projects, eliminating UI freeze on file creation.
+- **Unity Regeneration**: Fixed "whole editor freeze" during Unity asset reimports by dropping events during regeneration bursts.
+- **Optimized Scanning**: Tuned `fd` integration to prevent thread pool saturation (reduced batch size, increased yield), ensuring UI responsiveness during massive scans.
+
+### Fixed
+- **Unity .slnx**: Fixed project detection fallback for Unity `.slnx` projects (now correctly notifies LSP).
+- **Race Condition**: Fixed `sln_poll_timer` failing to start due to race condition on startup.
+- **Config**: Optimized default watchdog intervals (10s/60s) to reduce background I/O.
+
+### Optimized
+- **Async Startup**: `.sln`/`.slnx` parsing is now fully asynchronous, unblocking the UI during startup.
+- **Parallel Scanning**: Initial file scan uses parallel `fs_stat` batches, drastically reducing load time for large projects.
+- **Reduced Bloat**: Cleaned up ~15 commands and related files to lower memory footprint and maintenance surface.
+
+### Migration Guide
+If you rely on the removed CLI/Explorer features, you can pin your plugin version to v0.3.9:
+```lua
+{ "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
+```
+
 ## [v0.3.9] - 2026-02-07
 
 ### Fixed

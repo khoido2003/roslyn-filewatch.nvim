@@ -22,8 +22,6 @@
 ---@field deferred_loading? boolean Defer project/open until first C# file opened
 ---@field deferred_loading_delay_ms? number Delay before sending deferred project/open (default: 500)
 ---@field diagnostic_throttling? roslyn_filewatch.DiagnosticThrottlingOptions
----@field enable_dotnet_commands? boolean Enable dotnet CLI commands (default: false)
----@field enable_nuget_commands? boolean Enable NuGet commands (default: false)
 ---@field enable_snippets? boolean Enable snippets (default: false)
 
 ---@class roslyn_filewatch.BatchingOptions
@@ -218,11 +216,8 @@ M.options = {
     visible_only = true, -- Only request diagnostics for visible buffers
   },
 
-  --- Enable dotnet CLI commands (build, run, watch, etc.)
-  enable_dotnet_commands = false,
-
-  --- Enable NuGet commands (restore, add, remove)
-  enable_nuget_commands = false,
+  --- Enable snippets (default: false)
+  enable_snippets = false,
 
   --- Enable auto-restore of NuGet packages on .csproj change (default: true)
   enable_autorestore = true,
@@ -245,6 +240,34 @@ M.options = {
 
   --- Maximum events per batch sent to Roslyn LSP (prevents server overload)
   max_events_per_batch = 100,
+
+  --- Recovery and Watchdog Options ---
+
+  --- Enable async verification after watcher restart (spot-check files)
+  recovery_verify_enabled = true,
+
+  --- Maximum consecutive recovery failures before escalation (full restart + warning)
+  recovery_max_retries = 5,
+
+  --- Initial delay (ms) for exponential backoff on recovery
+  recovery_initial_delay_ms = 300,
+
+  --- Maximum delay (ms) for exponential backoff (cap)
+  recovery_max_delay_ms = 30000,
+
+  --- Fast watchdog check interval (ms) - checks handle health and event flow
+  --- Increased from 5000 to 10000 to reduce overhead on medium-sized projects
+  watchdog_fast_interval_ms = 10000,
+
+  --- Deep watchdog check interval (ms) - async snapshot verification
+  --- Increased from 30000 to 60000 to reduce I/O overhead during normal operation
+  watchdog_deep_interval_ms = 60000,
+
+  --- Number of sample files to verify during deep health check
+  recovery_sample_size = 5,
+
+  --- Threshold for stale ratio (0.0-1.0) to trigger full rescan
+  recovery_stale_threshold = 0.5,
 }
 
 -- Track detected root for preset application

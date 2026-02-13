@@ -31,6 +31,7 @@ local _pollers = nil
 local _watchdogs = nil
 local _snapshots = nil
 local _last_events = nil
+local _sln_infos = nil
 
 --- Register watcher state references for status tracking
 ---@param refs table References to watcher internal state tables
@@ -40,6 +41,7 @@ function M.register_refs(refs)
   _watchdogs = refs.watchdogs
   _snapshots = refs.snapshots
   _last_events = refs.last_events
+  _sln_infos = refs.sln_infos
 end
 
 --- Get status for all watched clients
@@ -83,28 +85,28 @@ function M.get_status()
         client_status.file_count = count
       end
 
-      -- Check for solution file
-      if config.options.solution_aware ~= false then
-        local ok, sln_parser = pcall(require, "roslyn_filewatch.watcher.sln_parser")
-        if ok and sln_parser and client_status.root then
-          local sln, sln_type = sln_parser.find_sln(client_status.root)
-          if sln then
-            client_status.sln_file = sln
-            local dirs = sln_parser.get_project_dirs(sln, sln_type)
-            if dirs and #dirs > 0 then
-              client_status.project_dirs = dirs
+      -- Check for solution info from watcher state
+      if _sln_infos and _sln_infos[client.id] then
+        local info = _sln_infos[client.id]
+        if info.path then
+          client_status.sln_file = info.path
+          if info.csproj_files then
+            -- Count project files
+            local count = 0
+            for _ in pairs(info.csproj_files) do
+              count = count + 1
             end
-          else
-            -- No solution found, check if there are .csproj files
-            local csproj_files = sln_parser.find_csproj_files(client_status.root)
-            if csproj_files and #csproj_files > 0 then
-              client_status.has_csproj = true
-            else
-              -- No .sln, no .csproj - might need dotnet restore/init
-              client_status.missing_project = true
-            end
+            client_status.project_dirs = { length = count } -- structure to match usage
           end
+        elseif info.csproj_files then
+          -- csproj only mode
+          client_status.has_csproj = true
+        else
+          client_status.missing_project = true
         end
+      else
+        -- Fallback if no info yet
+        client_status.missing_project = true
       end
 
       table.insert(status.clients, client_status)
@@ -231,7 +233,9 @@ function M.show()
           { "  Solution: ", "Normal" },
           { sln_name, "String" },
         })
-        if client.project_dirs then
+        if client.project_dirs and client.project_dirs.length then
+          echo("  Projects: " .. client.project_dirs.length .. " projects loaded", "Normal")
+        elseif client.project_dirs and #client.project_dirs > 0 then
           echo("  Projects: " .. #client.project_dirs .. " directories", "Normal")
         end
       elseif client.has_csproj then
