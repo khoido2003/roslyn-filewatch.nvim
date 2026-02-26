@@ -24,21 +24,36 @@ function M.setup(opts)
     end,
   })
 
-  -- Create user command for status display
-  vim.api.nvim_create_user_command("RoslynFilewatchStatus", function()
-    M.status()
-  end, { desc = "Show roslyn-filewatch status" })
+  -- Create unified user command
+  vim.api.nvim_create_user_command("RoslynFilewatch", function(opts)
+    local action = string.lower(opts.fargs[1] or "status")
 
-  -- Create user command for manual resync
-  vim.api.nvim_create_user_command("RoslynFilewatchResync", function()
-    M.resync()
-  end, { desc = "Force resync file watcher snapshots" })
-
-  -- Create user command for project reload
-  vim.api.nvim_create_user_command("RoslynReloadProjects", function()
-    M.reload()
-    vim.notify("[roslyn-filewatch] Reloading all projects...", vim.log.levels.INFO)
-  end, { desc = "Force reload all project files" })
+    if action == "status" then
+      M.status()
+    elseif action == "reload" then
+      M.reload_and_resync()
+      vim.notify("[roslyn-filewatch] Reloading projects and resyncing watcher...", vim.log.levels.INFO)
+    else
+      vim.notify("[roslyn-filewatch] Unknown command. Usage: :RoslynFilewatch [status|reload]", vim.log.levels.ERROR)
+    end
+  end, {
+    nargs = "?",
+    desc = "roslyn-filewatch tool (status, reload)",
+    complete = function(_, line)
+      local match = line:match("^%s*RoslynFilewatch%s+(%S*)")
+      local subcmds = { "status", "reload" }
+      if not match then
+        return subcmds
+      end
+      local res = {}
+      for _, cmd in ipairs(subcmds) do
+        if vim.startswith(cmd, match) then
+          table.insert(res, cmd)
+        end
+      end
+      return res
+    end,
+  })
 end
 
 --- Show current watcher status
@@ -51,21 +66,13 @@ function M.status()
   end
 end
 
---- Force resync for all active clients
-function M.resync()
+--- Force full resync and reload for all active clients
+function M.reload_and_resync()
   if watcher and watcher.resync then
-    watcher.resync()
-  else
-    vim.notify("[roslyn-filewatch] Watcher module not available", vim.log.levels.ERROR)
+    pcall(watcher.resync)
   end
-end
-
---- Force reload all Roslyn projects
-function M.reload()
   if watcher and watcher.reload_projects then
-    watcher.reload_projects()
-  else
-    vim.notify("[roslyn-filewatch] Reload not available", vim.log.levels.ERROR)
+    pcall(watcher.reload_projects)
   end
 end
 

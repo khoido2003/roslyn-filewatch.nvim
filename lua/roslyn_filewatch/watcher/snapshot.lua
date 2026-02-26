@@ -67,6 +67,8 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
 
     vim.schedule(function()
       if exit_code ~= 0 and #collected_paths == 0 then
+        -- Only fail completely if fd returned non-zero AND produced NO paths
+        -- (fd often returns 1 for partial permission denied errors while still giving valid output)
         scanning_in_progress[root] = nil
         if callback then
           callback(out_map)

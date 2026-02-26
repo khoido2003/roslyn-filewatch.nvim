@@ -5,6 +5,25 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.3] - 2026-02-26
+
+### Added
+- **Native Watchman Support**: Fully implemented the `watchman` backend using ultra-fast asynchronous polling (`watchman since`). It reliably tracks large projects and supports true native exclusions, drastically reducing Neovim's CPU and memory footprint on Windows, Linux, and macOS without needing Python or complex sockets.
+- **Native fswatch Support**: Implemented `fswatch` as an excellent fallback native backend for macOS and Linux.
+- **Solution-Aware Sub-Watching**: The watcher now natively parses `.sln` and `.slnx` files to strictly limit watching to relevant project directories, avoiding entire-root scans on massive monorepos.
+
+### Changed
+- **Command Unification**: Consolidated `--Status`, `--Resync`, and `--Reload` commands into a single, interactive `:RoslynFilewatch [status|reload]` command with autocomplete.
+- **Health Check Decoupling**: Massively simplified `:checkhealth roslyn_filewatch` output. It now strictly focuses on environment capabilities (Neovim version, libuv, external tool installation), leaving deep watchdog/configuration diagnostics to the `:RoslynFilewatch status` window.
+
+### Fixed
+- **Memory Leaks**: Fixed a critical bug in `watcher.lua` where abandoned async file scans via `fd` were not cancelled upon LSP client disconnect, leading to dangling processes and Lua timer leaks.
+- **Partial `fd` Failures**: Modified `snapshot.lua` to tolerate non-zero process exit codes from `fd` if some valid output was matched (e.g., partial permission denied errors), preventing abandoned initial scans.
+
+### Removed
+- **Aesthetic Bloat**: Removed emojis and stream-of-consciousness comments from the source code and README for a more professional project structure.
+- **Auto-Installer Logic**: Removed the experimental `RoslynFilewatchInstallWatchman` auto-installer. The plugin now prefers explicit, manual user installation for external dependencies.
+
 ## [v0.4.2] - 2026-02-09
 
 ### Fixed

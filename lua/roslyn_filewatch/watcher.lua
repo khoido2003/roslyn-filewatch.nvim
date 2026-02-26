@@ -7,8 +7,8 @@ local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 local notify_mod = require("roslyn_filewatch.watcher.notify")
 local snapshot_mod = require("roslyn_filewatch.watcher.snapshot")
-local rename_mod = require("roslyn_filewatch.watcher.rename")
 local fs_event_mod = require("roslyn_filewatch.watcher.fs_event")
+local backend_mod = require("roslyn_filewatch.watcher.backends.init")
 local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
 local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
 local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
@@ -551,7 +551,12 @@ local function cleanup_client(client_id)
     end
   end)
 
-  safe_close_handle(state.watcher)
+  if state.watcher then
+    if state.watcher.stop then
+      pcall(state.watcher.stop, state.watcher)
+    end
+    safe_close_handle(state.watcher)
+  end
   safe_close_handle(state.poller)
   safe_close_handle(state.watchdog)
   safe_close_handle(state.sln_poll_timer)
@@ -585,6 +590,7 @@ local function cleanup_client(client_id)
 
   if state.root then
     pcall(restore_mod.clear_for_root, state.root)
+    pcall(snapshot_mod.cancel_async_scan, state.root)
   end
 
   pcall(function()
@@ -699,6 +705,10 @@ function M.start(client)
     notify("[PRESET] Applied '" .. applied_preset .. "' preset", vim.log.levels.DEBUG)
   end
 
+  -- Forward-declare so restart_watcher closure captures it as a proper upvalue
+  -- (last_events_proxy is assigned below, after restart_watcher is defined)
+  local last_events_proxy
+
   local function calculate_backoff_delay()
     local initial = config.options.recovery_initial_delay_ms or 300
     local max_delay = config.options.recovery_max_delay_ms or 30000
@@ -743,6 +753,9 @@ function M.start(client)
       notify("Restarting watcher for " .. client.name, vim.log.levels.DEBUG)
 
       if state.watcher then
+        if state.watcher.stop then
+          pcall(state.watcher.stop, state.watcher)
+        end
         safe_close_handle(state.watcher)
         state.watcher = nil
       end
@@ -750,6 +763,45 @@ function M.start(client)
       local use_fs_event = not config.options.force_polling
       if state.fs_event_disabled_until > 0 and os.time() < state.fs_event_disabled_until then
         use_fs_event = false
+      end
+
+      -- Solution-aware sub-watching: determine if we can restrict watched roots
+      local watch_roots = { root }
+      if config.options.solution_aware and state.sln_info and state.sln_info.csproj_files then
+        local csproj_dirs = {}
+        for csproj_path in pairs(state.sln_info.csproj_files) do
+          local dir = csproj_path:match("^(.*)[\\/][^\\/]+$")
+          if dir then
+            csproj_dirs[utils.normalize_path(dir)] = true
+          end
+        end
+
+        local unique_dirs = vim.tbl_keys(csproj_dirs)
+        if #unique_dirs > 0 then
+          -- Filter out directories that are subdirectories of others to optimize
+          table.sort(unique_dirs)
+          local optimized_roots = {}
+          for i, dir in ipairs(unique_dirs) do
+            local is_sub = false
+            for _, parent in ipairs(optimized_roots) do
+              if dir:sub(1, #parent + 1) == parent .. "/" then
+                is_sub = true
+                break
+              end
+            end
+            if not is_sub then
+              table.insert(optimized_roots, dir)
+            end
+          end
+
+          if #optimized_roots < 50 then -- Sanity check: don't pass 1000 roots to watcher cli
+            watch_roots = optimized_roots
+            notify(
+              "Solution-aware: restricting watch to " .. #watch_roots .. " optimized project root(s)",
+              vim.log.levels.DEBUG
+            )
+          end
+        end
       end
 
       local restart_success = false
@@ -765,18 +817,26 @@ function M.start(client)
           end,
         })
 
-        local handle, err = fs_event_mod.start(client, root, snapshots_proxy_inner, {
-          notify = notify,
-          queue_events = queue_events,
-          notify_roslyn_renames = notify_roslyn_renames,
-          restart_watcher = restart_watcher,
-          mark_dirty_dir = mark_dirty_dir,
-        })
-        if handle then
-          state.watcher = handle
-          restart_success = true
+        local backend_api, backend_name = backend_mod.get_best_backend()
+        if backend_api then
+          notify(string.format("Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
+          local handle, err = backend_api.start(client, watch_roots, snapshots_proxy_inner, {
+            notify = notify,
+            queue_events = queue_events,
+            notify_roslyn_renames = notify_roslyn_renames,
+            restart_watcher = restart_watcher,
+            mark_dirty_dir = mark_dirty_dir,
+            last_events = last_events_proxy, -- Important for fswatch/polling
+          })
+
+          if handle then
+            state.watcher = handle
+            restart_success = true
+          else
+            notify("Failed to start backend " .. backend_name .. ": " .. tostring(err), vim.log.levels.WARN)
+          end
         else
-          notify("Failed to recreate fs_event: " .. tostring(err), vim.log.levels.DEBUG)
+          notify("No workable native watcher backend found.", vim.log.levels.ERROR)
         end
       else
         restart_success = true
@@ -823,7 +883,9 @@ function M.start(client)
     end,
   })
 
-  local last_events_proxy = setmetatable({}, {
+  -- Assign the forward-declared last_events_proxy (declared before restart_watcher
+  -- so the closure captures it as a proper local upvalue, not a global)
+  last_events_proxy = setmetatable({}, {
     __index = function(_, k)
       return client_states[k] and client_states[k].last_event
     end,
@@ -839,30 +901,78 @@ function M.start(client)
   local use_fs_event = not force_polling and now >= state.fs_event_disabled_until
 
   if use_fs_event then
-    local handle, start_err = fs_event_mod.start(client, root, snapshots_proxy, {
-      config = config,
-      rename_mod = rename_mod,
-      snapshot_mod = snapshot_mod,
-      notify = notify,
-      notify_roslyn_renames = notify_roslyn_renames,
-      queue_events = queue_events,
-      restart_watcher = restart_watcher,
-      mark_dirty_dir = mark_dirty_dir,
-      mtime_ns = mtime_ns,
-      identity_from_stat = identity_from_stat,
-      same_file_info = same_file_info,
-      normalize_path = normalize_path,
-      last_events = last_events_proxy,
-      rename_window_ms = RENAME_WINDOW_MS,
-    })
-
-    if not handle then
-      notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
-      state.fs_event_disabled_until = os.time() + 5
-      use_fs_event = false
+    -- Try native backends first (watchman → fswatch → fallback), same as restart_watcher
+    local backend_api, backend_name = backend_mod.get_best_backend()
+    if backend_api then
+      notify(string.format("[STARTUP] Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
+      local handle, err = backend_api.start(client, { root }, snapshots_proxy, {
+        notify = notify,
+        queue_events = queue_events,
+        notify_roslyn_renames = notify_roslyn_renames,
+        restart_watcher = restart_watcher,
+        mark_dirty_dir = mark_dirty_dir,
+        last_events = last_events_proxy,
+      })
+      if handle then
+        state.watcher = handle
+        state.last_event = os.time()
+      else
+        notify(
+          "[STARTUP] Failed to start backend " .. backend_name .. ": " .. tostring(err) .. "; falling back to fs_event",
+          vim.log.levels.WARN
+        )
+        -- Fall back to fs_event
+        local fe_handle, start_err = fs_event_mod.start(client, root, snapshots_proxy, {
+          config = config,
+          rename_mod = rename_mod,
+          snapshot_mod = snapshot_mod,
+          notify = notify,
+          notify_roslyn_renames = notify_roslyn_renames,
+          queue_events = queue_events,
+          restart_watcher = restart_watcher,
+          mark_dirty_dir = mark_dirty_dir,
+          mtime_ns = mtime_ns,
+          identity_from_stat = identity_from_stat,
+          same_file_info = same_file_info,
+          normalize_path = normalize_path,
+          last_events = last_events_proxy,
+          rename_window_ms = RENAME_WINDOW_MS,
+        })
+        if not fe_handle then
+          notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
+          state.fs_event_disabled_until = os.time() + 5
+          use_fs_event = false
+        else
+          state.watcher = fe_handle
+          state.last_event = os.time()
+        end
+      end
     else
-      state.watcher = handle
-      state.last_event = os.time()
+      -- No native backend available; use fs_event directly
+      local handle, start_err = fs_event_mod.start(client, root, snapshots_proxy, {
+        config = config,
+        rename_mod = rename_mod,
+        snapshot_mod = snapshot_mod,
+        notify = notify,
+        notify_roslyn_renames = notify_roslyn_renames,
+        queue_events = queue_events,
+        restart_watcher = restart_watcher,
+        mark_dirty_dir = mark_dirty_dir,
+        mtime_ns = mtime_ns,
+        identity_from_stat = identity_from_stat,
+        same_file_info = same_file_info,
+        normalize_path = normalize_path,
+        last_events = last_events_proxy,
+        rename_window_ms = RENAME_WINDOW_MS,
+      })
+      if not handle then
+        notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
+        state.fs_event_disabled_until = os.time() + 5
+        use_fs_event = false
+      else
+        state.watcher = handle
+        state.last_event = os.time()
+      end
     end
   else
     notify("Using poller-only mode for " .. client.name, vim.log.levels.DEBUG)
