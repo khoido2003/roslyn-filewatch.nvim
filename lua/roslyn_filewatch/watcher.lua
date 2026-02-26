@@ -575,6 +575,7 @@ local function cleanup_client(client_id)
   state.poller = nil
   state.watchdog = nil
   state.sln_poll_timer = nil
+  state.backend_name = nil
 
   if state.batch_queue and state.batch_queue.timer then
     safe_close_handle(state.batch_queue.timer)

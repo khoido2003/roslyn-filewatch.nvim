@@ -5,9 +5,6 @@ local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}
 
--- Store active handles
-local active_handles = {}
-
 function M.start(client, roots, snapshots, deps)
   if not roots or #roots == 0 then
     if client.config and client.config.root_dir then
@@ -19,11 +16,9 @@ function M.start(client, roots, snapshots, deps)
 
   -- Build fswatch arguments
   -- -r = recursive
-  -- -t = timestamp
-  -- -x = extended event type
-  -- --format "%p %t %x" -> path timestamp events
+  -- -0 = NUL record separator (robust with spaces in paths)
   -- --exclude = filters
-  local args = { "-r", "-x", "--event=Created", "--event=Updated", "--event=Removed", "--event=Renamed" }
+  local args = { "-r", "-0", "--event=Created", "--event=Updated", "--event=Removed", "--event=Renamed" }
 
   -- Exclude ignored directories
   for _, dir in ipairs(config.options.ignore_dirs or {}) do
@@ -45,6 +40,14 @@ function M.start(client, roots, snapshots, deps)
     args = args,
     stdio = { nil, stdout, stderr },
   }, function(code, signal)
+    if stdout and not stdout:is_closing() then
+      pcall(stdout.read_stop, stdout)
+      pcall(stdout.close, stdout)
+    end
+    if stderr and not stderr:is_closing() then
+      pcall(stderr.read_stop, stderr)
+      pcall(stderr.close, stderr)
+    end
     if handle and not handle:is_closing() then
       handle:close()
     end
@@ -60,7 +63,7 @@ function M.start(client, roots, snapshots, deps)
     return nil, "Failed to spawn fswatch"
   end
 
-  -- Output buffering
+  -- Output buffering (NUL-delimited records)
   local buffer = ""
 
   uv.read_start(stdout, function(err, data)
@@ -70,20 +73,15 @@ function M.start(client, roots, snapshots, deps)
     if data then
       buffer = buffer .. data
       while true do
-        local line_end = buffer:find("\n")
-        if not line_end then
+        local rec_end = buffer:find("\0", 1, true)
+        if not rec_end then
           break
         end
-        local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
-        buffer = buffer:sub(line_end + 1)
+        local record = buffer:sub(1, rec_end - 1)
+        buffer = buffer:sub(rec_end + 1)
 
-        if #line > 0 then
-          -- Parsing line logic
-          -- Just assuming format: /path/to/file EventType
-          local path = string.match(line, "^(.-)%s+[A-Za-z]+$")
-          if not path then
-            path = line
-          end -- Fallback if no extended flags
+        if #record > 0 then
+          local path = record
 
           path = utils.normalize_path(path)
 
@@ -107,7 +105,20 @@ function M.start(client, roots, snapshots, deps)
   end)
 
   uv.read_start(stderr, function(err, data)
-    -- just sink it to prevent blocking
+    if err then
+      if stderr and not stderr:is_closing() then
+        pcall(stderr.read_stop, stderr)
+        pcall(stderr.close, stderr)
+      end
+      return
+    end
+    if not data then
+      if stderr and not stderr:is_closing() then
+        pcall(stderr.read_stop, stderr)
+        pcall(stderr.close, stderr)
+      end
+      return
+    end
   end)
 
   local watcher_obj = {
@@ -116,14 +127,16 @@ function M.start(client, roots, snapshots, deps)
     _stderr = stderr,
     stop = function(self)
       if self._handle and not self._handle:is_closing() then
-        pcall(self._handle.kill, self._handle, 9)
-        pcall(self._handle.close, self._handle)
+        pcall(function() self._handle:kill(9) end)
+        pcall(function() self._handle:close() end)
       end
       if self._stdout and not self._stdout:is_closing() then
-        pcall(self._stdout.close, self._stdout)
+        pcall(function() self._stdout:read_stop() end)
+        pcall(function() self._stdout:close() end)
       end
       if self._stderr and not self._stderr:is_closing() then
-        pcall(self._stderr.close, self._stderr)
+        pcall(function() self._stderr:read_stop() end)
+        pcall(function() self._stderr:close() end)
       end
     end,
   }
