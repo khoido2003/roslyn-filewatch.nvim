@@ -92,13 +92,26 @@ local function check_platform()
   end
 end
 
---- Check external tools
+--- Check external tools and watcher backends
 local function check_external_tools()
   if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
     ok("fd found (accelerated scanning enabled)")
   else
     info("fd not found (using standard Lua scanning)")
     info("Install 'sharkdp/fd' for significantly faster startup on huge projects")
+  end
+
+  local backend_mod_ok, backend_mod = pcall(require, "roslyn_filewatch.watcher.backends.init")
+  if backend_mod_ok and backend_mod.get_best_backend then
+    local _, best_name = backend_mod.get_best_backend()
+    if best_name == "watchman" then
+      ok("Native Watcher Backend: watchman (Best Performance, Native Ignores)")
+    elseif best_name == "fswatch" then
+      ok("Native Watcher Backend: fswatch (Good Performance, Native Ignores)")
+    else
+      warn("Native Watcher Backend: fallback to fs_event/fs_poll")
+      info("For the best performance on large monolithic repositories, install watchman or fswatch.")
+    end
   end
 end
 
@@ -136,165 +149,6 @@ local function check_roslyn_clients()
   end
 end
 
---- Check configuration
-local function check_config()
-  local config = require("roslyn_filewatch.config")
-  local opts = config.options
-
-  info("Batching: " .. (opts.batching and opts.batching.enabled and "enabled" or "disabled"))
-  if opts.batching and opts.batching.enabled then
-    info("  Interval: " .. (opts.batching.interval or 300) .. "ms")
-  end
-
-  info("Poll interval: " .. (opts.poll_interval or 3000) .. "ms")
-  info("Watchdog idle timeout: " .. (opts.watchdog_idle or 60) .. "s")
-  info("Rename detection window: " .. (opts.rename_detection_ms or 300) .. "ms")
-
-  if opts.force_polling then
-    warn("force_polling is enabled - native file watching is disabled")
-  else
-    ok("Native file watching enabled (with polling fallback)")
-  end
-
-  -- Solution-aware watching status
-  if opts.solution_aware ~= false then
-    ok("Solution-aware watching enabled (parses .sln/.slnx/.slnf for project scope)")
-  else
-    info("Solution-aware watching disabled (scanning entire root)")
-  end
-
-  -- Gitignore support status
-  if opts.respect_gitignore ~= false then
-    ok("Gitignore support enabled (respects .gitignore patterns)")
-  else
-    info("Gitignore support disabled")
-  end
-
-  info("Ignored directories: " .. #(opts.ignore_dirs or {}) .. " configured")
-  info("Watch extensions: " .. #(opts.watch_extensions or {}) .. " configured")
-
-  local log_level = opts.log_level or 3
-  local level_names = { [0] = "TRACE", [1] = "DEBUG", [2] = "INFO", [3] = "WARN", [4] = "ERROR" }
-  info("Log level: " .. (level_names[log_level] or tostring(log_level)))
-end
-
---- Check recovery and watchdog status
-local function check_recovery()
-  local config = require("roslyn_filewatch.config")
-  local client_names = config.options.client_names or {}
-
-  -- Try to get watchdog recovery states
-  local watchdog_ok, watchdog_mod = pcall(require, "roslyn_filewatch.watcher.watchdog")
-  if not watchdog_ok or not watchdog_mod then
-    info("Watchdog module not loaded (no active watchers)")
-    return
-  end
-
-  local recovery_states = watchdog_mod.get_all_states and watchdog_mod.get_all_states() or {}
-  local clients = vim.lsp.get_clients()
-
-  local has_active_clients = false
-  for _, client in ipairs(clients) do
-    if vim.tbl_contains(client_names, client.name) then
-      has_active_clients = true
-      local state = recovery_states[client.id]
-
-      info("Client: " .. client.name .. " (id: " .. client.id .. ")")
-
-      if state then
-        -- Health status
-        local status = state.health_status or "unknown"
-        if status == "healthy" then
-          ok("  Status: " .. status)
-        elseif status == "recovering" then
-          warn("  Status: " .. status)
-        elseif status == "degraded" then
-          warn("  Status: " .. status .. " (snapshot may be stale)")
-        else
-          info("  Status: " .. status)
-        end
-
-        -- Consecutive failures
-        local failures = state.consecutive_failures or 0
-        local max_retries = config.options.recovery_max_retries or 5
-        if failures == 0 then
-          ok("  Consecutive failures: 0")
-        elseif failures < max_retries then
-          warn("  Consecutive failures: " .. failures .. "/" .. max_retries)
-        else
-          error_fn("  Consecutive failures: " .. failures .. "/" .. max_retries .. " (escalation threshold)")
-        end
-
-        -- Current backoff
-        local backoff = state.current_backoff_ms or (config.options.recovery_initial_delay_ms or 300)
-        local max_backoff = config.options.recovery_max_delay_ms or 30000
-        if backoff <= (config.options.recovery_initial_delay_ms or 300) then
-          info("  Backoff delay: " .. backoff .. "ms (initial)")
-        elseif backoff >= max_backoff then
-          warn("  Backoff delay: " .. backoff .. "ms (at maximum)")
-        else
-          info("  Backoff delay: " .. backoff .. "ms")
-        end
-
-        -- Stale detections
-        local stale = state.stale_detections or 0
-        if stale > 0 then
-          warn("  Stale snapshot detections: " .. stale)
-        end
-
-        -- Last restart
-        local last_restart = state.last_restart_time or 0
-        if last_restart > 0 then
-          local ago = os.time() - last_restart
-          info("  Last restart: " .. ago .. "s ago")
-        end
-
-        -- Last deep check
-        local last_deep = state.last_deep_check or 0
-        if last_deep > 0 then
-          local deep_ago = os.time() - last_deep
-          info("  Last deep check: " .. deep_ago .. "s ago")
-        end
-      else
-        info("  Recovery state: not initialized (watcher may be starting)")
-      end
-    end
-  end
-
-  if not has_active_clients then
-    info("No active Roslyn clients. Recovery status will appear when a C# file is opened.")
-  end
-
-  -- Notification stats
-  local notify_ok, notify_mod = pcall(require, "roslyn_filewatch.watcher.notify")
-  if notify_ok and notify_mod and notify_mod.get_stats then
-    local stats = notify_mod.get_stats()
-    info("")
-    info("Notification Statistics:")
-    info("  Total notifications sent: " .. (stats.total_notifications or 0))
-    if stats.last_success_time and stats.last_success_time > 0 then
-      local ago = os.time() - stats.last_success_time
-      if ago < 60 then
-        ok("  Last successful: " .. ago .. "s ago")
-      else
-        info("  Last successful: " .. ago .. "s ago")
-      end
-    else
-      info("  Last successful: never")
-    end
-  end
-
-  -- Configuration summary
-  info("")
-  info("Recovery Configuration:")
-  info("  Verify enabled: " .. tostring(config.options.recovery_verify_enabled ~= false))
-  info("  Max retries: " .. (config.options.recovery_max_retries or 5))
-  info("  Initial delay: " .. (config.options.recovery_initial_delay_ms or 300) .. "ms")
-  info("  Max delay: " .. (config.options.recovery_max_delay_ms or 30000) .. "ms")
-  info("  Fast check interval: " .. (config.options.watchdog_fast_interval_ms or 5000) .. "ms")
-  info("  Deep check interval: " .. (config.options.watchdog_deep_interval_ms or 30000) .. "ms")
-end
-
 --- Main health check function
 function M.check()
   start("roslyn-filewatch.nvim")
@@ -308,17 +162,8 @@ function M.check()
   start("Platform Detection")
   check_platform()
 
-  start("Roslyn LSP Clients")
-  check_roslyn_clients()
-
-  start("External Tools")
+  start("External Tools & Native Backends")
   check_external_tools()
-
-  start("Configuration")
-  check_config()
-
-  start("Recovery & Watchdog Status")
-  check_recovery()
 end
 
 return M
