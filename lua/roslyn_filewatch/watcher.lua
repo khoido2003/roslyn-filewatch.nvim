@@ -139,6 +139,16 @@ pcall(function()
         end
       end,
     })
+    local backend_names_proxy = setmetatable({}, {
+      __index = function(_, k)
+        return client_states[k] and client_states[k].backend_name
+      end,
+      __newindex = function(_, k, v)
+        if client_states[k] then
+          client_states[k].backend_name = v
+        end
+      end,
+    })
     local dirty_dirs_proxy = setmetatable({}, {
       __index = function(_, k)
         return client_states[k] and client_states[k].dirty_dirs
@@ -159,6 +169,7 @@ pcall(function()
       last_events = last_events_proxy,
       sln_infos = sln_info_proxy,
       dirty_dirs = dirty_dirs_proxy,
+      backend_names = backend_names_proxy,
     })
   end
 end)
@@ -564,6 +575,7 @@ local function cleanup_client(client_id)
   state.poller = nil
   state.watchdog = nil
   state.sln_poll_timer = nil
+  state.backend_name = nil
 
   if state.batch_queue and state.batch_queue.timer then
     safe_close_handle(state.batch_queue.timer)
@@ -831,6 +843,7 @@ function M.start(client)
 
           if handle then
             state.watcher = handle
+            state.backend_name = backend_name
             restart_success = true
           else
             notify("Failed to start backend " .. backend_name .. ": " .. tostring(err), vim.log.levels.WARN)
@@ -839,6 +852,7 @@ function M.start(client)
           notify("No workable native watcher backend found.", vim.log.levels.ERROR)
         end
       else
+        state.backend_name = "polling"
         restart_success = true
       end
 
@@ -916,6 +930,7 @@ function M.start(client)
       if handle then
         state.watcher = handle
         state.last_event = os.time()
+        state.backend_name = backend_name
       else
         notify(
           "[STARTUP] Failed to start backend " .. backend_name .. ": " .. tostring(err) .. "; falling back to fs_event",
@@ -945,6 +960,7 @@ function M.start(client)
         else
           state.watcher = fe_handle
           state.last_event = os.time()
+          state.backend_name = "fs_event"
         end
       end
     else
@@ -972,11 +988,13 @@ function M.start(client)
       else
         state.watcher = handle
         state.last_event = os.time()
+        state.backend_name = "fs_event"
       end
     end
   else
     notify("Using poller-only mode for " .. client.name, vim.log.levels.DEBUG)
     state.last_event = os.time()
+    state.backend_name = "polling"
   end
 
   state.needs_full_scan = true

@@ -32,6 +32,7 @@ local _watchdogs = nil
 local _snapshots = nil
 local _last_events = nil
 local _sln_infos = nil
+local _backend_names = nil
 
 --- Register watcher state references for status tracking
 ---@param refs table References to watcher internal state tables
@@ -42,6 +43,7 @@ function M.register_refs(refs)
   _snapshots = refs.snapshots
   _last_events = refs.last_events
   _sln_infos = refs.sln_infos
+  _backend_names = refs.backend_names
 end
 
 --- Get status for all watched clients
@@ -74,6 +76,7 @@ function M.get_status()
         last_event = _last_events and _last_events[client.id] or nil,
         sln_file = nil,
         project_dirs = nil,
+        backend = (_backend_names and _backend_names[client.id]) or "unknown",
       }
 
       -- Count files in snapshot
@@ -204,6 +207,10 @@ function M.show()
         { " (id: " .. client.id .. ")", "Comment" },
       })
       echo("  Root: " .. utils.normalize_path(client.root), "Normal")
+      echo_multi({
+        { "  Backend: ", "Normal" },
+        { client.backend or "unknown", "Identifier" },
+      })
 
       -- Watch mode
       local mode = "none"
