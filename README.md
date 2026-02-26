@@ -57,8 +57,10 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 
 ## Installation
 
-### Native Watcher Backend (Important)
-For the best performance on large repositories (like Unity games or monorepos with heavy `node_modules`), you should install a native watcher backend to handle exclusions natively before they reach Neovim.
+### Native Watcher Backend
+
+> [!IMPORTANT]
+> For the best performance on large repositories (like Unity games or monorepos with heavy `node_modules`), you **must** install a native watcher backend! Native backends (`watchman` or `fswatch`) process ignore-filters natively before file events ever reach Neovim. Without them, your editor may freeze when checking out large git branches or rebuilding projects.
 
 You can install them manually via your terminal:
 

@@ -116,7 +116,8 @@ function M.start(client, roots, snapshots, deps)
     _stderr = stderr,
     stop = function(self)
       if self._handle and not self._handle:is_closing() then
-        pcall(self._handle.kill, self._handle, "SIGTERM")
+        pcall(self._handle.kill, self._handle, 9)
+        pcall(self._handle.close, self._handle)
       end
       if self._stdout and not self._stdout:is_closing() then
         pcall(self._stdout.close, self._stdout)
