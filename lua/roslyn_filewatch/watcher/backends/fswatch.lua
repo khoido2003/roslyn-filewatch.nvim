@@ -127,16 +127,28 @@ function M.start(client, roots, snapshots, deps)
     _stderr = stderr,
     stop = function(self)
       if self._handle and not self._handle:is_closing() then
-        pcall(function() self._handle:kill(9) end)
-        pcall(function() self._handle:close() end)
+        pcall(function()
+          self._handle:kill(9)
+        end)
+        pcall(function()
+          self._handle:close()
+        end)
       end
       if self._stdout and not self._stdout:is_closing() then
-        pcall(function() self._stdout:read_stop() end)
-        pcall(function() self._stdout:close() end)
+        pcall(function()
+          self._stdout:read_stop()
+        end)
+        pcall(function()
+          self._stdout:close()
+        end)
       end
       if self._stderr and not self._stderr:is_closing() then
-        pcall(function() self._stderr:read_stop() end)
-        pcall(function() self._stderr:close() end)
+        pcall(function()
+          self._stderr:read_stop()
+        end)
+        pcall(function()
+          self._stderr:close()
+        end)
       end
     end,
   }
