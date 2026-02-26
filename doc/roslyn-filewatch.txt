@@ -10,7 +10,7 @@ Table of Contents                         *roslyn-filewatch-table-of-contents*
   - 📦 Installation|roslyn-filewatch-roslyn-filewatch.nvim-📦-installation|
   - 📘 User Manual |roslyn-filewatch-roslyn-filewatch.nvim-📘-user-manual|
   - 🧭 Command Reference|roslyn-filewatch-roslyn-filewatch.nvim-🧭-command-reference|
-  - � Maintainer Guide|roslyn-filewatch-roslyn-filewatch.nvim-�-maintainer-guide|
+  - 🔧 Maintainer Guide|roslyn-filewatch-roslyn-filewatch.nvim-🔧-maintainer-guide|
   - ⚠️ Known Limitations|roslyn-filewatch-roslyn-filewatch.nvim-⚠️-known-limitations|
   - 📜 License         |roslyn-filewatch-roslyn-filewatch.nvim-📜-license|
   - ❤️ Acknowledgements|roslyn-filewatch-roslyn-filewatch.nvim-❤️-acknowledgements|
@@ -271,7 +271,7 @@ selection menu will appear.
                                   status.
   -------------------------------------------------------------------------
 
-� MAINTAINER GUIDE*roslyn-filewatch-roslyn-filewatch.nvim-�-maintainer-guide*
+🔧 MAINTAINER GUIDE*roslyn-filewatch-roslyn-filewatch.nvim-🔧-maintainer-guide*
 
 For developers contributing to `roslyn-filewatch.nvim`, this section details
 the architecture.

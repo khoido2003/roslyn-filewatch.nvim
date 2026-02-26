@@ -8,14 +8,32 @@ local M = {}
 --- Watchman backend using 'watchman-make' or native 'watchman' CLI
 --- We use the watchman JSON interface over CLI since it's most robust
 function M.start(client, roots, snapshots, deps)
-  local root = roots[1] or (client.config and client.config.root_dir)
+  -- Validate roots list; fall back to client.config.root_dir only when roots is empty
+  if not roots or #roots == 0 then
+    local fallback = client.config and client.config.root_dir
+    if not fallback then
+      return nil, "No root directory provided"
+    end
+    roots = { fallback }
+  end
+  -- Watchman backend currently only supports a single root; reject multiple roots early
+  if #roots > 1 then
+    return nil, "Watchman backend currently supports a single root (" .. #roots .. " provided)"
+  end
+  local root = roots[1]
   if not root then
     return nil, "No root directory provided"
   end
   root = utils.normalize_path(root)
 
+  -- Allocate the poll timer before constructing the object so failures are caught
+  local timer = uv.new_timer()
+  if not timer then
+    return nil, "Failed to allocate watchman poll timer"
+  end
+
   local obj = {
-    _timer = uv.new_timer(),
+    _timer = timer,
     _clock = nil,
     _running = true,
   }
