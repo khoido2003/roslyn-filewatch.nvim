@@ -4,16 +4,16 @@
 Table of Contents                         *roslyn-filewatch-table-of-contents*
 
 1. roslyn-filewatch.nvim              |roslyn-filewatch-roslyn-filewatch.nvim|
-  - ⚡ Why?                 |roslyn-filewatch-roslyn-filewatch.nvim-⚡-why?|
-  - ✨ Features         |roslyn-filewatch-roslyn-filewatch.nvim-✨-features|
-  - 🔌 Requirements|roslyn-filewatch-roslyn-filewatch.nvim-🔌-requirements|
-  - 📦 Installation|roslyn-filewatch-roslyn-filewatch.nvim-📦-installation|
-  - 📘 User Manual |roslyn-filewatch-roslyn-filewatch.nvim-📘-user-manual|
-  - 🧭 Command Reference|roslyn-filewatch-roslyn-filewatch.nvim-🧭-command-reference|
-  - 🔧 Maintainer Guide|roslyn-filewatch-roslyn-filewatch.nvim-🔧-maintainer-guide|
-  - ⚠️ Known Limitations|roslyn-filewatch-roslyn-filewatch.nvim-⚠️-known-limitations|
-  - 📜 License         |roslyn-filewatch-roslyn-filewatch.nvim-📜-license|
-  - ❤️ Acknowledgements|roslyn-filewatch-roslyn-filewatch.nvim-❤️-acknowledgements|
+  - Why?                         |roslyn-filewatch-roslyn-filewatch.nvim-why?|
+  - Features                 |roslyn-filewatch-roslyn-filewatch.nvim-features|
+  - Requirements         |roslyn-filewatch-roslyn-filewatch.nvim-requirements|
+  - Installation         |roslyn-filewatch-roslyn-filewatch.nvim-installation|
+  - User Manual           |roslyn-filewatch-roslyn-filewatch.nvim-user-manual|
+  - Command Reference|roslyn-filewatch-roslyn-filewatch.nvim-command-reference|
+  - Maintainer Guide |roslyn-filewatch-roslyn-filewatch.nvim-maintainer-guide|
+  - Known Limitations|roslyn-filewatch-roslyn-filewatch.nvim-known-limitations|
+  - License                   |roslyn-filewatch-roslyn-filewatch.nvim-license|
+  - Acknowledgements |roslyn-filewatch-roslyn-filewatch.nvim-acknowledgements|
 
 ==============================================================================
 1. roslyn-filewatch.nvim              *roslyn-filewatch-roslyn-filewatch.nvim*
@@ -25,13 +25,13 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 ------------------------------------------------------------------------------
 
-  [!WARNING] **v0.4.0 Breaking Changes**: This release removes all
+  [!WARNING] **v0.4.x Breaking Changes**: This release removes all
   non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on
   performance. If you need these features, please pin to `v0.3.9`. See
   |roslyn-filewatch-migration-guide|.
 ------------------------------------------------------------------------------
 
-⚡ WHY?                     *roslyn-filewatch-roslyn-filewatch.nvim-⚡-why?*
+WHY?                             *roslyn-filewatch-roslyn-filewatch.nvim-why?*
 
 Roslyn does not watch your project files by default in Neovim/Linux/Mac.
 Without this, you often need to `:edit!` or restart the LSP to make Roslyn
@@ -42,26 +42,26 @@ to make C# development in Neovim feel like a full IDE.
 
 ------------------------------------------------------------------------------
 
-✨ FEATURES             *roslyn-filewatch-roslyn-filewatch.nvim-✨-features*
+FEATURES                     *roslyn-filewatch-roslyn-filewatch.nvim-features*
 
 
-🗂️ ROBUST FILE WATCHING ~
+ROBUST FILE WATCHING ~
 
-- **Cross-Platform**: Uses `uv.fs_event` (native) with `uv.fs_poll` (fallback) for reliability on Windows/Linux/macOS.
+- **Cross-Platform**: Uses Native Watchers (`watchman`, `fswatch`) with `uv.fs_event` fallback for reliability on Windows/Linux/macOS.
 - **Smart Detection**: Handles create, delete, change, and **detects renames** (merging delete+create pairs).
 - **Optimization**: Batches events, throttles diagnostics, and avoids watching ignored files (ignores `.git`, `bin`, `obj`, etc.).
 - **Solution-Aware**: Parses `.sln`, `.slnx`, or `.slnf` files to strictly limit watching to relevant project folders.
 - **csproj-only Support**: Fully supports projects without solution files - automatically detects and watches all `.csproj` files recursively, ensuring new files are immediately recognized by the LSP.
 
 
-🚀 PERFORMANCE & SMART LOADING ~
+PERFORMANCE & SMART LOADING ~
 
 - **Deferred Loading**: Delays project loading until you actually open a C# file to speed up startup for large solutions.
 - **Project Warm-up**: Sends initialization notifications to get Roslyn ready without blocking the UI.
 - **Diagnostic Throttling**: Prevents UI lag by smoothing out diagnostic updates during heavy operations (like git checkout).
 
 
-🎮 GAME ENGINE SUPPORT ~
+GAME ENGINE SUPPORT ~
 
 First-class support for **C# Game Development**. Automatically detects the
 engine and applies optimized presets (scan intervals, ignore patterns): -
@@ -71,16 +71,67 @@ engine and applies optimized presets (scan intervals, ignore patterns): -
 
 ------------------------------------------------------------------------------
 
-🔌 REQUIREMENTS   *roslyn-filewatch-roslyn-filewatch.nvim-🔌-requirements*
+REQUIREMENTS             *roslyn-filewatch-roslyn-filewatch.nvim-requirements*
 
 - **Neovim 0.10+** (Required for `vim.fs` and modern Lua APIs)
 - An existing Roslyn LSP client, such as:
     - roslyn.nvim <https://github.com/seblyng/roslyn.nvim> (**Highly recommended**)
     - nvim-lspconfig (roslyn_ls) <https://github.com/neovim/nvim-lspconfig/blob/master/doc/configs.md#roslyn_ls>
+- **(Highly Recommended)** A native watcher backend for large projects:
+    - **Watchman** (Windows/macOS/Linux): Fastest, drastically reduces memory usage on huge monorepos.
+    - **fswatch** (macOS/Linux): Excellent fallback for Unix systems.
 
 ------------------------------------------------------------------------------
 
-📦 INSTALLATION   *roslyn-filewatch-roslyn-filewatch.nvim-📦-installation*
+INSTALLATION             *roslyn-filewatch-roslyn-filewatch.nvim-installation*
+
+
+NATIVE WATCHER BACKEND ~
+
+
+  [!IMPORTANT] For the best performance on large repositories (like Unity games
+  or monorepos with heavy `node_modules`), you **must** install a native watcher
+  backend! Native backends (`watchman` or `fswatch`) process ignore-filters
+  natively before file events ever reach Neovim. Without them, your editor may
+  freeze when checking out large git branches or rebuilding projects.
+You can install them manually via your terminal:
+
+**macOS:**
+
+>bash
+    # Using Homebrew (Recommended)
+    brew install watchman
+    # OR
+    brew install fswatch
+<
+
+**Windows:**
+
+>powershell
+    # Using Chocolatey
+    choco install watchman
+    
+    # Using Scoop
+    scoop install watchman
+<
+
+**Linux:**
+
+>bash
+    # Ubuntu / Debian (you may need to build watchman from source, or use fswatch)
+    sudo apt install fswatch
+    
+    # Arch Linux
+    sudo pacman -S watchman
+    # OR
+    sudo pacman -S fswatch
+    
+    # Fedora
+    sudo dnf install fswatch
+<
+
+You can verify which backend is active by running `:checkhealth
+roslyn_filewatch`.
 
 
 MIGRATION GUIDE (V0.4.X) ~
@@ -107,12 +158,12 @@ removed to minimize bloat and maximize performance.
   Game Detection    Complex Context   Presets Only       Presets are
                                       (Performance)      auto-applied
   ------------------------------------------------------------------------
-**Recommendation:** * **Stay on v0.4.x** if you want the fastest, most reliable
-Roslyn experience. * **Pin to v0.3.9** if you absolutely rely on the built-in
-CLI/Explorer commands:
+**Recommendation:** * **Stay on v0.4.x** if you want the fastest and newest
+Roslyn experience. * **Pin to v0.3.x** if you absolutely rely on the built-in
+CLI/Explorer commands and stable releases:
 
 >lua
-    { "khoido2003/roslyn-filewatch.nvim", tag = "v0.3.9" }
+    { "khoido2003/roslyn-filewatch.nvim", branch = "v0.3.x" }
 <
 
 
@@ -141,7 +192,7 @@ PACKER.NVIM ~
 
 ------------------------------------------------------------------------------
 
-📘 USER MANUAL     *roslyn-filewatch-roslyn-filewatch.nvim-📘-user-manual*
+USER MANUAL               *roslyn-filewatch-roslyn-filewatch.nvim-user-manual*
 
 This section covers how to configure and use the plugin effectively in your
 daily workflow.
@@ -207,6 +258,10 @@ The following settings are commonly adjusted:
         interval = 300, -- Window to coalesce events (ms)
       },
       
+      -- Max events to process per chunk (prevent UI freeze)
+      -- Default: 1000 (Unity), 100 (others)
+      max_events_per_batch = 1000,
+      
       -- Debounce time for processing file system events
       processing_debounce_ms = 150,
       
@@ -248,92 +303,83 @@ WORKING WITH UNITY
 
 ------------------------------------------------------------------------------
 
-🧭 COMMAND REFERENCE*roslyn-filewatch-roslyn-filewatch.nvim-🧭-command-reference*
+COMMAND REFERENCE   *roslyn-filewatch-roslyn-filewatch.nvim-command-reference*
 
 Most commands are **interactive**—if you run them without arguments, a
 selection menu will appear.
 
 
-📂 CORE (ALWAYS AVAILABLE) ~
+CORE (ALWAYS AVAILABLE) ~
 
   -------------------------------------------------------------------------
   Command                         Description
   ------------------------------- -----------------------------------------
-  :RoslynStatus                   Debug Tool: Shows active watcher status,
+  :RoslynFilewatch status         Debug Tool: Shows active watcher status,
                                   tracked projects, and health.
 
-  :RoslynFilewatchResync          Recovery: Forces a full snapshot resync.
+  :RoslynFilewatch reload         Recovery: Forces a full file resync and
+                                  tells the LSP to reload all projects.
 
-  :RoslynReloadProjects           Emergency Fix: Forces Roslyn to reload
-                                  all project files.
+  :checkhealth roslyn_filewatch   Shows basic environment diagnostics.
 
-  :checkhealth roslyn_filewatch   Shows detailed health and recovery
-                                  status.
+  —                               —
   -------------------------------------------------------------------------
 
-🔧 MAINTAINER GUIDE*roslyn-filewatch-roslyn-filewatch.nvim-🔧-maintainer-guide*
+MAINTAINER GUIDE     *roslyn-filewatch-roslyn-filewatch.nvim-maintainer-guide*
 
 For developers contributing to `roslyn-filewatch.nvim`, this section details
 the architecture.
 
 
-🗺️ ARCHITECTURE OVERVIEW ~
+ARCHITECTURE OVERVIEW ~
 
 The plugin follows a **Unidirectional Data Flow** pattern to maintain
-synchronization between the File System and Roslyn with minimal latency.
+synchronization between the File System and Roslyn with minimal latency and
+memory usage.
 
 >mermaid
     flowchart TD
         FS[File System] -->|Events| FS_Event[fs_event.lua]
-        FS_Event -->|Debounce| Buffer[Event Buffer]
-        Buffer -->|Flush| Watcher[watcher.lua]
-        Watcher -->|Scan| Snapshot[snapshot.lua]
+        FS_Event -->|Burst Detection| Regen[regen_detector.lua]
+        Regen -->|Filter/Debounce| Buffer[Event Buffer]
+        Buffer -->|Chunked Flush| Watcher[watcher.lua]
+        Watcher -->|Process Queue| Snapshot[snapshot.lua]
         Snapshot -->|Diff| Changes[Detected Changes]
         Changes -->|Heuristic| Rename[rename.lua]
-        Rename -->|Notification| Notify[notify.lua]
+        Rename -->|Batch Notify| Notify[notify.lua]
         Notify -->|LSP JSON| Roslyn[Roslyn LSP]
 <
 
 
 CORE COMPONENTS
 
-- **watcher.lua**: The orchestrator. Manages the lifecycle of `uv.fs_event` handles, `uv.fs_poll` fallbacks, and the **Self-Healing Watchdog** that restarts frozen listeners.
-- **fs_event.lua**: Handles low-level libuv events. Implements **Dynamic Debounce** (switching between 50ms and 300ms+ latency based on event pressure).
-- **snapshot.lua**: The source of truth. Maintains an in-memory mirror of the filesystem (`path -> {mtime, size, inode}`). Uses **parallelized fs_stat** batches for high-performance scanning of large repos.
-- **sln_parser.lua**: Async parser for `.sln`, `.slnx`, and `.slnf` files. Determines the "Watch Scope" to strictly ignore unrelated files.
-- **notify.lua**: Handles LSP communication, batching `workspace/didChangeWatchedFiles` notifications to prevent flooding.
-- **restore.lua**: Manages `dotnet restore` execution sequence to prevent "Thundering Herd" issues during massive file changes.
+- **watcher.lua**: The orchestrator. Manages the lifecycle of `uv.fs_event` handles and the **Self-Healing Watchdog** that restarts frozen listeners. Implements **Chunked Processing** to handle thousands of events without freezing the UI.
+- **fs_event.lua**: Handles low-level libuv events. Implements **Dynamic Debounce** and feeds events into the regeneration detector.
+- **regen_detector.lua**: **(New in v0.4.3)** Detects massive file operations (like Unity Asset re-imports or `git checkout`). It automatically switches the watcher to "Low-Overhead Mode" to prevent memory allocation bombs, reducing GC pressure by 99% during bursts.
+- **snapshot.lua**: The source of truth. Maintains an in-memory mirror of the filesystem using **parallelized fs_stat**.
+- **notify.lua**: Handles LSP communication with **Global Deduplication**. Merges redundant `project/open` requests and batches file changes.
+- **restore.lua**: Manages `dotnet restore` execution sequence. Uses a **Sequential Queue** to ensure only one restore process runs at a time, preventing system-wide OOM.
 
 
-⚙️ THE WATCH CYCLE ~
+THE WATCH CYCLE ~
 
 **1. Startup & Initialization** * **Async Parsing**: On `LspAttach`, the
-watcher parses the solution file asynchronously to find project roots without
-blocking the UI. * **Parallel Hydration**: It performs a **parallel full scan**
-(utilizing `fd` if available, or parallel `fs_stat`) to build the initial
-in-memory snapshot. * **Notification**: Sends the first `project/open` to wake
-up Roslyn.
+watcher parses solution files asynchronously. * **Zero-Block Scan**: Performs a
+background scan to build the initial snapshot. The UI remains fully responsive.
 
-**2. Event Detection** * **Trigger**: `libuv` signals a file change. *
-**Dynamic Debounce**: * **Single File**: Processed in **~50ms** (Instant feel).
-* **Batch (Git/Unity)**: If event density is high, the timer automatically
-extends to **~300ms** (or configured interval) to coalesce changes. *
-**Resilience**: If the watcher freezes or errors, the **Watchdog** detects the
-stall and seamlessly restarts the handle with exponential backoff.
+**2. Event Detection & Optimization** * **Burst Handling**: If 10,000 files
+change (Unity Regen), `regen_detector` kicks in, disabling expensive per-file
+tracking and only marking dirty directories. * **Chunked Processing**: Events
+are processed in chunks of 200-1000 (configurable) with 10ms yields to the main
+loop, ensuring Neovim never freezes.
 
-**3. Diffing & Heuristics** * **Partial Scan**: Only the affected directories
-are rescanned to minimize I/O. * **Diff Logic**: Compares New Snapshot vs Old
-Snapshot to detect `Created`, `Deleted`, or `Changed` (Mtime/Size) events. *
-**Rename Detection**: * A `Delete` and `Create` occurring in the same batch are
-analyzed. * If `inode` matches (or `size` + `basename` heuristic for poor
-filesystems), it is promoted to a **Rename** event.
-
-**4. Synchronization** * **LSP Protocol**: Events are converted to standard
-`FileEvent` objects. * **Dispatch**: Sent to Roslyn via
-`workspace/didChangeWatchedFiles` or `workspace/didRenameFiles`.
+**3. Synchronization** * **Changes**: Detected changes are sent to Roslyn via
+`workspace/didChangeWatchedFiles`. * **Smart Restore**: If a `.csproj` is
+touched, a restore is queued. If 50 projects change, they are restored one by
+one.
 
 
-❓ TROUBLESHOOTING & DEBUGGING ~
+TROUBLESHOOTING & DEBUGGING ~
 
 **“The watcher is not watching files”** 1. Turn on debug logs: `setup({
 log_level = vim.log.levels.DEBUG })`. 2. Run `:messages`. 3. Check
@@ -346,7 +392,7 @@ Ensure `ignore_dirs` includes your build artifacts (`bin`, `obj`).
 
 ------------------------------------------------------------------------------
 
-⚠️ KNOWN LIMITATIONS*roslyn-filewatch-roslyn-filewatch.nvim-⚠️-known-limitations*
+KNOWN LIMITATIONS   *roslyn-filewatch-roslyn-filewatch.nvim-known-limitations*
 
 1. **Massive Repositories (10k+ files)**- **Issue**: Initial scan might cause a brief CPU spike.
 - **Workaround**: `deferred_loading = true` is enabled by default to delay parsing until work begins.
@@ -378,15 +424,15 @@ Ensure `ignore_dirs` includes your build artifacts (`bin`, `obj`).
 
 ------------------------------------------------------------------------------
 
-📜 LICENSE             *roslyn-filewatch-roslyn-filewatch.nvim-📜-license*
+LICENSE                       *roslyn-filewatch-roslyn-filewatch.nvim-license*
 
 MIT License.
 
 
-❤️ ACKNOWLEDGEMENTS*roslyn-filewatch-roslyn-filewatch.nvim-❤️-acknowledgements*
+ACKNOWLEDGEMENTS     *roslyn-filewatch-roslyn-filewatch.nvim-acknowledgements*
 
 - Inspired by the pain of using Roslyn in Neovim without file watchers 😅
-- Thanks to Neovim’s `vim.uv` for making cross-platform file watching possible.
+- Thanks to Neovim’s `vim.uv` and sharkdp/fd <https://github.com/sharkdp/fd> for making cross-platform file watching possible.
 
 Generated by panvimdoc <https://github.com/kdheepak/panvimdoc>
 
