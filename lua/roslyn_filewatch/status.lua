@@ -61,6 +61,9 @@ function M.get_status()
     },
   }
 
+  local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
+  status.config_summary.rs_available = rs_ok and rs and rs.fast_snapshot ~= nil
+
   -- Find all Roslyn clients
   local clients = vim.lsp.get_clients()
   for _, client in ipairs(clients) do
@@ -180,10 +183,10 @@ function M.show()
   end
   config_line("Solution-aware", status.config_summary.solution_aware)
   config_line("Gitignore     ", status.config_summary.respect_gitignore)
-  config_line("Force polling ", status.config_summary.force_polling)
   config_line("Batching      ", status.config_summary.batching)
   config_line("Diag throttle ", config.options.diagnostic_throttling and config.options.diagnostic_throttling.enabled)
   config_line("fd Integration", status.config_summary.fd_available)
+  config_line("Rust Snapshot ", status.config_summary.rs_available)
 
   -- Show applied preset
   local applied_preset = config.options._applied_preset

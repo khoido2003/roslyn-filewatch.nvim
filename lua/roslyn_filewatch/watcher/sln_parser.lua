@@ -191,18 +191,17 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
           return
         end
 
-        vim.schedule(function()
-          local sln_dir = sln_path:match("^(.+)/[^/]+$") or sln_path
-          local dirs
+        local sln_dir = sln_path:match("^(.+)/[^/]+$") or sln_path
 
-          if sln_type == "slnf" then
+        if sln_type == "slnf" then
+          vim.schedule(function()
             local ok, json = pcall(vim.json.decode, data)
             if not ok or not json or not json.solution then
               callback({})
               return
             end
 
-            dirs = {}
+            local dirs = {}
             local seen = {}
             local has_sub = false
             for _, project_path in ipairs(json.solution.projects or {}) do
@@ -223,14 +222,84 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
             if not has_sub and #dirs == 1 then
               dirs = {}
             end
-          elseif sln_type == "slnx" then
-            dirs = parse_slnx_content(data, sln_dir)
-          else
-            dirs = parse_sln_content(data, sln_dir)
-          end
+            callback(dirs)
+          end)
+        else
+          -- Offload heavy regex parsing to a background libuv worker thread!
+          local work
+          work = uv.new_work(function(w_data, w_sln_dir, w_type)
+            local w_dirs = {}
+            local w_seen = {}
 
-          callback(dirs or {})
-        end)
+            if w_type == "slnx" then
+              local has_sub = false
+              for project_path in w_data:gmatch('<Project[^>]*Path%s*=%s*"([^"]+)"') do
+                local normalized = project_path:gsub("\\", "/")
+                local project_dir = normalized:match("^(.+)/[^/]+$")
+                if project_dir then
+                  has_sub = true
+                  local abs_dir = w_sln_dir .. "/" .. project_dir
+                  -- We will normalize after the thread joins back
+                  if not w_seen[abs_dir] then
+                    w_seen[abs_dir] = true
+                    table.insert(w_dirs, abs_dir)
+                  end
+                elseif not w_seen[w_sln_dir] then
+                  w_seen[w_sln_dir] = true
+                  table.insert(w_dirs, w_sln_dir)
+                end
+              end
+
+              for project_path in w_data:gmatch("<Project[^>]*Path%s*=%s*'([^']+)'") do
+                local normalized = project_path:gsub("\\", "/")
+                local project_dir = normalized:match("^(.+)/[^/]+$")
+                if project_dir then
+                  has_sub = true
+                  local abs_dir = w_sln_dir .. "/" .. project_dir
+                  if not w_seen[abs_dir] then
+                    w_seen[abs_dir] = true
+                    table.insert(w_dirs, abs_dir)
+                  end
+                elseif not w_seen[w_sln_dir] then
+                  w_seen[w_sln_dir] = true
+                  table.insert(w_dirs, w_sln_dir)
+                end
+              end
+              if not has_sub and #w_dirs == 1 then
+                w_dirs = {}
+              end
+            else
+              for project_path in w_data:gmatch('Project%("[^"]*"%)%s*=%s*"[^"]*",%s*"([^"]+)"') do
+                if project_path:match("%.[^.]+$") then
+                  local normalized = project_path:gsub("\\", "/")
+                  local project_dir = normalized:match("^(.+)/[^/]+$")
+                  if project_dir then
+                    local abs_dir = w_sln_dir .. "/" .. project_dir
+                    if not w_seen[abs_dir] then
+                      w_seen[abs_dir] = true
+                      table.insert(w_dirs, abs_dir)
+                    end
+                  elseif not w_seen[w_sln_dir] then
+                    w_seen[w_sln_dir] = true
+                    table.insert(w_dirs, w_sln_dir)
+                  end
+                end
+              end
+            end
+            return table.concat(w_dirs, "|")
+          end, function(extracted_dirs_str)
+            vim.schedule(function()
+              local final_dirs = {}
+              if extracted_dirs_str and extracted_dirs_str ~= "" then
+                for d in extracted_dirs_str:gmatch("[^|]+") do
+                  table.insert(final_dirs, utils.normalize_path(d))
+                end
+              end
+              callback(final_dirs)
+            end)
+          end)
+          work:queue(data, sln_dir, sln_type)
+        end
       end)
     end)
   end)

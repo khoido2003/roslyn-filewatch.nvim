@@ -19,6 +19,14 @@ end
 
 if has_err then
   os.exit(1)
-else
+end
+
+package.cpath = package.cpath .. ";./lua/?.dll"
+local ok, rs = pcall(require, "roslyn_filewatch_rs")
+if ok and rs and rs.fast_snapshot then
+  print("Native Rust Module Loaded Successfully!")
   os.exit(0)
+else
+  print("Failed to load Native Rust Module: " .. tostring(rs))
+  os.exit(1)
 end

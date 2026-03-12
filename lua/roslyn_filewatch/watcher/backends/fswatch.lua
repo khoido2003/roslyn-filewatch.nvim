@@ -65,6 +65,8 @@ function M.start(client, roots, snapshots, deps)
 
   -- Output buffering (NUL-delimited records)
   local buffer = ""
+  local is_alive = true
+  local path_seq = {}
 
   uv.read_start(stdout, function(err, data)
     if err then
@@ -87,7 +89,13 @@ function M.start(client, roots, snapshots, deps)
 
           if utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {}) then
             if deps.queue_events then
+              path_seq[path] = (path_seq[path] or 0) + 1
+              local current_seq = path_seq[path]
+
               uv.fs_stat(path, function(stat_err, stat)
+                if not is_alive or path_seq[path] ~= current_seq then
+                  return
+                end
                 local event_type = 2 -- Default Changed
                 local client_snapshots = snapshots[client.id] or {}
                 local prev_mt = client_snapshots[path]
@@ -117,6 +125,9 @@ function M.start(client, roots, snapshots, deps)
                 snapshots[client.id] = client_snapshots
 
                 vim.schedule(function()
+                  if not is_alive or path_seq[path] ~= current_seq then
+                    return
+                  end
                   if deps.last_events then
                     deps.last_events[client.id] = os.time()
                   end
@@ -152,6 +163,7 @@ function M.start(client, roots, snapshots, deps)
     _stdout = stdout,
     _stderr = stderr,
     stop = function(self)
+      is_alive = false
       if self._handle and not self._handle:is_closing() then
         pcall(function()
           self._handle:kill(9)

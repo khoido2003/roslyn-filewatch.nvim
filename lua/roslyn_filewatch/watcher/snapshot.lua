@@ -15,6 +15,7 @@ local M = {}
 
 ---@type table<string, boolean>
 local scanning_in_progress = {}
+local rust_warned = false
 
 function M.cancel_async_scan(root)
   scanning_in_progress[normalize_path(root)] = nil
@@ -22,6 +23,23 @@ end
 
 function M.is_scanning(root)
   return scanning_in_progress[normalize_path(root)] == true
+end
+
+local function check_rust_module()
+  local ok, rs = pcall(require, "roslyn_filewatch_rs")
+  if ok and rs and rs.fast_snapshot then
+    return true, rs
+  end
+  if not rust_warned then
+    rust_warned = true
+    vim.schedule(function()
+      vim.notify(
+        "[roslyn-filewatch] Native Rust module (roslyn_filewatch_rs) failed to load. Falling back to Lua/fd scanning. Run Lazy build (or check 'lua build.lua') to install it for maximum performance.",
+        vim.log.levels.WARN
+      )
+    end)
+  end
+  return false, nil
 end
 
 local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
@@ -349,6 +367,22 @@ function M.scan_tree_async(root, callback, on_progress)
   end
   scanning_in_progress[root] = true
 
+  local ok, rs = check_rust_module()
+  if ok and rs then
+    local ok_snap, result = pcall(rs.fast_snapshot, root)
+    if ok_snap and type(result) == "table" then
+      local final_map = {}
+      for k, v in pairs(result) do
+        final_map[k] = { mtime = v * 1000000000, size = 0, ino = 0, dev = 0 }
+      end
+      scanning_in_progress[root] = nil
+      vim.schedule(function()
+        pcall(callback, final_map)
+      end)
+      return
+    end
+  end
+
   local fd_exe = nil
   if vim.fn.executable("fd") == 1 then
     fd_exe = "fd"
@@ -365,6 +399,17 @@ end
 
 function M.scan_tree(root, out_map)
   root = normalize_path(root)
+
+  local ok, rs = check_rust_module()
+  if ok and rs then
+    local ok_snap, result = pcall(rs.fast_snapshot, root)
+    if ok_snap and type(result) == "table" then
+      for k, v in pairs(result) do
+        out_map[k] = { mtime = v * 1000000000, size = 0, ino = 0, dev = 0 }
+      end
+      return
+    end
+  end
 
   local ignore_dirs = config.options.ignore_dirs or {}
   local watch_extensions = config.options.watch_extensions or {}
