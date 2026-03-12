@@ -70,7 +70,7 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 ```lua
 {
   "khoido2003/roslyn-filewatch.nvim",
-  build = "lua build.lua", -- Compiles or downloads the Native Rust module fallback
+  build = "nvim -l build.lua", -- Compiles or downloads the Native Rust module fallback
   config = function()
     require("roslyn_filewatch").setup()
   end,
@@ -81,7 +81,7 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 ```lua
 use {
   "khoido2003/roslyn-filewatch.nvim",
-  run = "lua build.lua",
+  run = "nvim -l build.lua",
   config = function()
     require("roslyn_filewatch").setup()
   end,

@@ -21,10 +21,17 @@ fn fast_snapshot(lua: &Lua, directory: String) -> LuaResult<LuaTable> {
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
+                        
+                    let size = metadata.len();
 
                     if let Some(path_str) = entry.path().to_str() {
                         let normalized = path_str.replace("\\", "/");
-                        table.set(normalized, mtime)?;
+                        
+                        if let Ok(file_info) = lua.create_table() {
+                            let _ = file_info.set("mtime", mtime);
+                            let _ = file_info.set("size", size);
+                            let _ = table.set(normalized, file_info);
+                        }
                     }
                 }
             }
@@ -40,3 +47,4 @@ fn roslyn_filewatch_rs(lua: &Lua) -> LuaResult<LuaTable> {
     exports.set("fast_snapshot", lua.create_function(fast_snapshot)?)?;
     Ok(exports)
 }
+
