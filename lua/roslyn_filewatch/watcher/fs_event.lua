@@ -231,6 +231,13 @@ function M.start(client, root, snapshots, deps)
     return nil, "missing required arguments"
   end
 
+  local is_linux = vim.uv.os_uname().sysname == "Linux"
+  if is_linux and deps.notify then
+    local msg =
+      "Warning: Native file watching on Linux does not support recursive directories via libuv. Subdirectories might not be watched. Please install 'watchman' or 'fswatch', or use 'force_polling' config option."
+    pcall(deps.notify, msg, vim.log.levels.WARN)
+  end
+
   local cfg = deps.config or config
   local rename_m = deps.rename_mod or rename_mod
   local notify_fn = deps.notify or notify
@@ -455,8 +462,13 @@ function M.start(client, root, snapshots, deps)
 
         table.insert(q.events, filename)
 
-        while #q.events > MAX_RAW_QUEUE_SIZE do
-          table.remove(q.events, 1)
+        if #q.events > MAX_RAW_QUEUE_SIZE then
+          local diff = #q.events - MAX_RAW_QUEUE_SIZE
+          local new_events = {}
+          for i = diff + 1, #q.events do
+            new_events[#new_events + 1] = q.events[i]
+          end
+          q.events = new_events
         end
 
         if not q.processing then

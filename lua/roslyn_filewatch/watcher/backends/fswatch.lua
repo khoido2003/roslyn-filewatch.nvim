@@ -86,17 +86,37 @@ function M.start(client, roots, snapshots, deps)
           path = utils.normalize_path(path)
 
           if utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {}) then
-            -- Simple approach: just tell the watcher something changed and force a fast diff-scan
-            -- Since tracking exact mtime/size via fswatch stdout is tricky across platforms,
-            -- we can queue a resync event.
-
             if deps.queue_events then
-              -- For fswatch, we might not know if it's type 1 (create) 2 (update) or 3 (delete) accurately without stat.
-              -- So we rely on a partial scan fallback or assume type 2.
               if deps.last_events then
                 deps.last_events[client.id] = os.time()
               end
-              pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(path), type = 2 } })
+
+              uv.fs_stat(path, function(stat_err, stat)
+                local event_type = 2 -- Default Changed
+                local client_snapshots = snapshots[client.id] or {}
+                local prev_mt = client_snapshots[path]
+
+                if not stat_err and stat then
+                  local current_mt = stat.mtime.sec
+                  if not prev_mt then
+                    event_type = 1 -- Created
+                  end
+                  client_snapshots[path] = current_mt
+                else
+                  if prev_mt then
+                    event_type = 3 -- Deleted
+                    client_snapshots[path] = nil
+                  else
+                    event_type = 3 -- Assume deleted if stat fails and no prev_mt
+                  end
+                end
+
+                snapshots[client.id] = client_snapshots
+
+                vim.schedule(function()
+                  pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(path), type = event_type } })
+                end)
+              end)
             end
           end
         end
