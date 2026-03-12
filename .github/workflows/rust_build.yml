@@ -13,7 +13,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: roslyn_filewatch_rs.so
+            artifact_name: libroslyn_filewatch_rs.so
             asset_name: roslyn_filewatch_rs-linux-x86_64.so
           - os: macos-latest
             artifact_name: libroslyn_filewatch_rs.dylib

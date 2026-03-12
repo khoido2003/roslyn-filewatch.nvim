@@ -209,28 +209,8 @@ function M.start(client, root, snapshots, deps)
           end
         else
           -- Sparse Polling: Pre-filter dirty_dirs by checking if their directory mtime changed
-          local active_dirty_dirs = {}
-          local current_dir_mtimes = state_dir_mtimes[client.id] or {}
-          local new_dir_mtimes = {}
-
-          for _, dir in ipairs(dirty_dirs) do
-            local st = uv.fs_stat(dir)
-            if st then
-              local mt = mtime_ns(st)
-              new_dir_mtimes[dir] = mt
-
-              local last_mt = current_dir_mtimes[dir]
-              if not last_mt or last_mt.sec ~= mt.sec or last_mt.nsec ~= mt.nsec then
-                table.insert(active_dirty_dirs, dir)
-              end
-            end
-          end
-
-          state_dir_mtimes[client.id] = new_dir_mtimes
-
-          if #active_dirty_dirs == 0 then
-            return -- No directories actually changed their contents!
-          end
+          -- removed due to directory mtime not updating upon file modifications
+          local active_dirty_dirs = dirty_dirs
 
           if deps.partial_scan_async then
             local base_map = {}
