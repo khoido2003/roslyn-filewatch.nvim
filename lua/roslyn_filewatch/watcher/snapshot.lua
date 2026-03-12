@@ -369,18 +369,45 @@ function M.scan_tree_async(root, callback, on_progress)
 
   local ok, rs = check_rust_module()
   if ok and rs then
-    local ok_snap, result = pcall(rs.fast_snapshot, root)
-    if ok_snap and type(result) == "table" then
-      local final_map = {}
-      for k, v in pairs(result) do
-        final_map[k] = { mtime = v * 1000000000, size = 0, ino = 0, dev = 0 }
+    -- Run on background thread using vim.uv.new_work so it doesn't block UI
+    local work = uv.new_work(function(dir)
+      local success, r = pcall(require, "roslyn_filewatch_rs")
+      if success and r and r.fast_snapshot then
+        local ok_snap, result = pcall(r.fast_snapshot, dir)
+        if ok_snap and type(result) == "table" then
+          local final_map = {}
+          for k, v in pairs(result) do
+            final_map[k] = { mtime = (v.mtime or 0) * 1000000000, size = v.size or 0, ino = 0, dev = 0 }
+          end
+          return true, final_map
+        end
       end
-      scanning_in_progress[root] = nil
-      vim.schedule(function()
-        pcall(callback, final_map)
-      end)
-      return
-    end
+      return false, nil
+    end, function(success, result)
+      if success and result then
+        scanning_in_progress[root] = nil
+        vim.schedule(function()
+          pcall(callback, result)
+        end)
+      else
+        -- Fallback to fd/lua if background rust fails
+        local fd_exe = nil
+        if vim.fn.executable("fd") == 1 then
+          fd_exe = "fd"
+        elseif vim.fn.executable("fdfind") == 1 then
+          fd_exe = "fdfind"
+        end
+
+        if fd_exe then
+          scan_tree_async_fd(fd_exe, root, callback, on_progress)
+        else
+          scan_tree_async_lua(root, callback, on_progress)
+        end
+      end
+    end)
+
+    work:queue(root)
+    return
   end
 
   local fd_exe = nil
@@ -405,7 +432,7 @@ function M.scan_tree(root, out_map)
     local ok_snap, result = pcall(rs.fast_snapshot, root)
     if ok_snap and type(result) == "table" then
       for k, v in pairs(result) do
-        out_map[k] = { mtime = v * 1000000000, size = 0, ino = 0, dev = 0 }
+        out_map[k] = { mtime = (v.mtime or 0) * 1000000000, size = v.size or 0, ino = 0, dev = 0 }
       end
       return
     end

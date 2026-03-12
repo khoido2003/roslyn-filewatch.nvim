@@ -10,7 +10,7 @@ local ext = is_win and "dll" or "so"
 
 local function build_from_source()
   print("Found cargo. Building native rust module from source...")
-  local cmd = is_win and "cargo build --release" or "cargo build --release"
+  local cmd = "cargo build --release"
 
   -- Run cargo build
   local exit_code = os.execute("cd rust && " .. cmd)
@@ -48,7 +48,11 @@ local function download_binary()
   if is_win then
     asset_name = "roslyn_filewatch_rs-windows-x86_64.dll"
   elseif is_mac then
-    asset_name = "roslyn_filewatch_rs-macos-arm64.so" -- Note: if x64 macs are needed, add arch checks
+    if arch == "x64" or arch == "x86_64" then
+      asset_name = "roslyn_filewatch_rs-macos-x86_64.so"
+    else
+      asset_name = "roslyn_filewatch_rs-macos-arm64.so"
+    end
   elseif is_linux then
     asset_name = "roslyn_filewatch_rs-linux-x86_64.so"
   end
