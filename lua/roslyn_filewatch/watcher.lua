@@ -177,7 +177,6 @@ end)
 local function scan_csproj_async(root, callback)
   root = normalize_path(root)
   local results = {}
-  local pending_dirs = 0
   local scan_complete = false
 
   local ignore_dirs = config.options.ignore_dirs or {}
@@ -186,138 +185,174 @@ local function scan_csproj_async(root, callback)
     ignore_set[d:lower()] = true
   end
 
-  local function finish_scan()
+  local dirs_queue = { root }
+  local active_workers = 0
+  local MAX_WORKERS = 10
+
+  local function check_finish()
+    if #dirs_queue == 0 and active_workers == 0 and not scan_complete then
+      scan_complete = true
+      vim.schedule(function()
+        callback(results)
+      end)
+    end
+  end
+
+  local process_next -- forward declare
+
+  process_next = function()
     if scan_complete then
       return
     end
-    scan_complete = true
-    vim.schedule(function()
-      callback(results)
-    end)
+
+    while active_workers < MAX_WORKERS and #dirs_queue > 0 do
+      local dir = table.remove(dirs_queue, 1)
+      active_workers = active_workers + 1
+
+      uv.fs_scandir(dir, function(err, scanner)
+        if err or not scanner then
+          active_workers = active_workers - 1
+          process_next()
+          check_finish()
+          return
+        end
+
+        local subdirs = {}
+        local csproj_paths = {}
+
+        while true do
+          local name, typ = uv.fs_scandir_next(scanner)
+          if not name then
+            break
+          end
+          local fullpath = normalize_path(dir .. "/" .. name)
+          if typ == "directory" then
+            if not ignore_set[name:lower()] then
+              table.insert(subdirs, fullpath)
+            end
+          elseif typ == "file" then
+            if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
+              table.insert(csproj_paths, fullpath)
+            end
+          end
+        end
+
+        for _, s in ipairs(subdirs) do
+          table.insert(dirs_queue, s)
+        end
+
+        if #csproj_paths == 0 then
+          active_workers = active_workers - 1
+          process_next()
+          check_finish()
+          return
+        end
+
+        local stat_pending = #csproj_paths
+        for _, csproj_path in ipairs(csproj_paths) do
+          uv.fs_stat(csproj_path, function(stat_err, stat)
+            if not stat_err and stat then
+              results[csproj_path] = stat.mtime.sec
+            end
+            stat_pending = stat_pending - 1
+            if stat_pending == 0 then
+              active_workers = active_workers - 1
+              process_next()
+              check_finish()
+            end
+          end)
+        end
+      end)
+    end
   end
 
-  local function scan_dir_async(dir)
-    pending_dirs = pending_dirs + 1
-
-    uv.fs_scandir(dir, function(err, scanner)
-      if err or not scanner then
-        pending_dirs = pending_dirs - 1
-        if pending_dirs == 0 then
-          finish_scan()
-        end
-        return
-      end
-
-      local subdirs = {}
-      local csproj_paths = {}
-
-      while true do
-        local name, typ = uv.fs_scandir_next(scanner)
-        if not name then
-          break
-        end
-        local fullpath = normalize_path(dir .. "/" .. name)
-        if typ == "directory" then
-          if not ignore_set[name:lower()] then
-            table.insert(subdirs, fullpath)
-          end
-        elseif typ == "file" then
-          if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
-            table.insert(csproj_paths, fullpath)
-          end
-        end
-      end
-
-      for _, csproj_path in ipairs(csproj_paths) do
-        pending_dirs = pending_dirs + 1
-        uv.fs_stat(csproj_path, function(stat_err, stat)
-          if not stat_err and stat then
-            results[csproj_path] = stat.mtime.sec
-          end
-          pending_dirs = pending_dirs - 1
-          if pending_dirs == 0 then
-            finish_scan()
-          end
-        end)
-      end
-
-      for _, subdir in ipairs(subdirs) do
-        vim.defer_fn(function()
-          scan_dir_async(subdir)
-        end, 0)
-      end
-
-      pending_dirs = pending_dirs - 1
-      if pending_dirs == 0 then
-        finish_scan()
-      end
-    end)
-  end
-
-  scan_dir_async(root)
+  process_next()
 end
 
 local function scan_projects_from_sln_async(project_dirs, callback)
   local results = {}
-  local pending = 0
-  local finished = false
+  local scan_complete = false
 
-  local function finish()
-    if finished then
-      return
-    end
-    finished = true
+  if not project_dirs or #project_dirs == 0 then
     vim.schedule(function()
       callback(results)
     end)
-  end
-
-  if not project_dirs or #project_dirs == 0 then
-    finish()
     return
   end
 
-  for _, dir in ipairs(project_dirs) do
-    pending = pending + 1
-    uv.fs_scandir(dir, function(err, scanner)
-      if err or not scanner then
-        pending = pending - 1
-        if pending == 0 then
-          finish()
-        end
-        return
-      end
-
-      local csproj_found = {}
-      while true do
-        local name, typ = uv.fs_scandir_next(scanner)
-        if not name then
-          break
-        end
-        if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
-          table.insert(csproj_found, normalize_path(dir .. "/" .. name))
-        end
-      end
-
-      for _, p in ipairs(csproj_found) do
-        pending = pending + 1
-        uv.fs_stat(p, function(stat_err, stat)
-          if not stat_err and stat then
-            results[p] = stat.mtime.sec
-          end
-          pending = pending - 1
-          if pending == 0 then
-            finish()
-          end
-        end)
-      end
-
-      pending = pending - 1
-      if pending == 0 then
-        finish()
-      end
-    end)
+  local dirs_queue = {}
+  for _, d in ipairs(project_dirs) do
+    table.insert(dirs_queue, d)
   end
+
+  local active_workers = 0
+  local MAX_WORKERS = 10
+
+  local function check_finish()
+    if #dirs_queue == 0 and active_workers == 0 and not scan_complete then
+      scan_complete = true
+      vim.schedule(function()
+        callback(results)
+      end)
+    end
+  end
+
+  local process_next -- forward declare
+
+  process_next = function()
+    if scan_complete then
+      return
+    end
+
+    while active_workers < MAX_WORKERS and #dirs_queue > 0 do
+      local dir = table.remove(dirs_queue, 1)
+      active_workers = active_workers + 1
+
+      uv.fs_scandir(dir, function(err, scanner)
+        if err or not scanner then
+          active_workers = active_workers - 1
+          process_next()
+          check_finish()
+          return
+        end
+
+        local csproj_paths = {}
+        while true do
+          local name, typ = uv.fs_scandir_next(scanner)
+          if not name then
+            break
+          end
+          if name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$") then
+            table.insert(csproj_paths, normalize_path(dir .. "/" .. name))
+          end
+        end
+
+        if #csproj_paths == 0 then
+          active_workers = active_workers - 1
+          process_next()
+          check_finish()
+          return
+        end
+
+        local stat_pending = #csproj_paths
+        for _, p in ipairs(csproj_paths) do
+          uv.fs_stat(p, function(stat_err, stat)
+            if not stat_err and stat then
+              results[p] = stat.mtime.sec
+            end
+            stat_pending = stat_pending - 1
+            if stat_pending == 0 then
+              active_workers = active_workers - 1
+              process_next()
+              check_finish()
+            end
+          end)
+        end
+      end)
+    end
+  end
+
+  process_next()
 end
 
 local function mark_dirty_dir(client_id, path)

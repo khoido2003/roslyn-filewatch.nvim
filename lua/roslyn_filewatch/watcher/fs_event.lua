@@ -231,6 +231,13 @@ function M.start(client, root, snapshots, deps)
     return nil, "missing required arguments"
   end
 
+  local is_linux = vim.uv.os_uname().sysname == "Linux"
+  if is_linux and deps.notify then
+    local msg =
+      "Warning: Native file watching on Linux does not support recursive directories via libuv. Subdirectories might not be watched. Please install 'watchman' or 'fswatch', or use 'force_polling' config option."
+    pcall(deps.notify, msg, vim.log.levels.WARN)
+  end
+
   local cfg = deps.config or config
   local rename_m = deps.rename_mod or rename_mod
   local notify_fn = deps.notify or notify
@@ -248,9 +255,24 @@ function M.start(client, root, snapshots, deps)
 
   snapshots[client.id] = snapshots[client.id] or {}
 
-  local handle, err = uv.new_fs_event()
-  if not handle then
-    return nil, err or "uv.new_fs_event failed"
+  local is_nvim_10 = vim.fn.has("nvim-0.10") == 1
+  local handle, err
+
+  if is_nvim_10 then
+    -- Neovim 0.10+ vim.fs.watch handles polyfills and recursive bugs cleanly
+    -- It returns a cleanup function, not a handle object.
+    handle = {
+      is_closing = function()
+        return false
+      end,
+    }
+    function handle.stop() end
+    function handle.close() end
+  else
+    handle, err = uv.new_fs_event()
+    if not handle then
+      return nil, err or "uv.new_fs_event failed"
+    end
   end
 
   local function flush_client_buffer(client_id)
@@ -388,7 +410,7 @@ function M.start(client, root, snapshots, deps)
   end
 
   local ok_start, start_err = pcall(function()
-    handle:start(root, { recursive = true }, function(err2, filename, _)
+    local function on_event_callback(err2, filename, _)
       if fast_regen_flags[client.id] then
         event_sample_counters[client.id] = (event_sample_counters[client.id] or 0) + 1
         if event_sample_counters[client.id] >= EVENT_SAMPLE_RATE then
@@ -455,8 +477,13 @@ function M.start(client, root, snapshots, deps)
 
         table.insert(q.events, filename)
 
-        while #q.events > MAX_RAW_QUEUE_SIZE do
-          table.remove(q.events, 1)
+        if #q.events > MAX_RAW_QUEUE_SIZE then
+          local diff = #q.events - MAX_RAW_QUEUE_SIZE
+          local new_events = {}
+          for i = diff + 1, #q.events do
+            new_events[#new_events + 1] = q.events[i]
+          end
+          q.events = new_events
         end
 
         if not q.processing then
@@ -471,7 +498,24 @@ function M.start(client, root, snapshots, deps)
           end
         end)
       end
-    end)
+    end
+
+    if is_nvim_10 then
+      local cancel_watch = vim.fs.watch(root, { info = true, recursive = true }, function(err2, filename)
+        on_event_callback(err2, filename, nil)
+      end)
+      handle.stop = function()
+        pcall(cancel_watch)
+      end
+      handle.close = function()
+        pcall(cancel_watch)
+      end
+      handle.is_closing = function()
+        return false
+      end
+    else
+      handle:start(root, { recursive = true }, on_event_callback)
+    end
   end)
 
   if not ok_start then

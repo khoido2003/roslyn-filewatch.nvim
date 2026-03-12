@@ -40,6 +40,7 @@ function M.reset_stats()
 end
 
 local pending_opens = {}
+local uv = vim.uv or vim.loop
 local open_timer = nil
 
 local function schedule_project_open(client, csproj_path)
@@ -51,26 +52,38 @@ local function schedule_project_open(client, csproj_path)
   end
   pending_opens[client.id][path] = true
 
-  if open_timer then
-    return
+  if open_timer and not open_timer:is_closing() then
+    open_timer:stop()
+    open_timer:close()
   end
 
-  open_timer = vim.defer_fn(function()
-    open_timer = nil
-    for client_id, paths in pairs(pending_opens) do
-      local c = vim.lsp.get_client_by_id(client_id)
-      if c and not (c.is_stopped and c.is_stopped()) then
-        local project_list = {}
-        for p in pairs(paths) do
-          table.insert(project_list, p)
-        end
-        if #project_list > 0 then
-          pcall(c.notify, "project/open", { projects = project_list })
-        end
+  open_timer = uv.new_timer()
+  if open_timer then
+    open_timer:start(500, 0, function()
+      local timer = open_timer
+      open_timer = nil
+      if timer and not timer:is_closing() then
+        pcall(timer.stop, timer)
+        pcall(timer.close, timer)
       end
-    end
-    pending_opens = {}
-  end, 500)
+
+      vim.schedule(function()
+        for client_id, paths in pairs(pending_opens) do
+          local c = vim.lsp.get_client_by_id(client_id)
+          if c and not (c.is_stopped and c.is_stopped()) then
+            local project_list = {}
+            for p in pairs(paths) do
+              table.insert(project_list, p)
+            end
+            if #project_list > 0 then
+              pcall(c.notify, "project/open", { projects = project_list })
+            end
+          end
+        end
+        pending_opens = {}
+      end)
+    end)
+  end
 end
 
 local function configured_log_level()

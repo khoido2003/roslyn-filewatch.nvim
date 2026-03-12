@@ -18,6 +18,9 @@ end
 ---@type table<number, uv_timer_t>
 local trailing_timers = {}
 
+---@type table<number, table<string, number>>
+local state_dir_mtimes = {}
+
 local function safe_close_timer(timer)
   if not timer then
     return
@@ -36,6 +39,7 @@ function M.stop(client_id)
     safe_close_timer(timer)
     trailing_timers[client_id] = nil
   end
+  state_dir_mtimes[client_id] = nil
 end
 
 function M.start(client, root, snapshots, deps)
@@ -204,12 +208,36 @@ function M.start(client, root, snapshots, deps)
             process_scan_results(new_map, old_map)
           end
         else
+          -- Sparse Polling: Pre-filter dirty_dirs by checking if their directory mtime changed
+          local active_dirty_dirs = {}
+          local current_dir_mtimes = state_dir_mtimes[client.id] or {}
+          local new_dir_mtimes = {}
+
+          for _, dir in ipairs(dirty_dirs) do
+            local st = uv.fs_stat(dir)
+            if st then
+              local mt = mtime_ns(st)
+              new_dir_mtimes[dir] = mt
+
+              local last_mt = current_dir_mtimes[dir]
+              if not last_mt or last_mt.sec ~= mt.sec or last_mt.nsec ~= mt.nsec then
+                table.insert(active_dirty_dirs, dir)
+              end
+            end
+          end
+
+          state_dir_mtimes[client.id] = new_dir_mtimes
+
+          if #active_dirty_dirs == 0 then
+            return -- No directories actually changed their contents!
+          end
+
           if deps.partial_scan_async then
             local base_map = {}
             for k, v in pairs(old_map) do
               base_map[k] = v
             end
-            deps.partial_scan_async(dirty_dirs, base_map, root, function(new_map)
+            deps.partial_scan_async(active_dirty_dirs, base_map, root, function(new_map)
               local async_old = snapshots[client.id] or {}
               local evs = {}
 
@@ -224,7 +252,7 @@ function M.start(client, root, snapshots, deps)
 
               for path in pairs(async_old) do
                 if not new_map[path] then
-                  for _, dir in ipairs(dirty_dirs) do
+                  for _, dir in ipairs(active_dirty_dirs) do
                     if path:find(dir, 1, true) == 1 then
                       table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
                       break
@@ -248,7 +276,7 @@ function M.start(client, root, snapshots, deps)
           for k, v in pairs(old_map) do
             new_map[k] = v
           end
-          local scan_ok = pcall(deps.partial_scan, dirty_dirs, new_map, root)
+          local scan_ok = pcall(deps.partial_scan, active_dirty_dirs, new_map, root)
           if scan_ok then
             process_scan_results(new_map, old_map)
           end
