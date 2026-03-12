@@ -375,15 +375,37 @@ function M.scan_tree_async(root, callback, on_progress)
       if success and r and r.fast_snapshot then
         local ok_snap, result = pcall(r.fast_snapshot, dir)
         if ok_snap and type(result) == "table" then
-          local final_map = {}
+          local parts = {}
           for k, v in pairs(result) do
-            final_map[k] = { mtime = (v.mtime or 0) * 1000000000, size = v.size or 0, ino = 0, dev = 0 }
+            local mtime = (v.mtime or 0) * 1000000000
+            local size = v.size or 0
+            table.insert(parts, string.format("%s:%d:%d", k, mtime, size))
           end
-          return true, final_map
+          return true, table.concat(parts, "|")
         end
       end
       return false, nil
-    end, function(success, result)
+    end, function(success, result_str)
+      local result = nil
+      if success and result_str and type(result_str) == "string" then
+        result = {}
+        if result_str ~= "" then
+          for group in result_str:gmatch("[^|]+") do
+            -- Look for path:mtime:size from the end backwards to support paths with colons
+            local last_colon = group:match("():[^:]+$")
+            if last_colon then
+              local second_last = group:sub(1, last_colon - 1):match("():[^:]+$")
+              if second_last then
+                local k = group:sub(1, second_last - 1)
+                local mtime = tonumber(group:sub(second_last + 1, last_colon - 1)) or 0
+                local size = tonumber(group:sub(last_colon + 1)) or 0
+                result[k] = { mtime = mtime, size = size, ino = 0, dev = 0 }
+              end
+            end
+          end
+        end
+      end
+
       if success and result then
         scanning_in_progress[root] = nil
         vim.schedule(function()

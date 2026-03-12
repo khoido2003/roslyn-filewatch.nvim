@@ -231,6 +231,11 @@ function M.start(client, root, snapshots, deps)
     return nil, "missing required arguments"
   end
 
+  local stat = uv.fs_stat(root)
+  if not stat or stat.type ~= "directory" then
+    return nil, "ENOENT: Directory does not exist or is not a directory: " .. root
+  end
+
   local is_linux = vim.uv.os_uname().sysname == "Linux"
   if is_linux and deps.notify then
     local msg =

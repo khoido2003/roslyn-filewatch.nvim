@@ -291,6 +291,7 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
             vim.schedule(function()
               local final_dirs = {}
               if extracted_dirs_str and extracted_dirs_str ~= "" then
+                local utils = require("roslyn_filewatch.watcher.utils")
                 for d in extracted_dirs_str:gmatch("[^|]+") do
                   table.insert(final_dirs, utils.normalize_path(d))
                 end
