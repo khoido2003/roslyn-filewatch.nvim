@@ -100,6 +100,12 @@ function M.start(client, roots, snapshots, deps)
                   local current_mt = stat.mtime.sec
                   if not prev_mt then
                     event_type = 1 -- Created
+                  elseif prev_mt ~= current_mt then
+                    event_type = 2 -- Changed
+                  else
+                    -- File exists but unchanged; skip event
+                    snapshots[client.id] = client_snapshots
+                    return
                   end
                   client_snapshots[path] = current_mt
                 else
@@ -107,7 +113,8 @@ function M.start(client, roots, snapshots, deps)
                     event_type = 3 -- Deleted
                     client_snapshots[path] = nil
                   else
-                    event_type = 3 -- Assume deleted if stat fails and no prev_mt
+                    -- Unknown file failed stat; ignore (don't emit spurious Delete)
+                    return
                   end
                 end
 
