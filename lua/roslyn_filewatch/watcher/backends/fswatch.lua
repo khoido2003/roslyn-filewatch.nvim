@@ -87,17 +87,13 @@ function M.start(client, roots, snapshots, deps)
 
           if utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {}) then
             if deps.queue_events then
-              if deps.last_events then
-                deps.last_events[client.id] = os.time()
-              end
-
               uv.fs_stat(path, function(stat_err, stat)
                 local event_type = 2 -- Default Changed
                 local client_snapshots = snapshots[client.id] or {}
                 local prev_mt = client_snapshots[path]
 
                 if not stat_err and stat then
-                  local current_mt = stat.mtime.sec
+                  local current_mt = string.format("%d:%d", stat.mtime.sec or 0, stat.mtime.nsec or 0)
                   if not prev_mt then
                     event_type = 1 -- Created
                   elseif prev_mt ~= current_mt then
@@ -121,6 +117,9 @@ function M.start(client, roots, snapshots, deps)
                 snapshots[client.id] = client_snapshots
 
                 vim.schedule(function()
+                  if deps.last_events then
+                    deps.last_events[client.id] = os.time()
+                  end
                   pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(path), type = event_type } })
                 end)
               end)
