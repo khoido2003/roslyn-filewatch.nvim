@@ -189,10 +189,9 @@ If the `.dll` or `.so` is not building automatically, or you are downloading the
 :lua dofile(vim.fn.stdpath("data") .. "/lazy/roslyn-filewatch.nvim/build.lua")
 ```
 
-**Using Lazy.nvim UI:**
-1. Type `:Lazy`
-2. Hover over `roslyn-filewatch.nvim`
-3. Press `b` to force rebuild
+**Using Lazy.nvim**
+1. Type `:Lazy build roslyn-filewatch.nvim`
+2. Press enter to rebuild
 
 **From your terminal:**
 ```bash
