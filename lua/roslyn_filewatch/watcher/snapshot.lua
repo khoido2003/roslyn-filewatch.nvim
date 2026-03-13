@@ -72,8 +72,6 @@ local function call_rust_snapshot(rs, root)
     out[path] = {
       mtime = info.mtime or 0,
       size = info.size or 0,
-      ino = 0,
-      dev = 0,
     }
   end
   return out

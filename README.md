@@ -46,13 +46,105 @@ Automatically detects the engine and applies optimized presets (scan intervals, 
 
 ## Requirements
 
-- **Neovim 0.10+** (Required for `vim.fs` and modern Lua APIs)
-- An existing Roslyn LSP client, such as:
-  - [roslyn.nvim](https://github.com/seblyng/roslyn.nvim) (**Highly recommended**)
-  - [nvim-lspconfig (roslyn_ls)](https://github.com/neovim/nvim-lspconfig/blob/master/doc/configs.md#roslyn_ls)
-- **(Highly Recommended)** A native watcher backend for large projects:
-  - **Watchman** (Windows/macOS/Linux): Fastest, drastically reduces memory usage on huge monorepos.
-  - **fswatch** (macOS/Linux): Excellent fallback for Unix systems.
+### Required
+
+| Dependency | Minimum Version | Purpose |
+|:---|:---|:---|
+| **Neovim** | 0.10+ | Core editor (requires `vim.fs`, `vim.uv`, modern Lua APIs) |
+| **Roslyn LSP client** | — | The C# language server this plugin integrates with |
+| **.NET SDK** | 10.0+ | Needed for `dotnet restore` (auto-restore of NuGet packages) |
+
+### Recommended (Performance)
+
+These tools dramatically improve performance on large projects. **Without them, the plugin still works** but uses slower fallback mechanisms.
+
+| Dependency | Purpose | Impact |
+|:---|:---|:---|
+| **Rust native module** | Fastest file scanning (1-3ms for entire repos) | 10-100x faster initial scans |
+| **[fd](https://github.com/sharkdp/fd)** | Fast file finder (fallback when Rust unavailable) | 5-20x faster than pure Lua |
+| **[Watchman](https://facebook.github.io/watchman/)** | Facebook's file watching service | Best for huge monorepos (10k+ files) |
+| **[fswatch](https://github.com/emcrisostomo/fswatch)** | Cross-platform file change monitor | Good alternative to Watchman on macOS/Linux |
+
+The plugin automatically selects the best available backend in this priority order:
+
+```
+Rust native → fd/fdfind → Pure Lua (slowest)
+Watchman → fswatch → fs_event/polling
+```
+
+> [!TIP]
+> Run `:checkhealth roslyn_filewatch` to see which scanning tier and watcher backend are active on your system.
+
+---
+
+## Dependency Installation
+
+### Roslyn LSP Client
+
+You need one of these Neovim Roslyn LSP integrations:
+
+- **[roslyn.nvim](https://github.com/seblyng/roslyn.nvim)** (**Highly recommended**)
+- **[nvim-lspconfig (roslyn_ls)](https://github.com/neovim/nvim-lspconfig/blob/master/doc/configs.md#roslyn_ls)**
+
+### .NET SDK
+
+Required for C# development and NuGet auto-restore.
+
+| Platform | Command |
+|:---|:---|
+| **Windows** | `winget install Microsoft.DotNet.SDK.10` |
+| **macOS** | `brew install dotnet-sdk` |
+| **Ubuntu/Debian** | `sudo apt install dotnet-sdk-10.0` |
+| **Fedora** | `sudo dnf install dotnet-sdk-10.0` |
+| **Arch Linux** | `sudo pacman -S dotnet-sdk` |
+
+Or download from [dotnet.microsoft.com/download](https://dotnet.microsoft.com/download).
+
+### fd (Recommended)
+
+Fast file finder used as fallback when the Rust native module is unavailable.
+
+| Platform | Command |
+|:---|:---|
+| **Windows** | `winget install sharkdp.fd` or `scoop install fd` or `choco install fd` |
+| **macOS** | `brew install fd` |
+| **Ubuntu/Debian** | `sudo apt install fd-find` (binary is `fdfind`) |
+| **Fedora** | `sudo dnf install fd-find` |
+| **Arch Linux** | `sudo pacman -S fd` |
+
+### Watchman (Optional, for large repos)
+
+Best performance for monorepos with thousands of files.
+
+| Platform | Command |
+|:---|:---|
+| **Windows** | `choco install watchman` or download from [GitHub releases](https://github.com/nicoster/watchman-bin/releases) |
+| **macOS** | `brew install watchman` |
+| **Ubuntu/Debian** | [Official install guide](https://facebook.github.io/watchman/docs/install#linux) (apt from Meta's repo) |
+| **Arch Linux** | `yay -S watchman-bin` |
+
+### fswatch (Optional, macOS/Linux)
+
+Alternative to Watchman for Unix systems.
+
+| Platform | Command |
+|:---|:---|
+| **macOS** | `brew install fswatch` |
+| **Ubuntu/Debian** | `sudo apt install fswatch` |
+| **Fedora** | `sudo dnf install fswatch` |
+| **Arch Linux** | `sudo pacman -S fswatch` |
+
+### Rust Toolchain (for building from source)
+
+Only needed if you want to compile the native Rust module yourself instead of using pre-built binaries.
+
+| Platform | Command |
+|:---|:---|
+| **All platforms** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **Windows** | Download from [rustup.rs](https://rustup.rs/) |
+
+> [!NOTE]
+> The build script (`build.lua`) automatically downloads pre-compiled binaries if `cargo` is not found. You only need Rust installed if you want to build from source or the prebuilt binary isn't available for your platform.
 
 ---
 
@@ -213,6 +305,18 @@ require("roslyn_filewatch").setup({
     *   Adds `UNT` analyzer rules to your LSP configuration.
 4.  **Tip**: Use `:RoslynEngineInfo` to confirm Unity mode is active.
 
+### 3. Diagnostics
+
+Run `:checkhealth roslyn_filewatch` to verify your setup. The healthcheck reports:
+
+- **Neovim version** compatibility
+- **libuv** capabilities (fs_event, fs_poll)
+- **Platform** detection and OS-specific notes
+- **Rust native module** status (loaded or fallback)
+- **External tools**: fd, dotnet, watchman, fswatch
+- **Scanning tier** priority chain (which backend is active)
+- **Active Roslyn LSP clients** and their root directories
+
 ---
 
 ## Command Reference
@@ -224,7 +328,7 @@ Most commands are **interactive**—if you run them without arguments, a selecti
 |---------|-------------|
 | `:RoslynFilewatch status` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
 | `:RoslynFilewatch reload` | **Recovery**: Forces a full file resync and tells the LSP to reload all projects. |
-| `:checkhealth roslyn_filewatch` | Shows basic environment diagnostics. |
+| `:checkhealth roslyn_filewatch` | Shows comprehensive environment diagnostics. |
 |---|---|
 
 ##  Maintainer Guide
@@ -247,6 +351,25 @@ flowchart TD
     Rename -->|Batch Notify| Notify[notify.lua]
     Notify -->|LSP JSON| Roslyn[Roslyn LSP]
 ```
+
+#### Scanning Tiers
+
+The plugin uses a priority chain for file scanning, automatically selecting the fastest available:
+
+```
+┌─────────────────────────────────┐
+│ Tier 1: Rust native module      │  ← Fastest (1-3ms, filtered at native level)
+│   roslyn_filewatch_rs           │
+├─────────────────────────────────┤
+│ Tier 2: fd / fdfind             │  ← Fast (async subprocess, streams results)
+│   External process              │
+├─────────────────────────────────┤
+│ Tier 3: Pure Lua scanner        │  ← Slowest (chunked via vim.defer_fn, never blocks)
+│   uv.fs_scandir + uv.fs_stat   │
+└─────────────────────────────────┘
+```
+
+All tiers are **fully non-blocking** — the plugin never freezes the Neovim UI during scanning.
 
 #### Core Components (V2 Architecture)
 *   **`watcher.lua`**: The orchestrator. Manages the lifecycle of event handles and the **Self-Healing Watchdog** that restarts frozen listeners. Implements **Chunked Processing** to handle thousands of events.
@@ -285,6 +408,15 @@ flowchart TD
 2.  Increase `poll_interval` or `processing_debounce_ms`.
 3.  Ensure `ignore_dirs` includes your build artifacts (`bin`, `obj`).
 
+**"Slow initial scanning"**
+1.  Run `:checkhealth roslyn_filewatch` — check the **Scanning Tiers** section.
+2.  Install the Rust native module (fastest) or `fd` (fast fallback).
+3.  Add large generated/build folders to `ignore_dirs`.
+
+**"NuGet restore not working"**
+1.  Ensure `dotnet` CLI is installed and in your PATH.
+2.  Check `enable_autorestore = true` in your config.
+3.  Run `:checkhealth roslyn_filewatch` to verify dotnet is detected.
 
 ---
 
@@ -326,4 +458,4 @@ MIT License.
 ## Acknowledgements
 
 - Inspired by the pain of using Roslyn in Neovim without file watchers 😅  
-- Thanks to Neovim’s `vim.uv` and [sharkdp/fd](https://github.com/sharkdp/fd) for making cross-platform file watching possible.
+- Thanks to Neovim's `vim.uv` and [sharkdp/fd](https://github.com/sharkdp/fd) for making cross-platform file watching possible.

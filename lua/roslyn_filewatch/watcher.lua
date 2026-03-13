@@ -757,6 +757,7 @@ function M.start(client)
   -- Forward-declare so restart_watcher closure captures it as a proper upvalue
   -- (last_events_proxy is assigned below, after restart_watcher is defined)
   local last_events_proxy
+  local snapshots_proxy
 
   local function calculate_backoff_delay()
     local initial = config.options.recovery_initial_delay_ms or 300
@@ -913,7 +914,7 @@ function M.start(client)
     end, delay_ms)
   end
 
-  local snapshots_proxy = setmetatable({}, {
+  snapshots_proxy = setmetatable({}, {
     __index = function(_, k)
       return client_states[k] and client_states[k].snapshot
     end,

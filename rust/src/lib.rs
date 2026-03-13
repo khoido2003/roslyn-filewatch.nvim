@@ -61,13 +61,31 @@ fn fast_snapshot<'lua>(
         }
     }
 
-    let walker = WalkBuilder::new(&directory)
+    let mut walker_builder = WalkBuilder::new(&directory);
+    walker_builder
         .hidden(false)
         .ignore(false)
         .git_ignore(respect_gitignore)
         .git_global(false)
-        .git_exclude(false)
-        .build();
+        .git_exclude(false);
+
+    // If we have ignore_dirs, use filter_entry to prune them completely from the traversal
+    if let Some(ref dirs) = ignore_dirs {
+        walker_builder.filter_entry({
+            let dirs_clone = dirs.clone();
+            move |entry| {
+                if let Some(name) = entry.file_name().to_str() {
+                    let lower = name.to_lowercase();
+                    if dirs_clone.iter().any(|d| d == &lower) {
+                        return false; // Skip this directory/file and its children entirely
+                    }
+                }
+                true
+            }
+        });
+    }
+
+    let walker = walker_builder.build();
 
     for result in walker {
         let entry = match result {
@@ -75,7 +93,7 @@ fn fast_snapshot<'lua>(
             Err(_) => continue,
         };
 
-        // Skip directories early
+        // Skip directories early for processing
         let file_type = match entry.file_type() {
             Some(ft) => ft,
             None => continue,
@@ -85,25 +103,6 @@ fn fast_snapshot<'lua>(
         }
 
         let path = entry.path();
-
-        // Check ignore_dirs: skip if any path component matches
-        if let Some(ref dirs) = ignore_dirs {
-            let mut skip = false;
-            for component in path.components() {
-                if let std::path::Component::Normal(os_str) = component {
-                    if let Some(name) = os_str.to_str() {
-                        let lower = name.to_lowercase();
-                        if dirs.iter().any(|d| d == &lower) {
-                            skip = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if skip {
-                continue;
-            }
-        }
 
         // Check extension filter
         if let Some(ref exts) = extensions {

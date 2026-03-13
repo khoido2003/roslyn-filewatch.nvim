@@ -202,11 +202,14 @@ function M.start(client, root, snapshots, deps)
             return
           end
 
-          local new_map = {}
-          local scan_ok = pcall(deps.scan_tree, root, new_map)
-          if scan_ok then
-            process_scan_results(new_map, old_map)
-          end
+          -- Sync fallback — schedule off the timer callback to avoid blocking
+          vim.schedule(function()
+            local new_map = {}
+            local scan_ok = pcall(deps.scan_tree, root, new_map)
+            if scan_ok then
+              process_scan_results(new_map, old_map)
+            end
+          end)
         else
           -- Sparse Polling: Pre-filter dirty_dirs by checking if their directory mtime changed
           -- removed due to directory mtime not updating upon file modifications
@@ -224,7 +227,11 @@ function M.start(client, root, snapshots, deps)
               end
             end
 
-            deps.partial_scan_async(active_dirty_dirs, old_map, root, function(new_map)
+            local working_map = {}
+            for k, v in pairs(old_map) do
+              working_map[k] = v
+            end
+            deps.partial_scan_async(active_dirty_dirs, working_map, root, function(new_map)
               local evs = {}
 
               -- Check for new/changed files in dirty dirs
