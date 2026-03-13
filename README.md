@@ -180,6 +180,26 @@ use {
 }
 ```
 
+### Manual Building (If Automatic Install Fails)
+
+If the `.dll` or `.so` is not building automatically, or you are downloading the plugin manually without a package manager, you can trigger the build script yourself:
+
+**Inside Neovim:**
+```vim
+:lua dofile(vim.fn.stdpath("data") .. "/lazy/roslyn-filewatch.nvim/build.lua")
+```
+
+**Using Lazy.nvim UI:**
+1. Type `:Lazy`
+2. Hover over `roslyn-filewatch.nvim`
+3. Press `b` to force rebuild
+
+**From your terminal:**
+```bash
+cd ~/.local/share/nvim/lazy/roslyn-filewatch.nvim
+nvim -l build.lua
+```
+
 ### Migration Guide (v0.4.x)
 
 **Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync** tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been removed to minimize bloat and maximize performance.
