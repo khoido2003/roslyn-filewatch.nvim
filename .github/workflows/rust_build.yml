@@ -1,10 +1,8 @@
 name: Build Rust Native Module
-
 on:
   release:
     types: [published]
   workflow_dispatch:
-
 jobs:
   build:
     name: Build on ${{ matrix.os }}
@@ -17,56 +15,34 @@ jobs:
           - os: ubuntu-latest
             artifact_name: libroslyn_filewatch_rs.so
             asset_name: roslyn_filewatch_rs-linux-x86_64.so
-            target: ''
           - os: macos-latest
             artifact_name: libroslyn_filewatch_rs.dylib
             asset_name: roslyn_filewatch_rs-macos-arm64.so
-            target: ''
-          - os: macos-latest
+          - os: macos-13
             artifact_name: libroslyn_filewatch_rs.dylib
             asset_name: roslyn_filewatch_rs-macos-x86_64.so
-            target: 'x86_64-apple-darwin'
           - os: windows-latest
             artifact_name: roslyn_filewatch_rs.dll
             asset_name: roslyn_filewatch_rs-windows-x86_64.dll
-            target: ''
-
     steps:
       - uses: actions/checkout@v4
-
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Add Rust Target for Cross-Compilation
-        if: matrix.target != ''
-        run: rustup target add ${{ matrix.target }}
-
       - name: Build Library
-        if: matrix.target == ''
         run: cargo build --release
         working-directory: rust
-
-      - name: Build Library (Cross-Compile)
-        if: matrix.target != ''
-        run: cargo build --release --target ${{ matrix.target }}
-        working-directory: rust
-
       - name: Rename Artifact (Unix)
-        if: runner.os != 'Windows' && matrix.target == ''
+        if: runner.os != 'Windows'
         run: mv rust/target/release/${{ matrix.artifact_name }} rust/target/release/${{ matrix.asset_name }}
-
-      - name: Rename Artifact (Unix Cross-Compiled)
-        if: runner.os != 'Windows' && matrix.target != ''
-        run: mv rust/target/${{ matrix.target }}/release/${{ matrix.artifact_name }} rust/target/${{ matrix.target }}/release/${{ matrix.asset_name }}
-
       - name: Rename Artifact (Windows)
         if: runner.os == 'Windows'
         run: Rename-Item -Path "rust\target\release\${{ matrix.artifact_name }}" -NewName "${{ matrix.asset_name }}"
-
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release'
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
-          files: |
-            rust/target/release/${{ matrix.asset_name }}
-            rust/target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+          files: rust/target/release/${{ matrix.asset_name }}
