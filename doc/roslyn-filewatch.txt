@@ -9,6 +9,7 @@ Table of Contents                         *roslyn-filewatch-table-of-contents*
   - Requirements         |roslyn-filewatch-roslyn-filewatch.nvim-requirements|
   - Dependency Installation|roslyn-filewatch-roslyn-filewatch.nvim-dependency-installation|
   - Installation         |roslyn-filewatch-roslyn-filewatch.nvim-installation|
+  - Rebuilding the Native Module|roslyn-filewatch-roslyn-filewatch.nvim-rebuilding-the-native-module|
   - User Manual           |roslyn-filewatch-roslyn-filewatch.nvim-user-manual|
   - Command Reference|roslyn-filewatch-roslyn-filewatch.nvim-command-reference|
   - Maintainer Guide |roslyn-filewatch-roslyn-filewatch.nvim-maintainer-guide|
@@ -264,28 +265,35 @@ PACKER.NVIM ~
 <
 
 
-MANUAL BUILDING (IF AUTOMATIC INSTALL FAILS) ~
+REBUILDING THE NATIVE MODULE*roslyn-filewatch-roslyn-filewatch.nvim-rebuilding-the-native-module*
 
-If the `.dll` or `.so` is not building automatically, or you are downloading
-the plugin manually without a package manager, you can trigger the build script
-yourself:
+If you need to manually trigger a rebuild (e.g. after updating the plugin):
 
-**Inside Neovim:**
 
->vim
-    :lua dofile(vim.fn.stdpath("data") .. "/lazy/roslyn-filewatch.nvim/build.lua")
-<
+LAZY.NVIM ~
 
-**Using Lazy.nvim** 1. Type `:Lazy build roslyn-filewatch.nvim` 2. Press enter
-to rebuild
+The module is built automatically on install. To rebuild manually: 1. Run
+`:Lazy build roslyn-filewatch.nvim`
 
-**From your terminal:**
 
->bash
+FROM YOUR TERMINAL ~
+
+>sh
     cd ~/.local/share/nvim/lazy/roslyn-filewatch.nvim
     nvim -l build.lua
 <
 
+
+ROCKS.NVIM / OTHER PLUGIN MANAGERS ~
+
+>sh
+    cd <plugin-install-path>
+    nvim -l build.lua
+<
+
+
+  **Note:** Do not use `:lua dofile(...)` to trigger the build — it does not
+  set the working directory correctly and may fail to locate the plugin root.
 
 MIGRATION GUIDE (V0.4.X) ~
 
