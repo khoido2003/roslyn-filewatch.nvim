@@ -17,6 +17,10 @@ local M = {}
 local scanning_in_progress = {}
 local rust_warned = false
 
+--- Cached gitignore state per root
+---@type table<string, { matcher: any, mtime: number }>
+local gitignore_cache = {}
+
 function M.cancel_async_scan(root)
   scanning_in_progress[normalize_path(root)] = nil
 end
@@ -40,6 +44,72 @@ local function check_rust_module()
     end)
   end
   return false, nil
+end
+
+--- Build options table for the Rust fast_snapshot call
+---@return table
+local function build_rust_options()
+  local opts = config.options or {}
+  return {
+    extensions = opts.watch_extensions,
+    ignore_dirs = opts.ignore_dirs,
+    respect_gitignore = opts.respect_gitignore ~= false,
+  }
+end
+
+--- Call Rust fast_snapshot and normalize the result into snapshot format
+---@param rs table The Rust module
+---@param root string Root directory
+---@return table<string, roslyn_filewatch.SnapshotEntry>|nil
+local function call_rust_snapshot(rs, root)
+  local ok_snap, result = pcall(rs.fast_snapshot, root, build_rust_options())
+  if not ok_snap or type(result) ~= "table" then
+    return nil
+  end
+
+  local out = {}
+  for path, info in pairs(result) do
+    out[path] = {
+      mtime = info.mtime or 0,
+      size = info.size or 0,
+      ino = 0,
+      dev = 0,
+    }
+  end
+  return out
+end
+
+--- Get cached or freshly loaded gitignore matcher
+---@param root string
+---@return any|nil matcher
+---@return any|nil gitignore_mod
+local function get_cached_gitignore(root)
+  if config.options.respect_gitignore == false then
+    return nil, nil
+  end
+
+  local ok, gitignore_mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
+  if not ok or not gitignore_mod then
+    return nil, nil
+  end
+
+  local gitignore_path = root .. "/.gitignore"
+  local stat = uv.fs_stat(gitignore_path)
+  if not stat then
+    gitignore_cache[root] = nil
+    return nil, gitignore_mod
+  end
+
+  local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
+  local cached = gitignore_cache[root]
+
+  if cached and cached.mtime == current_mtime then
+    return cached.matcher, gitignore_mod
+  end
+
+  local matcher = gitignore_mod.load(root)
+  gitignore_cache[root] = { matcher = matcher, mtime = current_mtime }
+  return matcher, gitignore_mod
 end
 
 local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
@@ -69,7 +139,6 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
   table.insert(args, root)
 
   local out_map = {}
-  local collected_paths = {}
   local stdout = uv.new_pipe(false)
   local stderr = uv.new_pipe(false)
   local buffer = ""
@@ -78,87 +147,74 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
   local stdout_closed = false
   local handle_closed = false
 
+  -- Process paths in a streaming fashion: stat each batch as we receive lines
+  local pending_stats = 0
+  local all_stats_queued = false
+  local total_processed = 0
+
+  local function check_all_done()
+    if all_stats_queued and pending_stats == 0 then
+      scanning_in_progress[root] = nil
+      vim.schedule(function()
+        if callback then
+          callback(out_map)
+        end
+      end)
+    end
+  end
+
+  local function stat_path(path)
+    pending_stats = pending_stats + 1
+    uv.fs_stat(path, function(err, st)
+      if not err and st then
+        out_map[path] = {
+          mtime = mtime_ns(st),
+          size = st.size,
+          ino = st.ino,
+          dev = st.dev,
+        }
+      end
+
+      pending_stats = pending_stats - 1
+      total_processed = total_processed + 1
+
+      if on_progress and total_processed % 2000 == 0 then
+        vim.schedule(function()
+          pcall(on_progress, total_processed)
+        end)
+      end
+
+      check_all_done()
+    end)
+  end
+
+  local function process_line(line)
+    if #line > 0 then
+      stat_path(normalize_path(line))
+    end
+  end
+
   local function on_finish()
     if not stdout_closed or not handle_closed then
       return
     end
 
-    vim.schedule(function()
-      if exit_code ~= 0 and #collected_paths == 0 then
-        -- Only fail completely if fd returned non-zero AND produced NO paths
-        -- (fd often returns 1 for partial permission denied errors while still giving valid output)
-        scanning_in_progress[root] = nil
-        if callback then
+    if exit_code ~= 0 and pending_stats == 0 and total_processed == 0 then
+      scanning_in_progress[root] = nil
+      if callback then
+        vim.schedule(function()
           callback(out_map)
-        end
-        return
+        end)
       end
+      return
+    end
 
-      if not scanning_in_progress[root] then
-        return
-      end
+    if not scanning_in_progress[root] then
+      return
+    end
 
-      local pending = #collected_paths
-      if pending == 0 then
-        scanning_in_progress[root] = nil
-        if callback then
-          callback(out_map)
-        end
-        return
-      end
-
-      local processed = 0
-      local BATCH_SIZE = 200
-      local current_idx = 1
-
-      local function process_batch()
-        if not scanning_in_progress[root] then
-          return
-        end
-
-        local end_idx = math.min(current_idx + BATCH_SIZE - 1, pending)
-        local batch_completed = 0
-        local batch_total = end_idx - current_idx + 1
-
-        for i = current_idx, end_idx do
-          uv.fs_stat(collected_paths[i], function(err, st)
-            if not err and st then
-              out_map[collected_paths[i]] = {
-                mtime = mtime_ns(st),
-                size = st.size,
-                ino = st.ino,
-                dev = st.dev,
-              }
-            end
-
-            processed = processed + 1
-            batch_completed = batch_completed + 1
-
-            if on_progress and processed % 2000 == 0 then
-              vim.schedule(function()
-                pcall(on_progress, processed)
-              end)
-            end
-
-            if batch_completed == batch_total then
-              current_idx = end_idx + 1
-              if current_idx <= pending then
-                vim.defer_fn(process_batch, 5)
-              else
-                scanning_in_progress[root] = nil
-                vim.schedule(function()
-                  if callback then
-                    callback(out_map)
-                  end
-                end)
-              end
-            end
-          end)
-        end
-      end
-
-      process_batch()
-    end)
+    all_stats_queued = true
+    check_all_done()
   end
 
   local handle
@@ -202,18 +258,13 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
 
         local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
         buffer = buffer:sub(line_end + 1)
-
-        if #line > 0 then
-          table.insert(collected_paths, normalize_path(line))
-        end
+        process_line(line)
       end
     else
       -- EOF
       if #buffer > 0 then
         local line = buffer:gsub("\r$", "")
-        if #line > 0 then
-          table.insert(collected_paths, normalize_path(line))
-        end
+        process_line(line)
       end
       stdout:read_stop()
       stdout:close()
@@ -245,31 +296,25 @@ local function scan_tree_async_lua(root, callback, on_progress)
     end
   end
 
-  local gitignore_mod = nil
-  local gitignore_matcher = nil
-  if config.options.respect_gitignore ~= false then
-    local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-    if ok and mod then
-      gitignore_mod = mod
-      gitignore_matcher = mod.load(root)
-    end
-  end
+  local gitignore_matcher, gitignore_mod = get_cached_gitignore(root)
 
   local out_map = {}
   local files_scanned = 0
   local dir_queue = { root }
 
   local function should_skip_dir(name, fullpath)
-    local cmp_name = is_win and name:lower() or name
-    local cmp_fullpath = is_win and fullpath:lower() or fullpath
-    local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
-
-    for _, dir in ipairs(dirs_to_check) do
-      if cmp_name == dir then
+    -- Use O(1) cached lookup when available
+    if config._ignore_dirs_set then
+      if config._ignore_dirs_set[name:lower()] then
         return true
       end
-      if cmp_fullpath:find("/" .. dir .. "/", 1, true) or cmp_fullpath:match("/" .. dir .. "$") then
-        return true
+    else
+      local cmp_name = is_win and name:lower() or name
+      local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
+      for _, dir in ipairs(dirs_to_check) do
+        if cmp_name == dir then
+          return true
+        end
       end
     end
     return false
@@ -367,69 +412,21 @@ function M.scan_tree_async(root, callback, on_progress)
   end
   scanning_in_progress[root] = true
 
+  -- Try Rust module first — call directly on main thread (fast native code)
   local ok, rs = check_rust_module()
   if ok and rs then
-    -- Run on background thread using vim.uv.new_work so it doesn't block UI
-    local work = uv.new_work(function(dir)
-      local success, r = pcall(require, "roslyn_filewatch_rs")
-      if success and r and r.fast_snapshot then
-        local ok_snap, result = pcall(r.fast_snapshot, dir)
-        if ok_snap and type(result) == "table" then
-          local parts = {}
-          for k, v in pairs(result) do
-            local mtime = (v.mtime or 0) * 1000000000
-            local size = v.size or 0
-            table.insert(parts, string.format("%s:%d:%d", k, mtime, size))
-          end
-          return true, table.concat(parts, "|")
-        end
-      end
-      return false, nil
-    end, function(success, result_str)
-      local result = nil
-      if success and result_str and type(result_str) == "string" then
-        result = {}
-        if result_str ~= "" then
-          for group in result_str:gmatch("[^|]+") do
-            -- Look for path:mtime:size from the end backwards to support paths with colons
-            local last_colon = group:match("():[^:]+$")
-            if last_colon then
-              local second_last = group:sub(1, last_colon - 1):match("():[^:]+$")
-              if second_last then
-                local k = group:sub(1, second_last - 1)
-                local mtime = tonumber(group:sub(second_last + 1, last_colon - 1)) or 0
-                local size = tonumber(group:sub(last_colon + 1)) or 0
-                result[k] = { mtime = mtime, size = size, ino = 0, dev = 0 }
-              end
-            end
-          end
-        end
-      end
-
-      if success and result then
-        scanning_in_progress[root] = nil
-        vim.schedule(function()
-          pcall(callback, result)
-        end)
-      else
-        -- Fallback to fd/lua if background rust fails
-        local fd_exe = nil
-        if vim.fn.executable("fd") == 1 then
-          fd_exe = "fd"
-        elseif vim.fn.executable("fdfind") == 1 then
-          fd_exe = "fdfind"
-        end
-
-        if fd_exe then
-          scan_tree_async_fd(fd_exe, root, callback, on_progress)
-        else
-          scan_tree_async_lua(root, callback, on_progress)
-        end
-      end
-    end)
-
-    work:queue(root)
-    return
+    -- Call Rust directly — no serialization round-trip, no uv.new_work overhead
+    -- The Rust module is fast enough to run synchronously without blocking UI
+    -- because it now filters by extensions/ignore_dirs, reducing work dramatically
+    local result = call_rust_snapshot(rs, root)
+    if result then
+      scanning_in_progress[root] = nil
+      vim.schedule(function()
+        pcall(callback, result)
+      end)
+      return
+    end
+    -- Fall through to fd/lua if Rust call failed
   end
 
   local fd_exe = nil
@@ -449,12 +446,13 @@ end
 function M.scan_tree(root, out_map)
   root = normalize_path(root)
 
+  -- Try Rust module — now with proper filtering and nanosecond precision
   local ok, rs = check_rust_module()
   if ok and rs then
-    local ok_snap, result = pcall(rs.fast_snapshot, root)
-    if ok_snap and type(result) == "table" then
+    local result = call_rust_snapshot(rs, root)
+    if result then
       for k, v in pairs(result) do
-        out_map[k] = { mtime = (v.mtime or 0) * 1000000000, size = v.size or 0, ino = 0, dev = 0 }
+        out_map[k] = v
       end
       return
     end
@@ -471,15 +469,7 @@ function M.scan_tree(root, out_map)
     end
   end
 
-  local gitignore_mod = nil
-  local gitignore_matcher = nil
-  if config.options.respect_gitignore ~= false then
-    local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-    if ok and mod then
-      gitignore_mod = mod
-      gitignore_matcher = mod.load(root)
-    end
-  end
+  local gitignore_matcher, gitignore_mod = get_cached_gitignore(root)
 
   local function scan_dir(path)
     local fd = uv.fs_scandir(path)
@@ -503,18 +493,16 @@ function M.scan_tree(root, out_map)
 
       if typ == "directory" then
         local skip = false
-        local cmp_name = is_win and name:lower() or name
-        local cmp_fullpath = is_win and fullpath:lower() or fullpath
-        local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
-
-        for _, dir in ipairs(dirs_to_check) do
-          if cmp_name == dir then
-            skip = true
-            break
-          end
-          if cmp_fullpath:find("/" .. dir .. "/", 1, true) or cmp_fullpath:match("/" .. dir .. "$") then
-            skip = true
-            break
+        if config._ignore_dirs_set then
+          skip = config._ignore_dirs_set[name:lower()] == true
+        else
+          local cmp_name = is_win and name:lower() or name
+          local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
+          for _, dir in ipairs(dirs_to_check) do
+            if cmp_name == dir then
+              skip = true
+              break
+            end
           end
         end
 
@@ -551,15 +539,7 @@ function M.partial_scan(dirs, existing_map, root)
   local ignore_dirs = config.options.ignore_dirs or {}
   local watch_extensions = config.options.watch_extensions or {}
 
-  local gitignore_mod = nil
-  local gitignore_matcher = nil
-  if config.options.respect_gitignore ~= false then
-    local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-    if ok and mod then
-      gitignore_mod = mod
-      gitignore_matcher = mod.load(root)
-    end
-  end
+  local gitignore_matcher, gitignore_mod = get_cached_gitignore(root)
 
   for _, dir in ipairs(dirs) do
     local normalized_dir = normalize_path(dir)
@@ -630,15 +610,7 @@ function M.partial_scan_async(dirs, existing_map, root, callback)
   local ignore_dirs = config.options.ignore_dirs or {}
   local watch_extensions = config.options.watch_extensions or {}
 
-  local gitignore_mod = nil
-  local gitignore_matcher = nil
-  if config.options.respect_gitignore ~= false then
-    local ok, mod = pcall(require, "roslyn_filewatch.watcher.gitignore")
-    if ok and mod then
-      gitignore_mod = mod
-      gitignore_matcher = mod.load(root)
-    end
-  end
+  local gitignore_matcher, gitignore_mod = get_cached_gitignore(root)
 
   for _, dir in ipairs(dirs) do
     local normalized_dir = normalize_path(dir)

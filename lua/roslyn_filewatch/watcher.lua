@@ -12,6 +12,7 @@ local backend_mod = require("roslyn_filewatch.watcher.backends.init")
 local fs_poll_mod = require("roslyn_filewatch.watcher.fs_poll")
 local watchdog_mod = require("roslyn_filewatch.watcher.watchdog")
 local autocmds_mod = require("roslyn_filewatch.watcher.autocmds")
+local rename_mod = require("roslyn_filewatch.watcher.rename")
 local restore_mod = require("roslyn_filewatch.restore")
 
 local mtime_ns = utils.mtime_ns
@@ -435,6 +436,7 @@ local function handle_csproj_reload(client, sln_info)
   pending.timer = timer
 
   timer:start(500, 0, function()
+    safe_close_handle(timer)
     pending.timer = nil
     pending.pending = false
 
@@ -853,21 +855,11 @@ function M.start(client)
 
       local restart_success = false
       if use_fs_event then
-        local snapshots_proxy_inner = setmetatable({}, {
-          __index = function(_, k)
-            return client_states[k] and client_states[k].snapshot
-          end,
-          __newindex = function(_, k, v)
-            if client_states[k] then
-              client_states[k].snapshot = v
-            end
-          end,
-        })
-
+        -- Reuse the outer snapshots_proxy instead of creating a new one
         local backend_api, backend_name = backend_mod.get_best_backend()
         if backend_api then
           notify(string.format("Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
-          local handle, err = backend_api.start(client, watch_roots, snapshots_proxy_inner, {
+          local handle, err = backend_api.start(client, watch_roots, snapshots_proxy, {
             notify = notify,
             queue_events = queue_events,
             notify_roslyn_renames = notify_roslyn_renames,
@@ -1366,7 +1358,10 @@ function M.start(client)
 
   notify("Watcher started for " .. client.name .. " at: " .. root, vim.log.levels.DEBUG)
 
+  -- Use a per-client augroup to prevent duplicate LspDetach autocmds
+  local detach_group = vim.api.nvim_create_augroup("RoslynFilewatch_Detach_" .. client.id, { clear = true })
   vim.api.nvim_create_autocmd("LspDetach", {
+    group = detach_group,
     callback = function(args)
       if args.data.client_id == client.id then
         vim.schedule(function()
