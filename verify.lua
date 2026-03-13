@@ -1,9 +1,20 @@
 local files = {
   "lua/roslyn_filewatch/watcher.lua",
   "lua/roslyn_filewatch/watcher/fs_event.lua",
+  "lua/roslyn_filewatch/watcher/fs_poll.lua",
+  "lua/roslyn_filewatch/watcher/snapshot.lua",
   "lua/roslyn_filewatch/watcher/notify.lua",
   "lua/roslyn_filewatch/watcher/sln_parser.lua",
+  "lua/roslyn_filewatch/watcher/utils.lua",
+  "lua/roslyn_filewatch/watcher/watchdog.lua",
+  "lua/roslyn_filewatch/watcher/gitignore.lua",
+  "lua/roslyn_filewatch/watcher/rename.lua",
+  "lua/roslyn_filewatch/watcher/regen_detector.lua",
   "lua/roslyn_filewatch/watcher/backends/fswatch.lua",
+  "lua/roslyn_filewatch/watcher/backends/init.lua",
+  "lua/roslyn_filewatch/config.lua",
+  "lua/roslyn_filewatch/health.lua",
+  "lua/roslyn_filewatch/init.lua",
 }
 
 local has_err = false
@@ -18,7 +29,10 @@ for _, f in ipairs(files) do
 end
 
 if has_err then
+  print("\nSyntax check FAILED")
   os.exit(1)
+else
+  print("\nAll syntax checks passed (" .. #files .. " files)")
 end
 
 package.cpath = package.cpath .. ";./lua/?.dll"

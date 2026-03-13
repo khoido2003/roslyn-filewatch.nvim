@@ -18,6 +18,19 @@ local uv = vim.uv or vim.loop
 
 local M = {}
 
+-- Cache config module reference to avoid pcall(require) on every call
+local _cached_config = nil
+local function get_config()
+  if _cached_config then
+    return _cached_config
+  end
+  local ok, cfg = pcall(require, "roslyn_filewatch.config")
+  if ok and cfg then
+    _cached_config = cfg
+  end
+  return _cached_config
+end
+
 -- Cache the platform detection result
 ---@type boolean|nil
 local _is_windows_cache = nil
@@ -177,33 +190,28 @@ function M.get_extension(path)
   return ext
 end
 
---- Check if a path segment matches an ignore directory name exactly
---- This prevents false positives like "MyLibrary" matching "Library"
---- Case-insensitive matching on Windows for cross-platform compatibility
+--- Check if a path contains an ignored directory segment.
+--- Uses O(1) set lookup when config cache is available, falls back to pattern matching.
 ---@param path string Normalized path with forward slashes
 ---@param ignore_dir string Directory name to check
 ---@return boolean
 local function matches_ignore_dir(path, ignore_dir)
-  -- Case-insensitive matching on Windows
   local is_win = M.is_windows()
   local cmp_path = is_win and path:lower() or path
   local cmp_dir = is_win and ignore_dir:lower() or ignore_dir
 
-  -- Pattern: /dir/ or /dir at end
-  -- Use pattern anchoring to match exact segment
-  local pattern_mid = "/" .. cmp_dir .. "/"
-  local pattern_end = "/" .. cmp_dir .. "$"
-
-  if cmp_path:find(pattern_mid, 1, true) then
+  -- Fast plain-text segment check: /dir/ or /dir at end
+  if cmp_path:find("/" .. cmp_dir .. "/", 1, true) then
     return true
   end
-  if cmp_path:match(pattern_end) then
+  -- Check end: path ends with /dir
+  local suffix = "/" .. cmp_dir
+  if #cmp_path >= #suffix and cmp_path:sub(-#suffix) == suffix then
     return true
   end
-
-  -- Also check if path starts with the ignore dir (e.g., root level)
-  local pattern_start = "^" .. cmp_dir .. "/"
-  if cmp_path:match(pattern_start) then
+  -- Check start: path starts with dir/
+  local prefix = cmp_dir .. "/"
+  if cmp_path:sub(1, #prefix) == prefix then
     return true
   end
 
@@ -335,17 +343,27 @@ function M.should_watch_path(path, ignore_dirs, watch_extensions)
     return false
   end
 
-  -- Check against ignored directories (exact segment match) - fast path
-  for _, dir in ipairs(ignore_dirs or {}) do
-    if matches_ignore_dir(path, dir) then
-      return false
+  local cfg = get_config()
+
+  -- Check against ignored directories — use O(1) set when available
+  if cfg and cfg._ignore_dirs_set then
+    -- Extract each path segment and check against set
+    for segment in path:gmatch("[^/]+") do
+      if cfg._ignore_dirs_set[segment:lower()] then
+        return false
+      end
+    end
+  else
+    for _, dir in ipairs(ignore_dirs or {}) do
+      if matches_ignore_dir(path, dir) then
+        return false
+      end
     end
   end
 
   -- Check against ignore_patterns (glob patterns) - only if configured
-  local config_ok, config = pcall(require, "roslyn_filewatch.config")
-  if config_ok and config and config.options and config.options.ignore_patterns then
-    local patterns = config.options.ignore_patterns
+  if cfg and cfg.options and cfg.options.ignore_patterns then
+    local patterns = cfg.options.ignore_patterns
     if patterns and #patterns > 0 then
       if M.matches_any_pattern(path, patterns) then
         return false
@@ -360,8 +378,8 @@ function M.should_watch_path(path, ignore_dirs, watch_extensions)
   end
 
   -- Try O(1) cached lookup first (from config module)
-  if config_ok and config and config.is_watched_extension then
-    return config.is_watched_extension(ext)
+  if cfg and cfg.is_watched_extension then
+    return cfg.is_watched_extension(ext)
   end
 
   -- Fallback to O(n) array iteration for backward compatibility

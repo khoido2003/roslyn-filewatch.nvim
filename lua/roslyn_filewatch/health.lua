@@ -92,35 +92,76 @@ local function check_platform()
   end
 end
 
+--- Check Rust native module
+local function check_rust_module()
+  local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
+  if rs_ok and rs and rs.fast_snapshot then
+    ok("Native Rust module (roslyn_filewatch_rs) loaded successfully")
+    info("  fast_snapshot function available — fastest scanning tier active")
+  else
+    warn("Native Rust module (roslyn_filewatch_rs) NOT loaded")
+    info("  The plugin will fall back to fd or pure Lua scanning (slower)")
+    info("  To install: run the build command in your plugin manager (e.g. ':Lazy build roslyn-filewatch.nvim')")
+    info("  Or manually: cd rust && cargo build --release")
+    if not rs_ok then
+      info("  Load error: " .. tostring(rs))
+    end
+  end
+end
+
 --- Check external tools and watcher backends
 local function check_external_tools()
-  if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
-    ok("fd found (accelerated scanning enabled)")
+  -- fd / fdfind — accelerated file scanning fallback
+  if vim.fn.executable("fd") == 1 then
+    ok("fd found at: " .. vim.fn.exepath("fd"))
+    info("  Accelerated file scanning enabled (fallback when Rust module unavailable)")
+  elseif vim.fn.executable("fdfind") == 1 then
+    ok("fdfind found at: " .. vim.fn.exepath("fdfind"))
+    info("  Accelerated file scanning enabled (fallback when Rust module unavailable)")
   else
-    info("fd not found (using standard Lua scanning)")
-    info("Install 'sharkdp/fd' for significantly faster startup on huge projects")
+    warn("fd/fdfind NOT found — pure Lua scanning will be used as last resort (slowest)")
+    info("  Install fd for much faster scanning: https://github.com/sharkdp/fd#installation")
+    info("  Windows:  winget install sharkdp.fd  OR  scoop install fd  OR  choco install fd")
+    info("  macOS:    brew install fd")
+    info("  Linux:    apt install fd-find  OR  pacman -S fd  OR  dnf install fd-find")
   end
 
+  -- dotnet CLI — needed for auto-restore
+  if vim.fn.executable("dotnet") == 1 then
+    ok("dotnet CLI found at: " .. vim.fn.exepath("dotnet"))
+  else
+    warn("dotnet CLI NOT found — auto-restore of NuGet packages will not work")
+    info("  Install .NET SDK: https://dotnet.microsoft.com/download")
+  end
+
+  -- Native watcher backends
   local backend_mod_ok, backend_mod = pcall(require, "roslyn_filewatch.watcher.backends.init")
   if backend_mod_ok and backend_mod.get_best_backend then
     local _, best_name = backend_mod.get_best_backend()
     if best_name == "watchman" then
-      ok("Native Watcher Backend: watchman (Best Performance, Native Ignores)")
+      ok("Native Watcher Backend: watchman (Best Performance)")
+      info("  Recommended for monorepos with 10,000+ files")
     elseif best_name == "fswatch" then
-      ok("Native Watcher Backend: fswatch (Good Performance, Native Ignores)")
+      ok("Native Watcher Backend: fswatch (Good Performance)")
     else
-      warn("Native Watcher Backend: fallback to fs_event/fs_poll")
-      info("For the best performance on large monolithic repositories, install watchman or fswatch.")
+      info("Native Watcher Backend: built-in fs_event / polling")
+      info("  For large monorepos, consider installing watchman or fswatch:")
+      info("  Watchman: https://facebook.github.io/watchman/docs/install")
+      info("  fswatch (macOS/Linux): brew install fswatch  OR  apt install fswatch")
     end
   end
 end
 
 --- Check Roslyn LSP clients
 local function check_roslyn_clients()
-  local config = require("roslyn_filewatch.config")
-  local client_names = config.options.client_names or {}
+  local config_ok, config = pcall(require, "roslyn_filewatch.config")
+  if not config_ok then
+    warn("Could not load config module")
+    return
+  end
 
-  info("Configured client names: " .. vim.inspect(client_names))
+  local client_names = config.options and config.options.client_names or {}
+  info("Configured client names: " .. table.concat(client_names, ", "))
 
   local clients = vim.lsp.get_clients()
   local found_roslyn = false
@@ -142,10 +183,35 @@ local function check_roslyn_clients()
       for _, client in ipairs(clients) do
         info("  - " .. client.name .. " (id: " .. client.id .. ")")
       end
-      info("Make sure your Roslyn LSP client name matches one of: " .. vim.inspect(client_names))
+      info("Make sure your Roslyn LSP client name matches one of: " .. table.concat(client_names, ", "))
     else
-      warn("No active LSP clients. Open a C# file to attach the Roslyn LSP.")
+      info("No active LSP clients. Open a C# file to attach the Roslyn LSP.")
     end
+  end
+end
+
+--- Scanning tier summary
+local function check_scanning_tiers()
+  local tiers = {}
+
+  local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
+  if rs_ok and rs and rs.fast_snapshot then
+    table.insert(tiers, "1. Rust native module (active, fastest)")
+  else
+    table.insert(tiers, "1. Rust native module (NOT available)")
+  end
+
+  if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
+    table.insert(tiers, "2. fd/fdfind async scanning (available, fast)")
+  else
+    table.insert(tiers, "2. fd/fdfind async scanning (NOT available)")
+  end
+
+  table.insert(tiers, "3. Pure Lua async scanning (always available, slowest)")
+
+  info("Scanning priority chain:")
+  for _, tier in ipairs(tiers) do
+    info("  " .. tier)
   end
 end
 
@@ -162,8 +228,17 @@ function M.check()
   start("Platform Detection")
   check_platform()
 
+  start("Native Rust Module")
+  check_rust_module()
+
   start("External Tools & Native Backends")
   check_external_tools()
+
+  start("Scanning Tiers")
+  check_scanning_tiers()
+
+  start("Active Roslyn LSP Clients")
+  check_roslyn_clients()
 end
 
 return M

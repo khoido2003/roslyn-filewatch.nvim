@@ -93,33 +93,15 @@ function M.clear(client_id)
   last_resync_ts[client_id] = nil
 end
 
+--- Check if a path should be watched (delegates to shared utils implementation)
+---@param fullpath string
+---@param cfg table config module
+---@return boolean
 local function should_watch_path(fullpath, cfg)
   local opts = cfg.options
   if not opts then
     return false
   end
-
-  local ext = utils.get_extension(fullpath)
-  if not ext then
-    return false
-  end
-
-  local is_win = utils.is_windows()
-  local compare_ext = is_win and ext:lower() or ext
-
-  local ext_match = false
-  for _, watch_ext in ipairs(opts.watch_extensions or {}) do
-    local cmp = is_win and watch_ext:lower() or watch_ext
-    if compare_ext == cmp then
-      ext_match = true
-      break
-    end
-  end
-
-  if not ext_match then
-    return false
-  end
-
   return utils.should_watch_path(fullpath, opts.ignore_dirs or {}, opts.watch_extensions or {})
 end
 
@@ -266,13 +248,22 @@ function M.start(client, root, snapshots, deps)
   if is_nvim_10 then
     -- Neovim 0.10+ vim.fs.watch handles polyfills and recursive bugs cleanly
     -- It returns a cleanup function, not a handle object.
+    -- Track health status so watchdog can detect failures.
+    local watch_healthy = true
     handle = {
       is_closing = function()
-        return false
+        return not watch_healthy
+      end,
+      _set_unhealthy = function()
+        watch_healthy = false
       end,
     }
-    function handle.stop() end
-    function handle.close() end
+    function handle.stop()
+      watch_healthy = false
+    end
+    function handle.close()
+      watch_healthy = false
+    end
   else
     handle, err = uv.new_fs_event()
     if not handle then
@@ -483,11 +474,9 @@ function M.start(client, root, snapshots, deps)
         table.insert(q.events, filename)
 
         if #q.events > MAX_RAW_QUEUE_SIZE then
-          local diff = #q.events - MAX_RAW_QUEUE_SIZE
-          local new_events = {}
-          for i = diff + 1, #q.events do
-            new_events[#new_events + 1] = q.events[i]
-          end
+          -- Efficient truncation: keep only the last MAX_RAW_QUEUE_SIZE entries
+          local keep_from = #q.events - MAX_RAW_QUEUE_SIZE + 1
+          local new_events = { table.unpack(q.events, keep_from) }
           q.events = new_events
         end
 

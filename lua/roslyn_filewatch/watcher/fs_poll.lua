@@ -202,42 +202,57 @@ function M.start(client, root, snapshots, deps)
             return
           end
 
-          local new_map = {}
-          local scan_ok = pcall(deps.scan_tree, root, new_map)
-          if scan_ok then
-            process_scan_results(new_map, old_map)
-          end
+          -- Sync fallback — schedule off the timer callback to avoid blocking
+          vim.schedule(function()
+            local new_map = {}
+            local scan_ok = pcall(deps.scan_tree, root, new_map)
+            if scan_ok then
+              process_scan_results(new_map, old_map)
+            end
+          end)
         else
           -- Sparse Polling: Pre-filter dirty_dirs by checking if their directory mtime changed
           -- removed due to directory mtime not updating upon file modifications
           local active_dirty_dirs = dirty_dirs
 
           if deps.partial_scan_async then
-            local base_map = {}
-            for k, v in pairs(old_map) do
-              base_map[k] = v
+            -- Take a snapshot of entries only in dirty dirs
+            local affected_keys = {}
+            for _, dir in ipairs(active_dirty_dirs) do
+              local dir_prefix = dir .. "/"
+              for path in pairs(old_map) do
+                if path:find(dir_prefix, 1, true) == 1 or path:find(dir, 1, true) == 1 then
+                  affected_keys[path] = old_map[path]
+                end
+              end
             end
-            deps.partial_scan_async(active_dirty_dirs, base_map, root, function(new_map)
-              local async_old = snapshots[client.id] or {}
+
+            local working_map = {}
+            for k, v in pairs(old_map) do
+              working_map[k] = v
+            end
+            deps.partial_scan_async(active_dirty_dirs, working_map, root, function(new_map)
               local evs = {}
 
-              for path, mt in pairs(new_map) do
-                local old_mt = async_old[path]
-                if not old_mt then
-                  table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
-                elseif not (deps.same_file_info and deps.same_file_info(old_mt, mt)) then
-                  table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
+              -- Check for new/changed files in dirty dirs
+              for _, dir in ipairs(active_dirty_dirs) do
+                local dir_prefix = dir .. "/"
+                for path, mt in pairs(new_map) do
+                  if path:find(dir_prefix, 1, true) == 1 or path:find(dir, 1, true) == 1 then
+                    local old_mt = affected_keys[path]
+                    if not old_mt then
+                      table.insert(evs, { uri = vim.uri_from_fname(path), type = 1 })
+                    elseif not (deps.same_file_info and deps.same_file_info(old_mt, mt)) then
+                      table.insert(evs, { uri = vim.uri_from_fname(path), type = 2 })
+                    end
+                  end
                 end
               end
 
-              for path in pairs(async_old) do
+              -- Check for deleted files (were in affected_keys but not in new_map)
+              for path in pairs(affected_keys) do
                 if not new_map[path] then
-                  for _, dir in ipairs(active_dirty_dirs) do
-                    if path:find(dir, 1, true) == 1 then
-                      table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
-                      break
-                    end
-                  end
+                  table.insert(evs, { uri = vim.uri_from_fname(path), type = 3 })
                 end
               end
 
