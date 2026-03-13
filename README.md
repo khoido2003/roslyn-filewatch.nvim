@@ -180,24 +180,28 @@ use {
 }
 ```
 
-### Manual Building (If Automatic Install Fails)
+## Rebuilding the Native Module
 
-If the `.dll` or `.so` is not building automatically, or you are downloading the plugin manually without a package manager, you can trigger the build script yourself:
+If you need to manually trigger a rebuild (e.g. after updating the plugin):
 
-**Inside Neovim:**
-```vim
-:lua dofile(vim.fn.stdpath("data") .. "/lazy/roslyn-filewatch.nvim/build.lua")
-```
+### lazy.nvim
+The module is built automatically on install. To rebuild manually:
+1. Run `:Lazy build roslyn-filewatch.nvim`
 
-**Using Lazy.nvim**
-1. Type `:Lazy build roslyn-filewatch.nvim`
-2. Press enter to rebuild
-
-**From your terminal:**
-```bash
+### From your terminal
+```sh
 cd ~/.local/share/nvim/lazy/roslyn-filewatch.nvim
 nvim -l build.lua
 ```
+
+### rocks.nvim / other plugin managers
+```sh
+cd <plugin-install-path>
+nvim -l build.lua
+```
+
+> **Note:** Do not use `:lua dofile(...)` to trigger the build — it does not set the
+> working directory correctly and may fail to locate the plugin root.
 
 ### Migration Guide (v0.4.x)
 
