@@ -5,6 +5,23 @@ All notable changes to roslyn-filewatch.nvim will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.4] - 2026-03-13
+
+### Optimized
+- **Native Rust Filtering**: The Rust snapshot module (`roslyn_filewatch_rs.dll`/`.so`) now filters by `ignore_dirs`, `extensions`, and `.gitignore` at the native level, drastically reducing parsing time for large folders like `node_modules` and `Library`.
+- **Zero-Block Fallback**: Eliminated the `uv.new_work` serialization bottleneck and converted the fallback polling mechanism to safely yield to `vim.schedule`, preventing UI thread freezes.
+- **Path Matching**: Upgraded `should_watch_path` and `matches_ignore_dir` to O(1) set-based lookups. `fd` output now streams asynchronously instead of buffering.
+
+### Fixed
+- **Memory & Handle Leaks**: Fixed a missing `require` causing rename buffer leaks. Properly closed timer handles in `handle_csproj_reload`. Prevented duplicate `LspDetach` autocmd accumulation.
+- **Watchman / fswatch Accuracy**: `fswatch` now only emits `Changed` (type 2) events if the `mtime` actually diverges from the cached snapshot, preventing false positives. Resolved `fs_event` overwriting health-check flags.
+- **Data Corruption**: Prevented `fs_poll.lua` from performing in-place mutations on the active snapshot table during incremental partial scans.
+- **Precision**: Rust module now returns nanosecond-precision `mtime` and handles Windows drive-letter casing normalization perfectly to fix false-positive file renames.
+
+### Added
+- **Diagnostic Tooling**: Completely rewrote `:checkhealth roslyn_filewatch`. It now checks for the `.NET SDK` (`dotnet`), `fd`, validation of the loaded Rust module, and displays the exact active Priority Scanning Tier.
+- **Documentation**: Overhauled `README.md` to map out platform-specific installation commands for suggested dependencies (`fd`, `watchman`, `cargo`) and manual instructions for building the Rust DLL if the auto-installer fails.
+
 ## [v0.4.3] - 2026-02-26
 
 ### Added
