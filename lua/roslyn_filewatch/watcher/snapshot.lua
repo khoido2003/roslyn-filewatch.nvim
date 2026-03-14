@@ -36,12 +36,8 @@ local function check_rust_module()
   end
   if not rust_warned then
     rust_warned = true
-    vim.schedule(function()
-      vim.notify(
-        "[roslyn-filewatch] Native Rust module (roslyn_filewatch_rs) failed to load. Falling back to Lua/fd scanning. Run Lazy build (or check 'lua build.lua') to install it for maximum performance.",
-        vim.log.levels.WARN
-      )
-    end)
+    -- Silently fall back to fd/Lua scanning.
+    -- Users can check :checkhealth for missing optional tools.
   end
   return false, nil
 end

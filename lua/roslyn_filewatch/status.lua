@@ -2,8 +2,6 @@
 ---@field get_status fun(): roslyn_filewatch.StatusInfo
 ---@field show fun()
 
----Status tracking module for RoslynFilewatchStatus command.
-
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 
@@ -11,21 +9,23 @@ local M = {}
 
 ---@class roslyn_filewatch.StatusInfo
 ---@field clients roslyn_filewatch.ClientStatus[]
----@field config_summary table
+---@field scanning_tier string
+---@field watcher_backend string
 
 ---@class roslyn_filewatch.ClientStatus
 ---@field id number
 ---@field name string
 ---@field root string
----@field has_fs_event boolean
+---@field backend string
+---@field has_watcher boolean
 ---@field has_poller boolean
 ---@field has_watchdog boolean
 ---@field file_count number
 ---@field last_event number|nil
 ---@field sln_file string|nil
----@field project_dirs string[]|nil
+---@field project_count number
+---@field preset string|nil
 
--- References to watcher internals (set during watcher.start)
 local _watchers = nil
 local _pollers = nil
 local _watchdogs = nil
@@ -34,8 +34,6 @@ local _last_events = nil
 local _sln_infos = nil
 local _backend_names = nil
 
---- Register watcher state references for status tracking
----@param refs table References to watcher internal state tables
 function M.register_refs(refs)
   _watchers = refs.watchers
   _pollers = refs.pollers
@@ -46,91 +44,29 @@ function M.register_refs(refs)
   _backend_names = refs.backend_names
 end
 
---- Get status for all watched clients
----@return roslyn_filewatch.StatusInfo
-function M.get_status()
-  local status = {
-    clients = {},
-    config_summary = {
-      solution_aware = config.options.solution_aware ~= false,
-      respect_gitignore = config.options.respect_gitignore ~= false,
-      force_polling = config.options.force_polling or false,
-      batching = config.options.batching and config.options.batching.enabled or false,
-      poll_interval = config.options.poll_interval or 3000,
-      fd_available = (vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1),
-    },
-  }
-
+--- Determine scanning tier in use
+---@return string
+local function get_scanning_tier()
   local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
-  status.config_summary.rs_available = rs_ok and rs and rs.fast_snapshot ~= nil
-
-  -- Find all Roslyn clients
-  local clients = vim.lsp.get_clients()
-  for _, client in ipairs(clients) do
-    if vim.tbl_contains(config.options.client_names or {}, client.name) then
-      local client_status = {
-        id = client.id,
-        name = client.name,
-        root = client.config and client.config.root_dir or "unknown",
-        has_fs_event = _watchers and _watchers[client.id] ~= nil or false,
-        has_poller = _pollers and _pollers[client.id] ~= nil or false,
-        has_watchdog = _watchdogs and _watchdogs[client.id] ~= nil or false,
-        file_count = 0,
-        last_event = _last_events and _last_events[client.id] or nil,
-        sln_file = nil,
-        project_dirs = nil,
-        backend = (_backend_names and _backend_names[client.id]) or "unknown",
-      }
-
-      -- Count files in snapshot
-      if _snapshots and _snapshots[client.id] then
-        local count = 0
-        for _ in pairs(_snapshots[client.id]) do
-          count = count + 1
-        end
-        client_status.file_count = count
-      end
-
-      -- Check for solution info from watcher state
-      if _sln_infos and _sln_infos[client.id] then
-        local info = _sln_infos[client.id]
-        if info.path then
-          client_status.sln_file = info.path
-          if info.csproj_files then
-            -- Count project files
-            local count = 0
-            for _ in pairs(info.csproj_files) do
-              count = count + 1
-            end
-            client_status.project_dirs = { length = count } -- structure to match usage
-          end
-        elseif info.csproj_files then
-          -- csproj only mode
-          client_status.has_csproj = true
-        else
-          client_status.missing_project = true
-        end
-      else
-        -- Fallback if no info yet
-        client_status.missing_project = true
-      end
-
-      table.insert(status.clients, client_status)
-    end
+  if rs_ok and rs and rs.fast_snapshot then
+    return "rust"
   end
-
-  return status
+  if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
+    return "fd"
+  end
+  return "lua"
 end
 
---- Format time ago string
 ---@param timestamp number|nil
 ---@return string
 local function format_time_ago(timestamp)
-  if not timestamp then
-    return "never"
+  if not timestamp or timestamp == 0 then
+    return "none"
   end
   local ago = os.time() - timestamp
-  if ago < 60 then
+  if ago < 2 then
+    return "just now"
+  elseif ago < 60 then
     return ago .. "s ago"
   elseif ago < 3600 then
     return math.floor(ago / 60) .. "m ago"
@@ -139,131 +75,154 @@ local function format_time_ago(timestamp)
   end
 end
 
---- Show status in a floating window or print to messages
+function M.get_status()
+  local status = {
+    clients = {},
+    scanning_tier = get_scanning_tier(),
+    watcher_backend = "unknown",
+  }
+
+  local clients = vim.lsp.get_clients()
+  for _, client in ipairs(clients) do
+    if vim.tbl_contains(config.options.client_names or {}, client.name) then
+      local cs = {
+        id = client.id,
+        name = client.name,
+        root = utils.normalize_path(client.config and client.config.root_dir or "unknown"),
+        backend = (_backend_names and _backend_names[client.id]) or "unknown",
+        has_watcher = _watchers and _watchers[client.id] ~= nil or false,
+        has_poller = _pollers and _pollers[client.id] ~= nil or false,
+        has_watchdog = _watchdogs and _watchdogs[client.id] ~= nil or false,
+        file_count = 0,
+        last_event = _last_events and _last_events[client.id] or nil,
+        sln_file = nil,
+        project_count = 0,
+        preset = config.options._applied_preset,
+      }
+
+      if _snapshots and _snapshots[client.id] then
+        cs.file_count = vim.tbl_count(_snapshots[client.id])
+      end
+
+      if _sln_infos and _sln_infos[client.id] then
+        local sln = _sln_infos[client.id]
+        if sln.path then
+          cs.sln_file = sln.path:match("[^/\\]+$") or sln.path
+        end
+        if sln.csproj_files then
+          cs.project_count = vim.tbl_count(sln.csproj_files)
+        end
+      end
+
+      status.watcher_backend = cs.backend
+      table.insert(status.clients, cs)
+    end
+  end
+
+  return status
+end
+
 function M.show()
   local status = M.get_status()
 
-  --- Helper to echo a line with optional highlight
-  ---@param text string
-  ---@param hl string|nil Highlight group name
-  local function echo(text, hl)
-    vim.api.nvim_echo({ { text, hl or "Normal" } }, true, {})
+  local lines = {}
+  local hls = {}
+
+  local function add(text, hl)
+    table.insert(lines, { { text, hl or "Normal" } })
   end
 
-  --- Helper to echo multiple segments with different highlights
-  ---@param segments table[] Array of {text, hl} pairs
-  local function echo_multi(segments)
-    local formatted = {}
-    for _, seg in ipairs(segments) do
-      table.insert(formatted, { seg[1], seg[2] or "Normal" })
-    end
-    vim.api.nvim_echo(formatted, true, {})
-  end
-
-  -- Header
-  echo("")
-  echo("roslyn-filewatch Status", "Title")
-  echo(string.rep("─", 40), "Comment")
-  echo("")
-
-  -- Config section
-  echo("Config:", "Bold")
-  local function config_line(label, enabled)
-    if enabled then
-      echo_multi({
-        { "  " .. label .. ": ", "Normal" },
-        { "✓ enabled", "DiagnosticOk" },
-      })
-    else
-      echo_multi({
-        { "  " .. label .. ": ", "Normal" },
-        { "✗ disabled", "Comment" },
-      })
-    end
-  end
-  config_line("Solution-aware", status.config_summary.solution_aware)
-  config_line("Gitignore     ", status.config_summary.respect_gitignore)
-  config_line("Batching      ", status.config_summary.batching)
-  config_line("Diag throttle ", config.options.diagnostic_throttling and config.options.diagnostic_throttling.enabled)
-  config_line("fd Integration", status.config_summary.fd_available)
-  config_line("Rust Snapshot ", status.config_summary.rs_available)
-
-  -- Show applied preset
-  local applied_preset = config.options._applied_preset
-  if applied_preset then
-    echo_multi({
-      { "  Preset        : ", "Normal" },
-      { applied_preset, "String" },
+  local function add_kv(key, value, val_hl)
+    table.insert(lines, {
+      { "  " .. key .. ": ", "Normal" },
+      { tostring(value), val_hl or "Normal" },
     })
   end
 
+  local function add_bool(key, enabled)
+    local val = enabled and "on" or "off"
+    local hl = enabled and "DiagnosticOk" or "WarningMsg"
+    add_kv(key, val, hl)
+  end
+
+  -- Header
+  add("")
+  add("roslyn-filewatch", "Title")
+  add(string.rep("─", 40), "Comment")
+
+  -- Global info
+  add_kv("Scanning", status.scanning_tier, "Identifier")
+  add_kv("Backend", status.watcher_backend, "Identifier")
+
+  if config.options._applied_preset then
+    add_kv("Preset", config.options._applied_preset, "String")
+  end
+
+  -- Config
+  add("")
+  add("  Config", "Bold")
+  add_bool("solution_aware", config.options.solution_aware ~= false)
+  add_bool("respect_gitignore", config.options.respect_gitignore ~= false)
+  add_bool("batching", config.options.batching and config.options.batching.enabled)
+  add_bool("force_polling", config.options.force_polling)
+  add_bool("autorestore", config.options.enable_autorestore ~= false)
+  add_kv("poll_interval", (config.options.poll_interval or 5000) .. "ms")
+  add_kv("log_level", config.options.log_level or "WARN")
+
+  -- Clients
   if #status.clients == 0 then
-    echo("")
-    echo("No active Roslyn clients", "WarningMsg")
+    add("")
+    add("  No active Roslyn clients", "WarningMsg")
   else
-    for _, client in ipairs(status.clients) do
-      echo("")
-      echo(string.rep("─", 40), "Comment")
-      echo_multi({
-        { "Client: ", "Normal" },
-        { client.name, "Identifier" },
-        { " (id: " .. client.id .. ")", "Comment" },
+    for _, c in ipairs(status.clients) do
+      add("")
+      add(string.rep("─", 40), "Comment")
+      table.insert(lines, {
+        { "  " .. c.name, "Identifier" },
+        { " #" .. c.id, "Number" },
       })
-      echo("  Root: " .. utils.normalize_path(client.root), "Normal")
-      echo_multi({
-        { "  Backend: ", "Normal" },
-        { client.backend or "unknown", "Identifier" },
-      })
+      add_kv("Root", c.root)
+      add_kv("Backend", c.backend, "Identifier")
 
-      -- Watch mode
-      local mode = "none"
-      if client.has_fs_event and client.has_poller then
-        mode = "fs_event + polling fallback"
-      elseif client.has_fs_event then
-        mode = "fs_event only"
-      elseif client.has_poller then
-        mode = "polling only"
+      -- Watcher state
+      local state_parts = {}
+      if c.has_watcher then
+        table.insert(state_parts, "watcher")
       end
-      echo("  Mode: " .. mode, "Normal")
+      if c.has_poller then
+        table.insert(state_parts, "poller")
+      end
+      if c.has_watchdog then
+        table.insert(state_parts, "watchdog")
+      end
+      add_kv(
+        "Active",
+        #state_parts > 0 and table.concat(state_parts, " + ") or "none",
+        #state_parts > 0 and "DiagnosticOk" or "WarningMsg"
+      )
 
-      -- Files and events
-      echo_multi({
-        { "  Files watched: ", "Normal" },
-        { tostring(client.file_count), "Number" },
-      })
-      echo_multi({
-        { "  Last event: ", "Normal" },
-        { format_time_ago(client.last_event), "Comment" },
-      })
+      add_kv("Files", c.file_count, "Number")
+      add_kv("Last event", format_time_ago(c.last_event))
 
-      -- Solution info
-      if client.sln_file then
-        local sln_name = client.sln_file:match("[^/]+$") or client.sln_file
-        echo_multi({
-          { "  Solution: ", "Normal" },
-          { sln_name, "String" },
-        })
-        if client.project_dirs and client.project_dirs.length then
-          echo("  Projects: " .. client.project_dirs.length .. " projects loaded", "Normal")
-        elseif client.project_dirs and #client.project_dirs > 0 then
-          echo("  Projects: " .. #client.project_dirs .. " directories", "Normal")
-        end
-      elseif client.has_csproj then
-        echo("  Solution: (none found - using .csproj files)", "Comment")
-      elseif client.missing_project then
-        echo("  Solution: (none found - scanning full root)", "Comment")
-        echo("")
-        echo("  ⚠ No .sln or .csproj found!", "WarningMsg")
-        echo("  IntelliSense may be limited. To fix, run:", "Comment")
-        echo("    dotnet new console   (for new projects)", "Comment")
-        echo("    dotnet restore       (if project exists)", "Comment")
+      -- Solution
+      if c.sln_file then
+        add_kv("Solution", c.sln_file, "String")
+        add_kv("Projects", c.project_count, "Number")
+      elseif c.project_count > 0 then
+        add_kv("Solution", "none (csproj-only mode)", "WarningMsg")
+        add_kv("Projects", c.project_count, "Number")
       else
-        echo("  Solution: (none found - scanning full root)", "Comment")
+        add_kv("Solution", "none", "WarningMsg")
       end
     end
   end
 
-  echo("")
+  add("")
+
+  -- Output
+  for _, segs in ipairs(lines) do
+    vim.api.nvim_echo(segs, true, {})
+  end
 end
 
 return M

@@ -1,5 +1,4 @@
 ---@class roslyn_filewatch.health
----Healthcheck module for roslyn-filewatch.nvim
 
 local M = {}
 
@@ -10,235 +9,154 @@ local warn = health.warn or health.report_warn
 local error_fn = health.error or health.report_error
 local info = health.info or health.report_info
 
---- Check Neovim version
-local function check_neovim_version()
-  local version = vim.version()
-  local version_str = string.format("%d.%d.%d", version.major, version.minor, version.patch)
+local function check_neovim()
+  local v = vim.version()
+  local str = string.format("%d.%d.%d", v.major, v.minor, v.patch)
 
-  if version.major >= 0 and version.minor >= 10 then
-    ok("Neovim version: " .. version_str .. " (>= 0.10 recommended)")
-  elseif version.major >= 0 and version.minor >= 9 then
-    warn("Neovim version: " .. version_str .. " (0.10+ recommended for best experience)")
+  if v.minor >= 10 then
+    ok("Neovim " .. str)
+  elseif v.minor >= 9 then
+    warn("Neovim " .. str .. " (0.10+ recommended)")
   else
-    error_fn("Neovim version: " .. version_str .. " (0.9+ required)")
+    error_fn("Neovim " .. str .. " (0.9+ required)")
+  end
+
+  if type(vim.fs) == "table" and type(vim.fs.watch) == "function" then
+    ok("vim.fs.watch available")
+  else
+    info("vim.fs.watch not available (requires Neovim 0.11+)")
   end
 end
 
---- Check libuv availability
-local function check_libuv()
-  local uv = vim.uv or vim.loop
-  if uv then
-    ok("libuv available via " .. (vim.uv and "vim.uv" or "vim.loop"))
-  else
-    error_fn("libuv not available - file watching will not work")
-    return
-  end
-
-  -- Check fs_event capability
-  local test_handle = uv.new_fs_event()
-  if test_handle then
-    ok("uv.new_fs_event() available")
-    pcall(function()
-      test_handle:close()
-    end)
-  else
-    warn("uv.new_fs_event() failed - plugin will use polling fallback")
-  end
-
-  -- Check fs_poll capability
-  local test_poll = uv.new_fs_poll()
-  if test_poll then
-    ok("uv.new_fs_poll() available")
-    pcall(function()
-      test_poll:close()
-    end)
-  else
-    error_fn("uv.new_fs_poll() failed - polling fallback not available")
-  end
-end
-
---- Check platform
 local function check_platform()
-  local utils = require("roslyn_filewatch.watcher.utils")
-  local is_win = utils.is_windows()
-
   local uv = vim.uv or vim.loop
   local uname = uv.os_uname()
   local sysname = uname and uname.sysname or "unknown"
-
   info("Platform: " .. sysname)
 
-  if is_win then
-    info("Windows detected - fs_event enabled with EPERM error recovery")
-  elseif sysname:match("Darwin") then
-    info("macOS detected - FSEvents may have inherent latency (1-5 seconds)")
-  elseif sysname:match("Linux") then
-    ok("Linux detected - inotify should work well")
-
-    -- Check inotify limits
+  if sysname == "Linux" then
     local handle = io.open("/proc/sys/fs/inotify/max_user_watches", "r")
     if handle then
-      local content = handle:read("*a")
+      local limit = tonumber(handle:read("*a"))
       handle:close()
-      local limit = tonumber(content)
       if limit and limit < 524288 then
-        warn("Low fs.inotify.max_user_watches: " .. tostring(limit))
-        info("Suggest increasing limit for large projects:")
-        info("echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p")
+        warn("inotify max_user_watches: " .. tostring(limit) .. " (recommend >= 524288)")
       else
-        ok("fs.inotify.max_user_watches: " .. tostring(limit))
+        ok("inotify max_user_watches: " .. tostring(limit))
       end
     end
   end
 end
 
---- Check Rust native module
-local function check_rust_module()
-  local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
-  if rs_ok and rs and rs.fast_snapshot then
-    ok("Native Rust module (roslyn_filewatch_rs) loaded successfully")
-    info("  fast_snapshot function available — fastest scanning tier active")
-  else
-    warn("Native Rust module (roslyn_filewatch_rs) NOT loaded")
-    info("  The plugin will fall back to fd or pure Lua scanning (slower)")
-    info("  To install: run the build command in your plugin manager (e.g. ':Lazy build roslyn-filewatch.nvim')")
-    info("  Or manually: cd rust && cargo build --release")
-    if not rs_ok then
-      info("  Load error: " .. tostring(rs))
-    end
-  end
-end
-
---- Check external tools and watcher backends
-local function check_external_tools()
-  -- fd / fdfind — accelerated file scanning fallback
-  if vim.fn.executable("fd") == 1 then
-    ok("fd found at: " .. vim.fn.exepath("fd"))
-    info("  Accelerated file scanning enabled (fallback when Rust module unavailable)")
-  elseif vim.fn.executable("fdfind") == 1 then
-    ok("fdfind found at: " .. vim.fn.exepath("fdfind"))
-    info("  Accelerated file scanning enabled (fallback when Rust module unavailable)")
-  else
-    warn("fd/fdfind NOT found — pure Lua scanning will be used as last resort (slowest)")
-    info("  Install fd for much faster scanning: https://github.com/sharkdp/fd#installation")
-    info("  Windows:  winget install sharkdp.fd  OR  scoop install fd  OR  choco install fd")
-    info("  macOS:    brew install fd")
-    info("  Linux:    apt install fd-find  OR  pacman -S fd  OR  dnf install fd-find")
-  end
-
-  -- dotnet CLI — needed for auto-restore
-  if vim.fn.executable("dotnet") == 1 then
-    ok("dotnet CLI found at: " .. vim.fn.exepath("dotnet"))
-  else
-    warn("dotnet CLI NOT found — auto-restore of NuGet packages will not work")
-    info("  Install .NET SDK: https://dotnet.microsoft.com/download")
-  end
-
-  -- Native watcher backends
-  local backend_mod_ok, backend_mod = pcall(require, "roslyn_filewatch.watcher.backends.init")
-  if backend_mod_ok and backend_mod.get_best_backend then
-    local _, best_name = backend_mod.get_best_backend()
-    if best_name == "watchman" then
-      ok("Native Watcher Backend: watchman (Best Performance)")
-      info("  Recommended for monorepos with 10,000+ files")
-    elseif best_name == "fswatch" then
-      ok("Native Watcher Backend: fswatch (Good Performance)")
-    else
-      info("Native Watcher Backend: built-in fs_event / polling")
-      info("  For large monorepos, consider installing watchman or fswatch:")
-      info("  Watchman: https://facebook.github.io/watchman/docs/install")
-      info("  fswatch (macOS/Linux): brew install fswatch  OR  apt install fswatch")
-    end
-  end
-end
-
---- Check Roslyn LSP clients
-local function check_roslyn_clients()
-  local config_ok, config = pcall(require, "roslyn_filewatch.config")
-  if not config_ok then
-    warn("Could not load config module")
+local function check_libuv()
+  local uv = vim.uv or vim.loop
+  if not uv then
+    error_fn("libuv not available")
     return
   end
+  ok("libuv: " .. (vim.uv and "vim.uv" or "vim.loop"))
 
-  local client_names = config.options and config.options.client_names or {}
-  info("Configured client names: " .. table.concat(client_names, ", "))
-
-  local clients = vim.lsp.get_clients()
-  local found_roslyn = false
-
-  for _, client in ipairs(clients) do
-    if vim.tbl_contains(client_names, client.name) then
-      found_roslyn = true
-      ok("Found active Roslyn client: " .. client.name .. " (id: " .. client.id .. ")")
-
-      if client.config and client.config.root_dir then
-        info("  Root directory: " .. client.config.root_dir)
-      end
-    end
+  local test_handle = uv.new_fs_event()
+  if test_handle then
+    ok("uv.new_fs_event: available")
+    pcall(test_handle.close, test_handle)
+  else
+    warn("uv.new_fs_event: unavailable (will use polling)")
   end
 
-  if not found_roslyn then
-    if #clients > 0 then
-      warn("No active Roslyn clients found. Active LSP clients:")
-      for _, client in ipairs(clients) do
-        info("  - " .. client.name .. " (id: " .. client.id .. ")")
-      end
-      info("Make sure your Roslyn LSP client name matches one of: " .. table.concat(client_names, ", "))
-    else
-      info("No active LSP clients. Open a C# file to attach the Roslyn LSP.")
-    end
+  local test_poll = uv.new_fs_poll()
+  if test_poll then
+    ok("uv.new_fs_poll: available")
+    pcall(test_poll.close, test_poll)
+  else
+    error_fn("uv.new_fs_poll: unavailable")
   end
 end
 
---- Scanning tier summary
-local function check_scanning_tiers()
+local function check_tools()
+  -- Scanning tools (priority order)
+  local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
+  if rs_ok and rs and rs.fast_snapshot then
+    ok("Rust module: loaded")
+  else
+    warn("Rust module: not loaded")
+    info("  Build: :Lazy build roslyn-filewatch.nvim  OR  cd rust && cargo build --release")
+    if not rs_ok then
+      info("  Error: " .. tostring(rs))
+    end
+  end
+
+  if vim.fn.executable("fd") == 1 then
+    ok("fd: " .. vim.fn.exepath("fd"))
+  elseif vim.fn.executable("fdfind") == 1 then
+    ok("fdfind: " .. vim.fn.exepath("fdfind"))
+  else
+    warn("fd: not found")
+    info("  https://github.com/sharkdp/fd#installation")
+  end
+
+  -- Watcher backends (priority order)
+  if vim.fn.executable("watchman") == 1 then
+    ok("watchman: " .. vim.fn.exepath("watchman"))
+  else
+    info("watchman: not found (optional)")
+  end
+
+  if vim.fn.executable("fswatch") == 1 then
+    ok("fswatch: " .. vim.fn.exepath("fswatch"))
+  else
+    info("fswatch: not found (optional)")
+  end
+
+  -- dotnet CLI
+  if vim.fn.executable("dotnet") == 1 then
+    ok("dotnet: " .. vim.fn.exepath("dotnet"))
+  else
+    warn("dotnet: not found (auto-restore disabled)")
+  end
+end
+
+local function check_active_tiers()
   local tiers = {}
 
   local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")
   if rs_ok and rs and rs.fast_snapshot then
-    table.insert(tiers, "1. Rust native module (active, fastest)")
+    table.insert(tiers, "✓ Rust native (active)")
   else
-    table.insert(tiers, "1. Rust native module (NOT available)")
+    table.insert(tiers, "✗ Rust native")
   end
 
   if vim.fn.executable("fd") == 1 or vim.fn.executable("fdfind") == 1 then
-    table.insert(tiers, "2. fd/fdfind async scanning (available, fast)")
+    table.insert(tiers, "✓ fd async scan (available)")
   else
-    table.insert(tiers, "2. fd/fdfind async scanning (NOT available)")
+    table.insert(tiers, "✗ fd async scan")
   end
 
-  table.insert(tiers, "3. Pure Lua async scanning (always available, slowest)")
+  table.insert(tiers, "✓ Lua scan (always available)")
 
-  info("Scanning priority chain:")
-  for _, tier in ipairs(tiers) do
-    info("  " .. tier)
+  info("Scanning: " .. table.concat(tiers, " → "))
+
+  -- Watcher backend
+  local backend_ok, backend_mod = pcall(require, "roslyn_filewatch.watcher.backends.init")
+  if backend_ok and backend_mod.get_best_backend then
+    local _, name = backend_mod.get_best_backend()
+    info("Watcher backend: " .. (name or "fs_event"))
   end
 end
 
---- Main health check function
 function M.check()
   start("roslyn-filewatch.nvim")
 
-  start("Neovim Version")
-  check_neovim_version()
-
-  start("libuv Capabilities")
+  start("Environment")
+  check_neovim()
+  check_platform()
   check_libuv()
 
-  start("Platform Detection")
-  check_platform()
+  start("Tools")
+  check_tools()
 
-  start("Native Rust Module")
-  check_rust_module()
-
-  start("External Tools & Native Backends")
-  check_external_tools()
-
-  start("Scanning Tiers")
-  check_scanning_tiers()
-
-  start("Active Roslyn LSP Clients")
-  check_roslyn_clients()
+  start("Active Tiers")
+  check_active_tiers()
 end
 
 return M
