@@ -79,7 +79,6 @@ function M.get_status()
   local status = {
     clients = {},
     scanning_tier = get_scanning_tier(),
-    watcher_backend = "unknown",
   }
 
   local clients = vim.lsp.get_clients()
@@ -114,7 +113,6 @@ function M.get_status()
         end
       end
 
-      status.watcher_backend = cs.backend
       table.insert(status.clients, cs)
     end
   end
@@ -152,7 +150,6 @@ function M.show()
 
   -- Global info
   add_kv("Scanning", status.scanning_tier, "Identifier")
-  add_kv("Backend", status.watcher_backend, "Identifier")
 
   if config.options._applied_preset then
     add_kv("Preset", config.options._applied_preset, "String")

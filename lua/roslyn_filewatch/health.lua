@@ -13,18 +13,12 @@ local function check_neovim()
   local v = vim.version()
   local str = string.format("%d.%d.%d", v.major, v.minor, v.patch)
 
-  if v.minor >= 10 then
+  if v.major > 0 or (v.major == 0 and v.minor >= 10) then
     ok("Neovim " .. str)
-  elseif v.minor >= 9 then
+  elseif v.major == 0 and v.minor >= 9 then
     warn("Neovim " .. str .. " (0.10+ recommended)")
   else
     error_fn("Neovim " .. str .. " (0.9+ required)")
-  end
-
-  if type(vim.fs) == "table" and type(vim.fs.watch) == "function" then
-    ok("vim.fs.watch available")
-  else
-    info("vim.fs.watch not available (requires Neovim 0.11+)")
   end
 end
 
