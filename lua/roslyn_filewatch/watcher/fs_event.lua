@@ -244,33 +244,9 @@ function M.start(client, root, snapshots, deps)
 
   snapshots[client.id] = snapshots[client.id] or {}
 
-  local has_vim_fs_watch = type(vim.fs) == "table" and type(vim.fs.watch) == "function"
-  local handle, err
-
-  if has_vim_fs_watch then
-    -- Neovim 0.10+ vim.fs.watch handles polyfills and recursive bugs cleanly
-    -- It returns a cleanup function, not a handle object.
-    -- Track health status so watchdog can detect failures.
-    local watch_healthy = true
-    handle = {
-      is_closing = function()
-        return not watch_healthy
-      end,
-      _set_unhealthy = function()
-        watch_healthy = false
-      end,
-    }
-    function handle.stop()
-      watch_healthy = false
-    end
-    function handle.close()
-      watch_healthy = false
-    end
-  else
-    handle, err = uv.new_fs_event()
-    if not handle then
-      return nil, err or "uv.new_fs_event failed"
-    end
+  local handle, err = uv.new_fs_event()
+  if not handle then
+    return nil, err or "uv.new_fs_event failed"
   end
 
   local function flush_client_buffer(client_id)
@@ -496,22 +472,7 @@ function M.start(client, root, snapshots, deps)
       end
     end
 
-    if has_vim_fs_watch then
-      local cancel_watch = vim.fs.watch(root, { info = true, recursive = true }, function(err2, filename)
-        on_event_callback(err2, filename, nil)
-      end)
-      handle.stop = function()
-        pcall(cancel_watch)
-      end
-      handle.close = function()
-        pcall(cancel_watch)
-      end
-      handle.is_closing = function()
-        return false
-      end
-    else
-      handle:start(root, { recursive = true }, on_event_callback)
-    end
+    handle:start(root, { recursive = true }, on_event_callback)
   end)
 
   if not ok_start then
