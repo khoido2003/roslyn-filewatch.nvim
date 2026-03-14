@@ -12,6 +12,8 @@ local files = {
   "lua/roslyn_filewatch/watcher/regen_detector.lua",
   "lua/roslyn_filewatch/watcher/backends/fswatch.lua",
   "lua/roslyn_filewatch/watcher/backends/init.lua",
+  "lua/roslyn_filewatch/watcher/backends/fs_event_adapter.lua",
+  "lua/roslyn_filewatch/watcher/backends/watchman.lua",
   "lua/roslyn_filewatch/config.lua",
   "lua/roslyn_filewatch/health.lua",
   "lua/roslyn_filewatch/init.lua",

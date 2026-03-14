@@ -220,9 +220,11 @@ function M.start(client, root, snapshots, deps)
 
   local is_linux = vim.uv.os_uname().sysname == "Linux"
   if is_linux and deps.notify then
-    local msg =
-      "Warning: Native file watching on Linux does not support recursive directories via libuv. Subdirectories might not be watched. Please install 'watchman' or 'fswatch', or use 'force_polling' config option."
-    pcall(deps.notify, msg, vim.log.levels.WARN)
+    pcall(
+      deps.notify,
+      "Linux: libuv fs_event is non-recursive; consider watchman/fswatch or force_polling",
+      vim.log.levels.WARN
+    )
   end
 
   local cfg = deps.config or config
@@ -242,10 +244,10 @@ function M.start(client, root, snapshots, deps)
 
   snapshots[client.id] = snapshots[client.id] or {}
 
-  local is_nvim_10 = vim.fn.has("nvim-0.10") == 1
+  local has_vim_fs_watch = type(vim.fs) == "table" and type(vim.fs.watch) == "function"
   local handle, err
 
-  if is_nvim_10 then
+  if has_vim_fs_watch then
     -- Neovim 0.10+ vim.fs.watch handles polyfills and recursive bugs cleanly
     -- It returns a cleanup function, not a handle object.
     -- Track health status so watchdog can detect failures.
@@ -494,7 +496,7 @@ function M.start(client, root, snapshots, deps)
       end
     end
 
-    if is_nvim_10 then
+    if has_vim_fs_watch then
       local cancel_watch = vim.fs.watch(root, { info = true, recursive = true }, function(err2, filename)
         on_event_callback(err2, filename, nil)
       end)

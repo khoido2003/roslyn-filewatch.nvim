@@ -874,10 +874,10 @@ function M.start(client)
             state.backend_name = backend_name
             restart_success = true
           else
-            notify("Failed to start backend " .. backend_name .. ": " .. tostring(err), vim.log.levels.WARN)
+            notify("Failed to start backend " .. backend_name .. ": " .. tostring(err), vim.log.levels.DEBUG)
           end
         else
-          notify("No workable native watcher backend found.", vim.log.levels.ERROR)
+          notify("No workable native watcher backend found.", vim.log.levels.DEBUG)
         end
       else
         state.backend_name = "polling"
@@ -962,7 +962,7 @@ function M.start(client)
       else
         notify(
           "[STARTUP] Failed to start backend " .. backend_name .. ": " .. tostring(err) .. "; falling back to fs_event",
-          vim.log.levels.WARN
+          vim.log.levels.DEBUG
         )
         -- Fall back to fs_event
         local fe_handle, start_err = fs_event_mod.start(client, root, snapshots_proxy, {
@@ -982,7 +982,7 @@ function M.start(client)
           rename_window_ms = RENAME_WINDOW_MS,
         })
         if not fe_handle then
-          notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
+          notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.DEBUG)
           state.fs_event_disabled_until = os.time() + 5
           use_fs_event = false
         else
@@ -1010,7 +1010,7 @@ function M.start(client)
         rename_window_ms = RENAME_WINDOW_MS,
       })
       if not handle then
-        notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.WARN)
+        notify("Failed to create fs_event: " .. tostring(start_err), vim.log.levels.DEBUG)
         state.fs_event_disabled_until = os.time() + 5
         use_fs_event = false
       else
