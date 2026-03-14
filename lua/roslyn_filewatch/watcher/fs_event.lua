@@ -218,7 +218,8 @@ function M.start(client, root, snapshots, deps)
     return nil, "ENOENT: Directory does not exist or is not a directory: " .. root
   end
 
-  local is_linux = vim.uv.os_uname().sysname == "Linux"
+  local uname = uv.os_uname()
+  local is_linux = uname and uname.sysname == "Linux"
   if is_linux and deps.notify then
     pcall(
       deps.notify,

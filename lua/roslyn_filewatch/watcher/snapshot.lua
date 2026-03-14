@@ -141,13 +141,11 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
   local stdout_closed = false
   local handle_closed = false
 
-  -- Process paths in a streaming fashion: stat each batch as we receive lines
-  local pending_stats = 0
-  local all_stats_queued = false
-  local total_processed = 0
+  local process_idx = 1
+  local pending_paths = {}
 
   local function check_all_done()
-    if all_stats_queued and pending_stats == 0 then
+    if all_stats_queued and process_idx > #pending_paths then
       scanning_in_progress[root] = nil
       vim.schedule(function()
         if callback then
@@ -157,10 +155,20 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
     end
   end
 
-  local function stat_path(path)
-    pending_stats = pending_stats + 1
-    uv.fs_stat(path, function(err, st)
-      if not err and st then
+  local function drain_pending()
+    if not scanning_in_progress[root] then
+      return
+    end
+
+    local chunk = 0
+    local CHUNK_SIZE = 2000
+
+    while chunk < CHUNK_SIZE and process_idx <= #pending_paths do
+      local path = pending_paths[process_idx]
+      process_idx = process_idx + 1
+
+      local st = uv.fs_stat(path)
+      if st then
         out_map[path] = {
           mtime = mtime_ns(st),
           size = st.size,
@@ -169,23 +177,28 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
         }
       end
 
-      pending_stats = pending_stats - 1
+      chunk = chunk + 1
       total_processed = total_processed + 1
 
       if on_progress and total_processed % 2000 == 0 then
+        -- We cannot block inside the iterator thread safely, schedule the callback
         vim.schedule(function()
           pcall(on_progress, total_processed)
         end)
       end
+    end
 
+    if process_idx <= #pending_paths or not all_stats_queued then
+      vim.defer_fn(drain_pending, 2)
+    else
       check_all_done()
-    end)
+    end
   end
 
-  local function process_line(line)
-    if #line > 0 then
-      stat_path(normalize_path(line))
-    end
+  vim.defer_fn(drain_pending, 2)
+
+  if #line > 0 then
+    table.insert(pending_paths, normalize_path(line))
   end
 
   local function on_finish()
@@ -193,7 +206,7 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
       return
     end
 
-    if exit_code ~= 0 and pending_stats == 0 and total_processed == 0 then
+    if exit_code ~= 0 and process_idx > #pending_paths and total_processed == 0 then
       scanning_in_progress[root] = nil
       if callback then
         vim.schedule(function()
@@ -361,6 +374,8 @@ local function scan_tree_async_lua(root, callback, on_progress)
     return processed
   end
 
+  local dir_idx = 1
+
   local function process_chunk()
     if not scanning_in_progress[root] then
       return
@@ -368,11 +383,13 @@ local function scan_tree_async_lua(root, callback, on_progress)
 
     local chunk_files = 0
     local dirs_this_chunk = 0
-    local MAX_DIRS_PER_CHUNK = 5
-    local CHUNK_SIZE = 30
+    local MAX_DIRS_PER_CHUNK = 50
+    local CHUNK_SIZE = 2000
 
-    while #dir_queue > 0 and dirs_this_chunk < MAX_DIRS_PER_CHUNK and chunk_files < CHUNK_SIZE do
-      local dir = table.remove(dir_queue, 1)
+    while dir_idx <= #dir_queue and dirs_this_chunk < MAX_DIRS_PER_CHUNK and chunk_files < CHUNK_SIZE do
+      local dir = dir_queue[dir_idx]
+      dir_idx = dir_idx + 1
+
       local processed = process_single_dir(dir)
       chunk_files = chunk_files + processed
       files_scanned = files_scanned + processed
@@ -383,7 +400,7 @@ local function scan_tree_async_lua(root, callback, on_progress)
       pcall(on_progress, files_scanned)
     end
 
-    if #dir_queue > 0 then
+    if dir_idx <= #dir_queue then
       vim.defer_fn(process_chunk, 0)
     else
       scanning_in_progress[root] = nil

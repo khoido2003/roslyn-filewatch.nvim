@@ -133,8 +133,12 @@ local function check_active_tiers()
   -- Watcher backend
   local backend_ok, backend_mod = pcall(require, "roslyn_filewatch.watcher.backends.init")
   if backend_ok and backend_mod.get_best_backend then
-    local _, name = backend_mod.get_best_backend()
-    info("Watcher backend: " .. (name or "fs_event"))
+    local backend, name_or_err = backend_mod.get_best_backend()
+    if backend then
+      info("Watcher backend: " .. name_or_err)
+    else
+      warn("Watcher backend: " .. tostring(name_or_err))
+    end
   end
 end
 
