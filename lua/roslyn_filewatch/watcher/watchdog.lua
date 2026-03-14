@@ -233,22 +233,6 @@ local function check_handle_health(deps)
   return { level = 1, healthy = true }
 end
 
---- Level 2: Event flow check (fast, ~1ms)
----@param client_id number
----@param deps roslyn_filewatch.WatchdogDeps
----@return HealthCheckResult
-local function check_event_flow(client_id, deps)
-  local last_event = deps.last_events and deps.last_events[client_id] or 0
-  local now = os.time()
-  local idle_threshold = deps.watchdog_idle or 60
-
-  if now - last_event > idle_threshold then
-    return { level = 2, healthy = false, reason = "idle timeout (" .. idle_threshold .. "s)" }
-  end
-
-  return { level = 2, healthy = true }
-end
-
 ------------------------------------------------------
 -- MAIN WATCHDOG
 ------------------------------------------------------
@@ -344,21 +328,6 @@ function M.start(client, root, snapshots, deps)
         return
       end
 
-      ----------------------------------------------
-      -- LEVEL 2: Event Flow (every fast tick)
-      ----------------------------------------------
-      local flow_result = check_event_flow(client.id, deps)
-      if not flow_result.healthy then
-        pcall(notify, "Health check L2: " .. (flow_result.reason or "idle"), vim.log.levels.DEBUG)
-
-        if restart_watcher then
-          local delay = recovery_state.current_backoff_ms
-          pcall(restart_watcher, "idle_timeout", delay)
-          -- Idle timeout is normal, don't count as failure
-        end
-        return
-      end
-
       -- If we got here, fast checks passed - mark healthy if was recovering
       if recovery_state.health_status == "recovering" then
         record_recovery_attempt(client.id, true)
@@ -395,8 +364,13 @@ function M.start(client, root, snapshots, deps)
                 vim.log.levels.DEBUG
               )
 
-              -- Request full scan instead of restart
-              if deps.mark_needs_full_scan then
+              -- If it failed twice in a row, force a hard restart instead of just a rescan
+              if recovery_state.stale_detections >= 2 and restart_watcher then
+                pcall(notify, "Watchdog: Watcher appears permanently hung. Forcing hard restart.", vim.log.levels.WARN)
+                pcall(restart_watcher, "stale_snapshot", recovery_state.current_backoff_ms)
+                record_recovery_attempt(client.id, false)
+              elseif deps.mark_needs_full_scan then
+                -- Request full scan first time
                 pcall(deps.mark_needs_full_scan)
                 pcall(notify, "Scheduled full rescan due to stale snapshot", vim.log.levels.DEBUG)
               end
