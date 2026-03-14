@@ -190,8 +190,11 @@ local function scan_csproj_async(root, callback)
   local active_workers = 0
   local MAX_WORKERS = 10
 
+  local dir_idx = 1
+  local process_next
+
   local function check_finish()
-    if #dirs_queue == 0 and active_workers == 0 and not scan_complete then
+    if dir_idx > #dirs_queue and active_workers == 0 and not scan_complete then
       scan_complete = true
       vim.schedule(function()
         callback(results)
@@ -199,15 +202,14 @@ local function scan_csproj_async(root, callback)
     end
   end
 
-  local process_next -- forward declare
-
   process_next = function()
     if scan_complete then
       return
     end
 
-    while active_workers < MAX_WORKERS and #dirs_queue > 0 do
-      local dir = table.remove(dirs_queue, 1)
+    while active_workers < MAX_WORKERS and dir_idx <= #dirs_queue do
+      local dir = dirs_queue[dir_idx]
+      dir_idx = dir_idx + 1
       active_workers = active_workers + 1
 
       uv.fs_scandir(dir, function(err, scanner)
@@ -289,8 +291,11 @@ local function scan_projects_from_sln_async(project_dirs, callback)
   local active_workers = 0
   local MAX_WORKERS = 10
 
+  local dir_idx = 1
+  local process_next
+
   local function check_finish()
-    if #dirs_queue == 0 and active_workers == 0 and not scan_complete then
+    if dir_idx > #dirs_queue and active_workers == 0 and not scan_complete then
       scan_complete = true
       vim.schedule(function()
         callback(results)
@@ -298,15 +303,14 @@ local function scan_projects_from_sln_async(project_dirs, callback)
     end
   end
 
-  local process_next -- forward declare
-
   process_next = function()
     if scan_complete then
       return
     end
 
-    while active_workers < MAX_WORKERS and #dirs_queue > 0 do
-      local dir = table.remove(dirs_queue, 1)
+    while active_workers < MAX_WORKERS and dir_idx <= #dirs_queue do
+      local dir = dirs_queue[dir_idx]
+      dir_idx = dir_idx + 1
       active_workers = active_workers + 1
 
       uv.fs_scandir(dir, function(err, scanner)

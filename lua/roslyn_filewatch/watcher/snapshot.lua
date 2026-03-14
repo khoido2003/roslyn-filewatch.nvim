@@ -195,11 +195,13 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
     end
   end
 
-  vim.defer_fn(drain_pending, 2)
-
-  if #line > 0 then
-    table.insert(pending_paths, normalize_path(line))
+  local function process_line(line)
+    if #line > 0 then
+      table.insert(pending_paths, normalize_path(line))
+    end
   end
+
+  vim.defer_fn(drain_pending, 2)
 
   local function on_finish()
     if not stdout_closed or not handle_closed then
