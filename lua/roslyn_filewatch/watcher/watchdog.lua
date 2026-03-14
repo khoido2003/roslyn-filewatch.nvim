@@ -334,57 +334,9 @@ function M.start(client, root, snapshots, deps)
         pcall(notify, "Watcher recovered successfully", vim.log.levels.DEBUG)
       end
 
-      ----------------------------------------------
-      -- LEVEL 3: Deep Check (less frequent)
-      ----------------------------------------------
-      if now - recovery_state.last_deep_check >= (deep_interval / 1000) then
-        recovery_state.last_deep_check = now
-
-        -- Only do deep check if verification is enabled and we have snapshot access
-        if config.options.recovery_verify_enabled and deps.get_snapshot then
-          local snapshot = deps.get_snapshot()
-          verify_snapshot_sample_async(snapshot, function(stale_ratio, checked)
-            if checked == 0 then
-              return
-            end
-
-            local threshold = config.options.recovery_stale_threshold or 0.5
-            if stale_ratio >= threshold then
-              recovery_state.stale_detections = recovery_state.stale_detections + 1
-              recovery_state.health_status = "degraded"
-
-              pcall(
-                notify,
-                string.format(
-                  "Health check L3: %.0f%% stale (%d/%d files)",
-                  stale_ratio * 100,
-                  math.floor(stale_ratio * checked),
-                  checked
-                ),
-                vim.log.levels.DEBUG
-              )
-
-              -- If it failed twice in a row, force a hard restart instead of just a rescan
-              if recovery_state.stale_detections >= 2 and restart_watcher then
-                pcall(notify, "Watchdog: Watcher appears permanently hung. Forcing hard restart.", vim.log.levels.WARN)
-                pcall(restart_watcher, "stale_snapshot", recovery_state.current_backoff_ms)
-                record_recovery_attempt(client.id, false)
-              elseif deps.mark_needs_full_scan then
-                -- Request full scan first time
-                pcall(deps.mark_needs_full_scan)
-                pcall(notify, "Scheduled full rescan due to stale snapshot", vim.log.levels.DEBUG)
-              end
-            else
-              -- Healthy deep check
-              if recovery_state.stale_detections > 0 then
-                recovery_state.stale_detections = 0
-                recovery_state.health_status = "healthy"
-                pcall(notify, "Snapshot verification passed", vim.log.levels.DEBUG)
-              end
-            end
-          end)
-        end
-      end
+      -- Note: Level 3 (snapshot-based) health checks were intentionally removed
+      -- to keep the watchdog minimal and non-intrusive. Restarts are now driven
+      -- solely by low-level handle/client failures (Level 1).
     end)
   end)
 
