@@ -23,7 +23,7 @@ fn fast_snapshot<'lua>(
 
     // Parse options
     let mut extensions: Option<Arc<HashSet<String>>> = None;
-    let mut ignore_dirs: Option<Vec<String>> = None;
+    let mut ignore_dirs: Option<Arc<HashSet<Box<str>>>> = None;
     let mut respect_gitignore = true;
 
     if let Some(ref opts) = options {
@@ -46,14 +46,14 @@ fn fast_snapshot<'lua>(
 
         // Parse ignore_dirs
         if let Ok(dirs_table) = opts.get::<_, LuaTable>("ignore_dirs") {
-            let mut dirs = Vec::new();
+            let mut dirs: HashSet<Box<str>> = HashSet::new();
             for pair in dirs_table.sequence_values::<String>() {
                 if let Ok(d) = pair {
-                    dirs.push(d); // Store as user provided
+                    dirs.insert(d.to_ascii_lowercase().into_boxed_str()); // Store lowercase boxed strings for zero allocation lookups
                 }
             }
             if !dirs.is_empty() {
-                ignore_dirs = Some(dirs);
+                ignore_dirs = Some(Arc::new(dirs));
             }
         }
 
@@ -66,25 +66,11 @@ fn fast_snapshot<'lua>(
     let mut walker_builder = WalkBuilder::new(&directory);
     walker_builder
         .hidden(false)
-        .ignore(respect_gitignore)
+        .ignore(false)
         .git_ignore(respect_gitignore)
         .git_global(false)
-        .git_exclude(false);
-
-    // If we have ignore_dirs, use filter_entry to prune them completely from the traversal
-    if let Some(ref dirs) = ignore_dirs {
-        let dirs_set: HashSet<String> = dirs.iter().map(|d| d.to_ascii_lowercase()).collect();
-        walker_builder.filter_entry(move |entry| {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                if let Some(name) = entry.file_name().to_str() {
-                    if dirs_set.contains(&name.to_ascii_lowercase()) {
-                        return false; // Skip this directory and its children entirely
-                    }
-                }
-            }
-            true
-        });
-    }
+        .git_exclude(false)
+        .parents(false);
 
     // Use multiple threads to traverse directories faster for large projects
     walker_builder.threads(
@@ -95,18 +81,29 @@ fn fast_snapshot<'lua>(
 
     // Use build_parallel since we set threads
     let walker = walker_builder.build_parallel();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = crossbeam_channel::unbounded();
 
     walker.run(|| {
         let tx = tx.clone();
         let extensions = extensions.clone();
+        let ignore_dirs = ignore_dirs.clone();
+
         Box::new(move |result| {
             if let Ok(entry) = result {
                 let file_type = match entry.file_type() {
                     Some(ft) => ft,
                     None => return ignore::WalkState::Continue,
                 };
-                if !file_type.is_file() {
+
+                // Prune ignored directories manually for `build_parallel` correctly
+                if file_type.is_dir() {
+                    if let Some(ref dirs) = ignore_dirs {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if dirs.contains(name.to_ascii_lowercase().as_str()) {
+                                return ignore::WalkState::Skip;
+                            }
+                        }
+                    }
                     return ignore::WalkState::Continue;
                 }
 
@@ -136,8 +133,9 @@ fn fast_snapshot<'lua>(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default();
 
-                let mtime_nanos =
-                    (mtime_dur.as_secs() * 1_000_000_000) as i64 + mtime_dur.subsec_nanos() as i64;
+                let mtime_nanos = (mtime_dur.as_secs() as i64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(mtime_dur.subsec_nanos() as i64);
                 let size = metadata.len();
 
                 if let Some(path_str) = path.to_str() {
@@ -177,11 +175,10 @@ fn fast_snapshot<'lua>(
     drop(tx);
 
     for (normalized, mtime_nanos, size) in rx {
-        if let Ok(file_info) = lua.create_table() {
-            file_info.set("mtime", mtime_nanos)?;
-            file_info.set("size", size)?;
-            table.set(normalized, file_info)?;
-        }
+        let file_info = lua.create_table()?;
+        file_info.set("mtime", mtime_nanos)?;
+        file_info.set("size", size)?;
+        table.set(normalized, file_info)?;
     }
 
     Ok(table)
