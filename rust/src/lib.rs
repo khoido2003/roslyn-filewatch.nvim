@@ -1,5 +1,7 @@
 use ignore::WalkBuilder;
 use mlua::prelude::*;
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 /// Fast directory snapshot with optional filtering.
@@ -20,25 +22,25 @@ fn fast_snapshot<'lua>(
     let table = lua.create_table()?;
 
     // Parse options
-    let mut extensions: Option<Vec<String>> = None;
+    let mut extensions: Option<Arc<HashSet<String>>> = None;
     let mut ignore_dirs: Option<Vec<String>> = None;
     let mut respect_gitignore = true;
 
     if let Some(ref opts) = options {
         // Parse extensions
         if let Ok(ext_table) = opts.get::<_, LuaTable>("extensions") {
-            let mut exts = Vec::new();
+            let mut exts = HashSet::new();
             for pair in ext_table.sequence_values::<String>() {
                 if let Ok(ext) = pair {
-                    // Store lowercased, without leading dot
-                    let cleaned = ext.trim_start_matches('.').to_lowercase();
+                    let cleaned = ext.trim_start_matches('.');
                     if !cleaned.is_empty() {
-                        exts.push(cleaned);
+                        // Store lowercase for O(1) insensitive lookups later
+                        exts.insert(cleaned.to_ascii_lowercase());
                     }
                 }
             }
             if !exts.is_empty() {
-                extensions = Some(exts);
+                extensions = Some(Arc::new(exts));
             }
         }
 
@@ -47,7 +49,7 @@ fn fast_snapshot<'lua>(
             let mut dirs = Vec::new();
             for pair in dirs_table.sequence_values::<String>() {
                 if let Ok(d) = pair {
-                    dirs.push(d.to_lowercase());
+                    dirs.push(d); // Store as user provided
                 }
             }
             if !dirs.is_empty() {
@@ -64,97 +66,121 @@ fn fast_snapshot<'lua>(
     let mut walker_builder = WalkBuilder::new(&directory);
     walker_builder
         .hidden(false)
-        .ignore(false)
+        .ignore(respect_gitignore)
         .git_ignore(respect_gitignore)
         .git_global(false)
         .git_exclude(false);
 
     // If we have ignore_dirs, use filter_entry to prune them completely from the traversal
     if let Some(ref dirs) = ignore_dirs {
-        walker_builder.filter_entry({
-            let dirs_clone = dirs.clone();
-            move |entry| {
+        let dirs_set: HashSet<String> = dirs.iter().map(|d| d.to_ascii_lowercase()).collect();
+        walker_builder.filter_entry(move |entry| {
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 if let Some(name) = entry.file_name().to_str() {
-                    let lower = name.to_lowercase();
-                    if dirs_clone.iter().any(|d| d == &lower) {
-                        return false; // Skip this directory/file and its children entirely
+                    if dirs_set.contains(&name.to_ascii_lowercase()) {
+                        return false; // Skip this directory and its children entirely
                     }
                 }
-                true
             }
+            true
         });
     }
 
-    let walker = walker_builder.build();
+    // Use multiple threads to traverse directories faster for large projects
+    walker_builder.threads(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or_else(|_| 4),
+    );
 
-    for result in walker {
-        let entry = match result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+    // Use build_parallel since we set threads
+    let walker = walker_builder.build_parallel();
+    let (tx, rx) = std::sync::mpsc::channel();
 
-        // Skip directories early for processing
-        let file_type = match entry.file_type() {
-            Some(ft) => ft,
-            None => continue,
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let path = entry.path();
-
-        // Check extension filter
-        if let Some(ref exts) = extensions {
-            let ext_match = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| exts.iter().any(|x| x == &e.to_lowercase()))
-                .unwrap_or(false);
-            if !ext_match {
-                continue;
-            }
-        }
-
-        // Get metadata
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        let mtime_dur = metadata
-            .modified()
-            .unwrap_or(UNIX_EPOCH)
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-
-        // Return nanosecond precision
-        let mtime_nanos = mtime_dur.as_secs() as i64 * 1_000_000_000 + mtime_dur.subsec_nanos() as i64;
-        let size = metadata.len();
-
-        if let Some(path_str) = path.to_str() {
-            let normalized = path_str.replace('\\', "/");
-
-            // Lowercase drive letter on Windows (match Lua normalize_path)
-            let normalized = if normalized.len() >= 2 {
-                let bytes = normalized.as_bytes();
-                if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-                    let mut s = String::with_capacity(normalized.len());
-                    s.push((bytes[0] as char).to_ascii_lowercase());
-                    s.push_str(&normalized[1..]);
-                    s
-                } else {
-                    normalized
+    walker.run(|| {
+        let tx = tx.clone();
+        let extensions = extensions.clone();
+        Box::new(move |result| {
+            if let Ok(entry) = result {
+                let file_type = match entry.file_type() {
+                    Some(ft) => ft,
+                    None => return ignore::WalkState::Continue,
+                };
+                if !file_type.is_file() {
+                    return ignore::WalkState::Continue;
                 }
-            } else {
-                normalized
-            };
 
-            if let Ok(file_info) = lua.create_table() {
-                let _ = file_info.set("mtime", mtime_nanos);
-                let _ = file_info.set("size", size);
-                let _ = table.set(normalized, file_info);
+                let path = entry.path();
+
+                // Check extension filter
+                if let Some(ref exts) = extensions {
+                    let ext_match = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| exts.contains(&e.to_ascii_lowercase()))
+                        .unwrap_or(false);
+                    if !ext_match {
+                        return ignore::WalkState::Continue;
+                    }
+                }
+
+                // Get metadata
+                let metadata = match entry.metadata().ok() {
+                    Some(m) => m,
+                    None => return ignore::WalkState::Continue,
+                };
+
+                let mtime_dur = metadata
+                    .modified()
+                    .unwrap_or(UNIX_EPOCH)
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+
+                let mtime_nanos =
+                    (mtime_dur.as_secs() * 1_000_000_000) as i64 + mtime_dur.subsec_nanos() as i64;
+                let size = metadata.len();
+
+                if let Some(path_str) = path.to_str() {
+                    let mut normalized = String::with_capacity(path_str.len());
+                    let mut chars = path_str.chars();
+
+                    if path_str.len() >= 2 {
+                        let bytes = path_str.as_bytes();
+                        if bytes[1] == b':'
+                            && bytes[0].is_ascii_alphabetic()
+                            && bytes[0].is_ascii_uppercase()
+                        {
+                            if let (Some(c1), Some(c2)) = (chars.next(), chars.next()) {
+                                normalized.push(c1.to_ascii_lowercase());
+                                normalized.push(c2); // ':'
+                            }
+                        }
+                    }
+
+                    for c in chars {
+                        if c == '\\' {
+                            normalized.push('/');
+                        } else {
+                            normalized.push(c);
+                        }
+                    }
+
+                    if tx.send((normalized, mtime_nanos, size)).is_err() {
+                        return ignore::WalkState::Quit;
+                    }
+                }
             }
+            ignore::WalkState::Continue
+        })
+    });
+
+    drop(tx);
+
+    for (normalized, mtime_nanos, size) in rx {
+        if let Ok(file_info) = lua.create_table() {
+            file_info.set("mtime", mtime_nanos)?;
+            file_info.set("size", size)?;
+            table.set(normalized, file_info)?;
         }
     }
 
