@@ -379,16 +379,16 @@ function M.detect(root)
     return "monogame"
   end
 
-  if has_wwwroot then
-    return "web"
-  end
-
   if has_platforms then
     return "app"
   end
 
   if has_app_xaml then
     return "desktop"
+  end
+
+  if has_wwwroot then
+    return "web"
   end
 
   if has_appsettings then

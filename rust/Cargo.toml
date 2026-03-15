@@ -9,3 +9,4 @@ crate-type = ["cdylib"]
 [dependencies]
 mlua = { version = "0.9", features = ["lua51", "module"] }
 ignore = "0.4"
+crossbeam-channel = "0.5.15"
