@@ -1,14 +1,19 @@
+<p align="center">
+  <img src="gallery/2.png" alt="roslyn-status" width="400"/>
+  <img src="gallery/1.png" alt="checkhealth" width="400"/>
+</p>
+
 # roslyn-filewatch.nvim
 
 A lightweight, **file-watching and project-sync plugin** for Neovim that keeps the **Roslyn LSP** up-to-date with file changes.
 
-Now with built-in **Dotnet CLI integration** and **Game Engine support**.
+Now with **Game Engine support**.
 
 ---
 
 > [!WARNING]
 > **v0.4.x Breaking Changes**: This release removes all non-file-watching features (Dotnet CLI, NuGet, Explorer) to focus on performance.
-> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v04x).
+> If you need these features, please pin to `v0.3.9`. See [Migration Guide](#migration-guide-v04x) (Not recommended).
 
 ---
 
@@ -16,7 +21,7 @@ Now with built-in **Dotnet CLI integration** and **Game Engine support**.
 
 Roslyn does not watch your project files by default in Neovim/Linux/Mac. Without this, you often need to `:edit!` or restart the LSP to make Roslyn notice file creation, deletion, renaming, or solution changes.
 
-This plugin adds a robust **cross-platform file watcher** and a suite of tools to make C# development in Neovim feel like a full IDE.
+This plugin adds a robust **cross-platform file watcher**.
 
 ---
 
@@ -24,7 +29,7 @@ This plugin adds a robust **cross-platform file watcher** and a suite of tools t
 
 ### Robust File Watching
 - **Native Rust Acceleration**: Ships with a dynamically linked Rust backend (`roslyn_filewatch_rs`) utilizing the `ignore` crate for 1-3ms instantaneous native repository indexing.
-- **Cross-Platform**: Uses Neovim 0.10+ `vim.fs.watch` natively, with fallback to Native Watchers (`watchman`, `fswatch`) or Sparse Polling.
+- **Cross-Platform**: Uses Neovim 0.10+ API natively, with fallback to Native Watchers (`watchman`, `fswatch`) or Sparse Polling.
 - **Smart Detection**: Handles create, delete, change, and **detects renames** (merging delete+create pairs).
 - **Optimization**: Batches events, throttles diagnostics, and avoids watching ignored files (ignores `.git`, `bin`, `obj`, etc.).
 - **Solution-Aware**: Parses `.sln`, `.slnx`, or `.slnf` files across isolated background OS threads (`vim.uv.new_work`) to completely eliminate UI blocking.
@@ -112,9 +117,9 @@ Fast file finder used as fallback when the Rust native module is unavailable.
 | **Fedora** | `sudo dnf install fd-find` |
 | **Arch Linux** | `sudo pacman -S fd` |
 
-### Watchman (Optional, for large repos)
+### Watchman (Recommended for large repos)
 
-Best performance for monorepos with thousands of files.
+Best performance for monorepos with thousands of files and supported on all platforms.
 
 | Platform | Command |
 |:---|:---|
@@ -134,7 +139,7 @@ Alternative to Watchman for Unix systems.
 | **Fedora** | `sudo dnf install fswatch` |
 | **Arch Linux** | `sudo pacman -S fswatch` |
 
-### Rust Toolchain (for building from source)
+### Rust Toolchain (Recommended for building from source)
 
 Only needed if you want to compile the native Rust module yourself instead of using pre-built binaries.
 
@@ -186,9 +191,12 @@ If you need to manually trigger a rebuild (e.g. after updating the plugin):
 
 ### lazy.nvim
 The module is built automatically on install. To rebuild manually:
-1. Run `:Lazy build roslyn-filewatch.nvim`
 
-### From your terminal
+```lua
+:Lazy build roslyn-filewatch.nvim
+```
+
+### Or from your terminal
 ```sh
 cd ~/.local/share/nvim/lazy/roslyn-filewatch.nvim
 nvim -l build.lua
@@ -207,7 +215,7 @@ nvim -l build.lua
 
 **Breaking Changes**: v0.4.x is a strict **File Watcher** and **Project Sync** tool. All "IDE-like" features (Building, Running, Nuget, Explorer) have been removed to minimize bloat and maximize performance.
 
-| Feature | v0.3.x (Legacy) | v0.4.x (Current) | Replacement |
+| Feature | v0.3.x (Deprecated) | v0.4.x (Current) | Replacement |
 | :--- | :--- | :--- | :--- |
 | **Project Watching** | Good | **Instant** (Native Rust + Threading) | - |
 | **Dotnet CLI** | `:RoslynBuild`, `:RoslynRun` | ❌ Removed | Use `dispatch.nvim` or `toggleterm` |
@@ -216,8 +224,8 @@ nvim -l build.lua
 | **Game Detection** | Complex Context | **Presets Only** (Performance) | Presets are auto-applied |
 
 **Recommendation:**
-*   **Stay on v0.4.x** if you want the fastest and newest Roslyn experience.
-*   **Pin to v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands and stable releases:
+*   **Stay on v0.4.x** if you want the fastest, newest Roslyn experience and stable releases.
+*   **Pin to v0.3.x** if you absolutely rely on the built-in CLI/Explorer commands (Not recommended):
 
 ```lua
 { "khoido2003/roslyn-filewatch.nvim", branch = "v0.3.x" }
@@ -346,7 +354,7 @@ Run `:checkhealth roslyn_filewatch` to verify your setup. The healthcheck report
 
 Most commands are **interactive**—if you run them without arguments, a selection menu will appear.
 
-### Core (Always Available)
+### Core 
 | Command | Description |
 |---------|-------------|
 | `:RoslynFilewatch status` | **Debug Tool**: Shows active watcher status, tracked projects, and health. |
@@ -388,7 +396,7 @@ The plugin uses a priority chain for file scanning, automatically selecting the 
 │   External process              │
 ├─────────────────────────────────┤
 │ Tier 3: Pure Lua scanner        │  ← Slowest (chunked via vim.defer_fn, never blocks)
-│   uv.fs_scandir + uv.fs_stat   │
+│   uv.fs_scandir + uv.fs_stat    │
 └─────────────────────────────────┘
 ```
 
@@ -396,7 +404,7 @@ All tiers are **fully non-blocking** — the plugin never freezes the Neovim UI 
 
 #### Core Components (V2 Architecture)
 *   **`watcher.lua`**: The orchestrator. Manages the lifecycle of event handles and the **Self-Healing Watchdog** that restarts frozen listeners. Implements **Chunked Processing** to handle thousands of events.
-*   **`fs_event.lua`**: Upgraded to use Neovim 0.10+ native `vim.fs.watch`. Implements **Dynamic Debounce** and feeds events into the regeneration detector.
+*   **`fs_event.lua`**: Upgraded to use Neovim 0.10+ native API. Implements **Dynamic Debounce** and feeds events into the regeneration detector.
 *   **`regen_detector.lua`**: Detects massive file operations (like Unity Asset re-imports or `git checkout`), switching the watcher to Low-Overhead Mode to prevent GC pressure.
 *   **`snapshot.lua`** & **`roslyn_filewatch_rs`**: The source of truth. Uses a heavily optimized pure-Rust backend to pull full repository snapshots natively in 1-3 milliseconds, completely bypassing Lua loop bottlenecks.
 *   **`sln_parser.lua`**: Uses isolated background libuv OS threads (`vim.uv.new_work`) to parse massive XML solution files completely off the main UI thread.
@@ -480,5 +488,13 @@ MIT License.
 
 ## Acknowledgements
 
-- Inspired by the pain of using Roslyn in Neovim without file watchers 😅  
-- Thanks to Neovim's `vim.uv` and [sharkdp/fd](https://github.com/sharkdp/fd) for making cross-platform file watching possible.
+- Inspired by the pain of using Roslyn in Neovim without file watchers 😅 
+
+- This project relies on several excellent open-source tools:
+
+    - **Neovim** — Lua APIs (`vim.fs`, `vim.uv`) used for cross-platform file watching.
+    - **Roslyn** — Microsoft's C# compiler platform and language server.
+    - **Watchman** — high-performance file watching for large repositories.
+    - **fswatch** — cross-platform filesystem change monitor.
+    - **fd** — fast file discovery used for repository scanning.
+    - **Rust** and the **ignore** crate — powering the native snapshot module for fast indexing.
