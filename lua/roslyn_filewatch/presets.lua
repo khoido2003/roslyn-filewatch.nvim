@@ -70,6 +70,105 @@ M.presets = {
     diagnostic_throttling = { enabled = true, debounce_ms = 300, visible_only = false },
   },
 
+  web = {
+    batching = { enabled = true, interval = 500 },
+    max_events_per_batch = 500,
+    activity_quiet_period = 5,
+    poll_interval = 5000,
+    processing_debounce_ms = 200,
+    ignore_dirs = {
+      "bin",
+      "obj",
+      "Bin",
+      "Obj",
+      ".git",
+      ".idea",
+      ".vs",
+      ".vscode",
+      "node_modules",
+      "TestResults",
+      "packages",
+      "dist",
+      "build",
+      "out",
+    },
+    deferred_loading = true,
+    deferred_loading_delay_ms = 500,
+    diagnostic_throttling = { enabled = true, debounce_ms = 500, visible_only = true },
+  },
+
+  app = {
+    batching = { enabled = true, interval = 500 },
+    max_events_per_batch = 500,
+    activity_quiet_period = 5,
+    poll_interval = 5000,
+    processing_debounce_ms = 200,
+    ignore_dirs = {
+      "bin",
+      "obj",
+      "Bin",
+      "Obj",
+      ".git",
+      ".idea",
+      ".vs",
+      ".vscode",
+      "TestResults",
+      "packages",
+      "AppPackages",
+      "BundleArtifacts",
+    },
+    deferred_loading = true,
+    deferred_loading_delay_ms = 500,
+    diagnostic_throttling = { enabled = true, debounce_ms = 500, visible_only = true },
+  },
+
+  server = {
+    batching = { enabled = true, interval = 500 },
+    max_events_per_batch = 500,
+    activity_quiet_period = 5,
+    poll_interval = 5000,
+    processing_debounce_ms = 200,
+    ignore_dirs = {
+      "bin",
+      "obj",
+      "Bin",
+      "Obj",
+      ".git",
+      ".idea",
+      ".vs",
+      ".vscode",
+      "TestResults",
+      "packages",
+    },
+    deferred_loading = true,
+    deferred_loading_delay_ms = 500,
+    diagnostic_throttling = { enabled = true, debounce_ms = 500, visible_only = true },
+  },
+
+  desktop = {
+    batching = { enabled = true, interval = 500 },
+    max_events_per_batch = 500,
+    activity_quiet_period = 5,
+    poll_interval = 5000,
+    processing_debounce_ms = 200,
+    ignore_dirs = {
+      "bin",
+      "obj",
+      "Bin",
+      "Obj",
+      ".git",
+      ".idea",
+      ".vs",
+      ".vscode",
+      "TestResults",
+      "packages",
+      "AppPackages",
+    },
+    deferred_loading = true,
+    deferred_loading_delay_ms = 500,
+    diagnostic_throttling = { enabled = true, debounce_ms = 500, visible_only = true },
+  },
+
   large = {
     batching = { enabled = true, interval = 1000 },
     max_events_per_batch = 1000,
@@ -233,6 +332,11 @@ function M.detect(root)
   local has_content_mgcb = false
   local has_fnalibs = false
 
+  local has_wwwroot = false
+  local has_appsettings = false
+  local has_platforms = false
+  local has_app_xaml = false
+
   while true do
     local name, typ = uv.fs_scandir_next(fd)
     if not name then
@@ -247,10 +351,18 @@ function M.detect(root)
         has_sdpkg = true
       elseif name:match("%.mgcb$") or name == "Content.mgcb" then
         has_content_mgcb = true
+      elseif name == "appsettings.json" then
+        has_appsettings = true
+      elseif name == "App.xaml" or name == "App.axaml" then
+        has_app_xaml = true
       end
     elseif typ == "directory" then
       if name == "fnalibs" or name == "FNALibs" then
         has_fnalibs = true
+      elseif name == "wwwroot" then
+        has_wwwroot = true
+      elseif name == "Platforms" then
+        has_platforms = true
       end
     end
   end
@@ -265,6 +377,22 @@ function M.detect(root)
 
   if has_content_mgcb then
     return "monogame"
+  end
+
+  if has_platforms then
+    return "app"
+  end
+
+  if has_app_xaml then
+    return "desktop"
+  end
+
+  if has_wwwroot then
+    return "web"
+  end
+
+  if has_appsettings then
+    return "server"
   end
 
   -- Large project: has .sln and many csproj files
