@@ -25,7 +25,7 @@ jobs:
             artifact_name: roslyn_filewatch_rs.dll
             asset_name: roslyn_filewatch_rs-windows-x86_64.dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       - name: Install Rust
