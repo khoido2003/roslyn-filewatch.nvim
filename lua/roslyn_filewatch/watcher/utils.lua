@@ -430,7 +430,7 @@ end
 
 --- Safely stop and close a timer or handle
 --- Handles nil values and already-closing handles gracefully
----@param handle uv_timer_t|uv_fs_event_t|uv_fs_poll_t|nil Handle to close
+---@param handle uv.uv_timer_t|uv.uv_fs_event_t|uv.uv_fs_poll_t|table|nil Handle to close
 function M.safe_close_handle(handle)
   if not handle then
     return
@@ -467,12 +467,13 @@ function M.request_diagnostics_refresh(client, delay_ms)
 
   vim.defer_fn(function()
     -- Check if client is still active
-    if client.is_stopped and client.is_stopped() then
+    if client:is_stopped() then
       return
     end
 
-    local attached_bufs = vim.lsp.get_buffers_by_client_id(client.id)
-    for _, buf in ipairs(attached_bufs or {}) do
+    local lsp_client = vim.lsp.get_client_by_id(client.id)
+    local attached_bufs = (lsp_client and lsp_client.attached_buffers) or {}
+    for buf, _ in pairs(attached_bufs) do
       if vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_is_loaded(buf) then
         pcall(function()
           client:request(vim.lsp.protocol.Methods.textDocument_diagnostic, {
@@ -499,6 +500,7 @@ function M.notify_project_open(client, project_paths, notify_fn)
   end, project_paths)
 
   pcall(function()
+    ---@diagnostic disable-next-line: param-type-mismatch
     client:notify("project/open", {
       projects = project_uris,
     })

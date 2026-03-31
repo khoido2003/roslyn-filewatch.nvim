@@ -1,5 +1,5 @@
 ---@class roslyn_filewatch.fs_poll
----@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv_fs_poll_t|nil, string|nil
+---@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv.uv_fs_poll_t|nil, string|nil
 ---@field stop fun(client_id: number)
 
 local uv = vim.uv or vim.loop
@@ -15,7 +15,7 @@ local function get_regen_detector()
   return regen_detector or nil
 end
 
----@type table<number, uv_timer_t>
+---@type table<number, uv.uv_timer_t>
 local trailing_timers = {}
 
 ---@type table<number, table<string, number>>
@@ -89,7 +89,7 @@ function M.start(client, root, snapshots, deps)
       if not old_mt then
         local id = deps.identity_from_stat and deps.identity_from_stat(mt) or nil
         local oldpath = id and old_id_map[id]
-        if oldpath then
+        if id and oldpath then
           table.insert(rename_pairs, { old = oldpath, ["new"] = path })
           processed_old[oldpath] = true
           old_id_map[id] = nil
@@ -214,6 +214,9 @@ function M.start(client, root, snapshots, deps)
           -- Sparse Polling: Pre-filter dirty_dirs by checking if their directory mtime changed
           -- removed due to directory mtime not updating upon file modifications
           local active_dirty_dirs = dirty_dirs
+          if not active_dirty_dirs then
+            return
+          end
 
           if deps.partial_scan_async then
             -- Take a snapshot of entries only in dirty dirs

@@ -70,13 +70,16 @@ local function schedule_project_open(client, csproj_path)
       vim.schedule(function()
         for client_id, paths in pairs(pending_opens) do
           local c = vim.lsp.get_client_by_id(client_id)
-          if c and not (c.is_stopped and c.is_stopped()) then
+          if c and not (c.is_stopped and c:is_stopped()) then
             local project_list = {}
             for p in pairs(paths) do
               table.insert(project_list, p)
             end
             if #project_list > 0 then
-              pcall(c.notify, "project/open", { projects = project_list })
+              pcall(function()
+                ---@diagnostic disable-next-line: param-type-mismatch
+                c:notify("project/open", { projects = project_list })
+              end)
             end
           end
         end
@@ -171,7 +174,9 @@ function M.roslyn_changes(changes)
       notify_stats.last_notification_time = os.time()
       notify_stats.total_notifications = notify_stats.total_notifications + 1
 
-      local success = pcall(client.notify, "workspace/didChangeWatchedFiles", { changes = all_changes })
+      local success = pcall(function()
+        client:notify("workspace/didChangeWatchedFiles", { changes = all_changes })
+      end)
       if success then
         notify_stats.last_success_time = os.time()
       end
@@ -215,9 +220,13 @@ function M.roslyn_renames(files)
       end
 
       vim.schedule(function()
-        pcall(client.notify, "workspace/didRenameFiles", payload)
+        pcall(function()
+          client:notify("workspace/didRenameFiles", payload)
+        end)
         if #additional_changes > 0 then
-          pcall(client.notify, "workspace/didChangeWatchedFiles", { changes = additional_changes })
+          pcall(function()
+            client:notify("workspace/didChangeWatchedFiles", { changes = additional_changes })
+          end)
         end
 
         if #modified_source_files > 0 and #additional_changes > 0 then

@@ -227,6 +227,7 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
         else
           -- Offload heavy regex parsing to a background libuv worker thread!
           local work
+          ---@diagnostic disable: redundant-return-value, param-type-mismatch
           work = uv.new_work(function(w_data, w_sln_dir, w_type)
             local w_dirs = {}
             local w_seen = {}
@@ -299,6 +300,7 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
               callback(final_dirs)
             end)
           end)
+          ---@diagnostic enable: redundant-return-value, param-type-mismatch
           work:queue(data, sln_dir, sln_type)
         end
       end)

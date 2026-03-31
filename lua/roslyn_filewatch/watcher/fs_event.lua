@@ -1,5 +1,5 @@
 ---@class roslyn_filewatch.fs_event
----@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv_fs_event_t|nil, string|nil
+---@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv.uv_fs_event_t|nil, string|nil
 ---@field clear fun(client_id: number)
 
 local uv = vim.uv or vim.loop
@@ -13,7 +13,7 @@ local notify = notify_mod and notify_mod.user or function() end
 
 local M = {}
 
----@type table<number, {map: table, timer: uv_timer_t|nil}>
+---@type table<number, {map: table, timer: uv.uv_timer_t|nil}>
 local event_buffers = {}
 
 ---@type table<number, {events: string[], processing: boolean}>
@@ -314,6 +314,7 @@ function M.start(client, root, snapshots, deps)
               if rename_m and rename_m.on_delete then
                 local ok, res = pcall(rename_m.on_delete, client.id, fullpath, prev_mt, snapshots, {
                   queue_events = queue_events,
+                  close_deleted_buffers = function(_) end,
                   notify = notify_fn,
                   rename_window_ms = rename_window_ms,
                 })
@@ -367,20 +368,22 @@ function M.start(client, root, snapshots, deps)
 
     if not buf.timer then
       local t = uv.new_timer()
-      buf.timer = t
+      if t then
+        buf.timer = t
 
-      local raw_q = raw_event_queues[client_id]
-      local raw_count = raw_q and #raw_q.events or 0
-      local buf_count = vim.tbl_count(buf.map)
+        local raw_q = raw_event_queues[client_id]
+        local raw_count = raw_q and #raw_q.events or 0
+        local buf_count = vim.tbl_count(buf.map)
 
-      local debounce = processing_debounce_ms
-      if raw_count == 0 and buf_count < 5 then
-        debounce = math.min(50, processing_debounce_ms)
+        local debounce = processing_debounce_ms
+        if raw_count == 0 and buf_count < 5 then
+          debounce = math.min(50, processing_debounce_ms)
+        end
+
+        t:start(debounce, 0, function()
+          pcall(flush_client_buffer, client_id)
+        end)
       end
-
-      t:start(debounce, 0, function()
-        pcall(flush_client_buffer, client_id)
-      end)
     end
   end
 

@@ -14,7 +14,7 @@ local queued_set = {} -- Set for O(1) deduplication
 local processing_active = false -- Only one restore at a time (Sequential)
 local total_batch_active = false -- Tracks if we are in a "batch" of restores (for notifications)
 
----@type table<string, uv_timer_t>
+---@type table<string, uv.uv_timer_t>
 local debounce_timers = {}
 ---@type table<string, fun(string)[]> Callbacks to call when restore completes for a project
 local restore_callbacks = {}

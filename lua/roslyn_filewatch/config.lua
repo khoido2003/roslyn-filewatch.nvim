@@ -23,6 +23,22 @@
 ---@field deferred_loading_delay_ms? number Delay before sending deferred project/open (default: 500)
 ---@field diagnostic_throttling? roslyn_filewatch.DiagnosticThrottlingOptions
 ---@field enable_snippets? boolean Enable snippets (default: false)
+---@field enable_autorestore? boolean Enable auto-restore of NuGet packages (default: true)
+---@field _applied_preset? string The actually applied preset name (set internally)
+---@field regen_detection_enabled? boolean Enable regeneration detection (default: true)
+---@field regen_burst_threshold? number Events in burst window to trigger regen mode
+---@field regen_burst_window_ms? number Time window (ms) for burst detection
+---@field regen_quiet_period_ms? number Quiet time (ms) before exiting regen mode
+---@field regen_max_duration_ms? number Maximum regen mode duration (ms)
+---@field max_events_per_batch? number Maximum events per batch sent to Roslyn LSP
+---@field recovery_verify_enabled? boolean Enable async verification after watcher restart
+---@field recovery_max_retries? number Max consecutive recovery failures before escalation
+---@field recovery_initial_delay_ms? number Initial delay (ms) for exponential backoff
+---@field recovery_max_delay_ms? number Maximum delay (ms) for exponential backoff
+---@field recovery_sample_size? number Number of sample files for deep health check
+---@field recovery_stale_threshold? number Stale ratio threshold (0.0-1.0) for full rescan
+---@field watchdog_fast_interval_ms? number Fast watchdog check interval (ms)
+---@field watchdog_deep_interval_ms? number Deep watchdog check interval (ms)
 
 ---@class roslyn_filewatch.BatchingOptions
 ---@field enabled? boolean Enable event batching

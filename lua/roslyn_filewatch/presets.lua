@@ -427,6 +427,7 @@ function M.apply(preset_name, options, root)
     return options
   end
 
+  ---@type roslyn_filewatch.Options
   local result = vim.tbl_deep_extend("force", preset_opts, options)
   result._applied_preset = actual_preset
 

@@ -1,4 +1,7 @@
 ---@class roslyn_filewatch.watcher_backend.fswatch
+---@field start fun(client: vim.lsp.Client, roots: string[], snapshots: table, deps: table): table|nil, string|nil
+---@field stop fun(handle: table|nil)
+
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -68,95 +71,101 @@ function M.start(client, roots, snapshots, deps)
   local is_alive = true
   local path_seq = {}
 
-  uv.read_start(stdout, function(err, data)
-    if err then
-      return
-    end
-    if data then
-      buffer = buffer .. data
-      while true do
-        local rec_end = buffer:find("\0", 1, true)
-        if not rec_end then
-          break
-        end
-        local record = buffer:sub(1, rec_end - 1)
-        buffer = buffer:sub(rec_end + 1)
+  if stdout then
+    uv.read_start(stdout, function(err, data)
+      if err then
+        return
+      end
+      if data then
+        buffer = buffer .. data
+        while true do
+          local rec_end = buffer:find("\0", 1, true)
+          if not rec_end then
+            break
+          end
+          local record = buffer:sub(1, rec_end - 1)
+          buffer = buffer:sub(rec_end + 1)
 
-        if #record > 0 then
-          local path = record
+          if #record > 0 then
+            local path = record
 
-          path = utils.normalize_path(path)
+            path = utils.normalize_path(path)
 
-          if utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {}) then
-            if deps.queue_events then
-              path_seq[path] = (path_seq[path] or 0) + 1
-              local current_seq = path_seq[path]
+            if
+              utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {})
+            then
+              if deps.queue_events then
+                path_seq[path] = (path_seq[path] or 0) + 1
+                local current_seq = path_seq[path]
 
-              uv.fs_stat(path, function(stat_err, stat)
-                if not is_alive or path_seq[path] ~= current_seq then
-                  return
-                end
-                local event_type = 2 -- Default Changed
-                local client_snapshots = snapshots[client.id] or {}
-                local prev_mt = client_snapshots[path]
-
-                if not stat_err and stat then
-                  local current_mt = string.format("%d:%d", stat.mtime.sec or 0, stat.mtime.nsec or 0)
-                  if not prev_mt then
-                    event_type = 1 -- Created
-                  elseif prev_mt ~= current_mt then
-                    event_type = 2 -- Changed
-                  else
-                    -- File exists but unchanged; skip event
-                    snapshots[client.id] = client_snapshots
-                    return
-                  end
-                  client_snapshots[path] = current_mt
-                else
-                  if prev_mt then
-                    event_type = 3 -- Deleted
-                    client_snapshots[path] = nil
-                  else
-                    -- Unknown file failed stat; ignore (don't emit spurious Delete)
-                    return
-                  end
-                end
-
-                snapshots[client.id] = client_snapshots
-
-                vim.schedule(function()
+                uv.fs_stat(path, function(stat_err, stat)
                   if not is_alive or path_seq[path] ~= current_seq then
                     return
                   end
-                  if deps.last_events then
-                    deps.last_events[client.id] = os.time()
+                  local event_type = 2 -- Default Changed
+                  local client_snapshots = snapshots[client.id] or {}
+                  local prev_mt = client_snapshots[path]
+
+                  if not stat_err and stat then
+                    local current_mt = string.format("%d:%d", stat.mtime.sec or 0, stat.mtime.nsec or 0)
+                    if not prev_mt then
+                      event_type = 1 -- Created
+                    elseif prev_mt ~= current_mt then
+                      event_type = 2 -- Changed
+                    else
+                      -- File exists but unchanged; skip event
+                      snapshots[client.id] = client_snapshots
+                      return
+                    end
+                    client_snapshots[path] = current_mt
+                  else
+                    if prev_mt then
+                      event_type = 3 -- Deleted
+                      client_snapshots[path] = nil
+                    else
+                      -- Unknown file failed stat; ignore (don't emit spurious Delete)
+                      return
+                    end
                   end
-                  pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(path), type = event_type } })
+
+                  snapshots[client.id] = client_snapshots
+
+                  vim.schedule(function()
+                    if not is_alive or path_seq[path] ~= current_seq then
+                      return
+                    end
+                    if deps.last_events then
+                      deps.last_events[client.id] = os.time()
+                    end
+                    pcall(deps.queue_events, client.id, { { uri = vim.uri_from_fname(path), type = event_type } })
+                  end)
                 end)
-              end)
+              end
             end
           end
         end
       end
-    end
-  end)
+    end)
+  end
 
-  uv.read_start(stderr, function(err, data)
-    if err then
-      if stderr and not stderr:is_closing() then
-        pcall(stderr.read_stop, stderr)
-        pcall(stderr.close, stderr)
+  if stderr then
+    uv.read_start(stderr, function(err, data)
+      if err then
+        if stderr and not stderr:is_closing() then
+          pcall(stderr.read_stop, stderr)
+          pcall(stderr.close, stderr)
+        end
+        return
       end
-      return
-    end
-    if not data then
-      if stderr and not stderr:is_closing() then
-        pcall(stderr.read_stop, stderr)
-        pcall(stderr.close, stderr)
+      if not data then
+        if stderr and not stderr:is_closing() then
+          pcall(stderr.read_stop, stderr)
+          pcall(stderr.close, stderr)
+        end
+        return
       end
-      return
-    end
-  end)
+    end)
+  end
 
   local watcher_obj = {
     _handle = handle,

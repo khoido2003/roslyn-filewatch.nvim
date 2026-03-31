@@ -1,11 +1,11 @@
 ---@class roslyn_filewatch.watchdog
----@field start fun(client: vim.lsp.Client, root: string, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, deps: roslyn_filewatch.WatchdogDeps): uv_timer_t|nil, string|nil
+---@field start fun(client: vim.lsp.Client, root: string, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, deps: roslyn_filewatch.WatchdogDeps): uv.uv_timer_t|nil, string|nil
 
 ---@class roslyn_filewatch.WatchdogDeps
 ---@field notify fun(msg: string, level?: number)
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
----@field get_handle fun(): uv_fs_event_t|nil
----@field get_poller? fun(): uv_fs_poll_t|nil
+---@field get_handle fun(): uv.uv_fs_event_t|table|nil
+---@field get_poller? fun(): uv.uv_fs_poll_t|nil
 ---@field last_events table<number, number>
 ---@field watchdog_idle number Seconds of idle before restarting
 ---@field use_fs_event boolean Whether fs_event is expected to be active
@@ -242,7 +242,7 @@ end
 ---@param root string Root directory (for logging)
 ---@param snapshots table<number, table<string, roslyn_filewatch.SnapshotEntry>> Snapshots table
 ---@param deps roslyn_filewatch.WatchdogDeps Dependencies
----@return uv_timer_t|nil timer The watchdog timer, or nil on error
+---@return uv.uv_timer_t|nil timer The watchdog timer, or nil on error
 ---@return string|nil error Error message if failed
 function M.start(client, root, snapshots, deps)
   deps = deps or {}
@@ -271,7 +271,7 @@ function M.start(client, root, snapshots, deps)
   local ok, err = pcall(function()
     t:start(fast_interval, fast_interval, function()
       -- Only act when client is alive
-      if client.is_stopped and client.is_stopped() then
+      if client:is_stopped() then
         return
       end
 

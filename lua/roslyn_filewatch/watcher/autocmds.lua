@@ -138,7 +138,7 @@ function M.start(client, root, snapshots, deps)
         pcall(deps.restore_mod.schedule_restore, first_path, function(_)
           -- After restore completes, send project/open again and refresh diagnostics
           vim.defer_fn(function()
-            if client.is_stopped and client.is_stopped() then
+            if client:is_stopped() then
               return
             end
             notify_project_open(client, project_paths, notify)
@@ -246,7 +246,7 @@ function M.start(client, root, snapshots, deps)
                           pcall(deps.restore_mod.schedule_restore, restore_target, function(_)
                             -- After restore, send another project/open and refresh diagnostics
                             vim.defer_fn(function()
-                              if client.is_stopped and client.is_stopped() then
+                              if client:is_stopped() then
                                 return
                               end
                               notify_project_open(client, project_paths, notify)
@@ -370,7 +370,8 @@ function M.start(client, root, snapshots, deps)
       -- Check if there are any other buffers still attached to this client
       -- We need to defer this check because BufUnload fires before the buffer is actually removed
       vim.schedule(function()
-        local remaining_bufs = vim.lsp.get_buffers_by_client_id(client.id)
+        local lsp_client = vim.lsp.get_client_by_id(client.id)
+        local remaining_bufs = (lsp_client and lsp_client.attached_buffers) or {}
         -- Filter out the current buffer being unloaded
         local other_bufs = vim.tbl_filter(function(buf)
           return buf ~= args.buf and vim.api.nvim_buf_is_valid(buf)

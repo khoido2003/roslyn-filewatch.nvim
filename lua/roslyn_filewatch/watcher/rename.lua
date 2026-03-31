@@ -21,7 +21,7 @@
 
 ---@class PendingDeleteBuffer
 ---@field map table<string, PendingDelete>
----@field timer uv_timer_t|nil
+---@field timer uv.uv_timer_t|nil
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -33,7 +33,7 @@ local identity_from_stat = utils.identity_from_stat
 local pending = {}
 
 --- Safely stop and close a timer
----@param t uv_timer_t|nil
+---@param t uv.uv_timer_t|nil
 local function safe_stop_timer(t)
   pcall(function()
     if t and not t:is_closing() then
@@ -86,45 +86,47 @@ function M.on_delete(client_id, path, prev_entry, snapshots, callbacks)
   -- Ensure timer exists
   if not pending[client_id].timer then
     local t = uv.new_timer()
-    pending[client_id].timer = t
-    local window = (callbacks and callbacks.rename_window_ms) or 300
+    if t then
+      pending[client_id].timer = t
+      local window = (callbacks and callbacks.rename_window_ms) or 300
 
-    t:start(window, 0, function()
-      -- Flush all pending deletes for this client
-      local pd = pending[client_id]
-      if not pd or not pd.map then
+      t:start(window, 0, function()
+        -- Flush all pending deletes for this client
+        local pd = pending[client_id]
+        if not pd or not pd.map then
+          safe_stop_timer(t)
+          pending[client_id] = nil
+          return
+        end
+
+        ---@type roslyn_filewatch.FileChange[]
+        local evs = {}
+        for _, ent in pairs(pd.map) do
+          -- Remove from snapshot if present
+          if snapshots[client_id] and snapshots[client_id][ent.path] then
+            snapshots[client_id][ent.path] = nil
+          end
+          -- Close buffers for deleted path
+          if callbacks and callbacks.close_deleted_buffers then
+            pcall(callbacks.close_deleted_buffers, ent.path)
+          end
+          table.insert(evs, { uri = ent.uri, type = 3 }) -- Deleted
+        end
+
+        -- Cleanup timer + pending map
         safe_stop_timer(t)
         pending[client_id] = nil
-        return
-      end
 
-      ---@type roslyn_filewatch.FileChange[]
-      local evs = {}
-      for _, ent in pairs(pd.map) do
-        -- Remove from snapshot if present
-        if snapshots[client_id] and snapshots[client_id][ent.path] then
-          snapshots[client_id][ent.path] = nil
-        end
-        -- Close buffers for deleted path
-        if callbacks and callbacks.close_deleted_buffers then
-          pcall(callbacks.close_deleted_buffers, ent.path)
-        end
-        table.insert(evs, { uri = ent.uri, type = 3 }) -- Deleted
-      end
-
-      -- Cleanup timer + pending map
-      safe_stop_timer(t)
-      pending[client_id] = nil
-
-      -- Enqueue delete events
-      if #evs > 0 and callbacks and callbacks.queue_events then
-        vim.schedule(function()
-          pcall(function()
-            callbacks.queue_events(client_id, evs)
+        -- Enqueue delete events
+        if #evs > 0 and callbacks and callbacks.queue_events then
+          vim.schedule(function()
+            pcall(function()
+              callbacks.queue_events(client_id, evs)
+            end)
           end)
-        end)
-      end
-    end)
+        end
+      end)
+    end
   end
 
   return true

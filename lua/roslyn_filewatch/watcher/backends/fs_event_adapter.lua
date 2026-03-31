@@ -1,4 +1,8 @@
 ---@class roslyn_filewatch.watcher_backend.fs_event_adapter
+---@field start fun(client: vim.lsp.Client, roots: string[], snapshots: table, deps: table): table|nil, string|nil
+---@field stop fun(handle: table|nil)
+
+---@type roslyn_filewatch.fs_event
 local fs_event = require("roslyn_filewatch.watcher.fs_event")
 
 local M = {}

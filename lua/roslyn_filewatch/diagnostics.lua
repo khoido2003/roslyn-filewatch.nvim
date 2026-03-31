@@ -14,7 +14,7 @@ local uv = vim.uv or vim.loop
 ---@type table<string, number> Key: "client_id:bufnr", Value: last request timestamp (ms)
 local last_request_times = {}
 
----@type table<string, uv_timer_t|nil> Key: "client_id:bufnr", Value: pending timer
+---@type table<string, uv.uv_timer_t|nil> Key: "client_id:bufnr", Value: pending timer
 local pending_timers = {}
 
 ---@type boolean Whether heavy file activity is ongoing
@@ -199,8 +199,8 @@ function M.request_visible_diagnostics(client_id)
     return
   end
 
-  local attached_bufs = vim.lsp.get_buffers_by_client_id(client_id)
-  for _, bufnr in ipairs(attached_bufs or {}) do
+  local attached_bufs = client.attached_buffers or {}
+  for bufnr, _ in pairs(attached_bufs) do
     if is_buffer_visible(bufnr) then
       M.request_diagnostics(client_id, bufnr)
     end

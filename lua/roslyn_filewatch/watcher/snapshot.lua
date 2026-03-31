@@ -232,7 +232,9 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
     stdio = { nil, stdout, stderr },
   }, function(code)
     exit_code = code
-    handle:close()
+    if handle then
+      handle:close()
+    end
     handle_closed = true
     on_finish()
   end)
@@ -248,47 +250,57 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
     return
   end
 
-  uv.read_start(stdout, function(err, data)
-    if err then
-      stdout:read_stop()
-      stdout:close()
-      stdout_closed = true
-      on_finish()
-      return
-    end
-
-    if data then
-      buffer = buffer .. data
-      while true do
-        local line_end = buffer:find("\n")
-        if not line_end then
-          break
+  if stdout then
+    uv.read_start(stdout, function(err, data)
+      if err then
+        if stdout then
+          stdout:read_stop()
+          stdout:close()
         end
+        stdout_closed = true
+        on_finish()
+        return
+      end
 
-        local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
-        buffer = buffer:sub(line_end + 1)
-        process_line(line)
+      if data then
+        buffer = buffer .. data
+        while true do
+          local line_end = buffer:find("\n")
+          if not line_end then
+            break
+          end
+
+          local line = buffer:sub(1, line_end - 1):gsub("\r$", "")
+          buffer = buffer:sub(line_end + 1)
+          process_line(line)
+        end
+      else
+        -- EOF
+        if #buffer > 0 then
+          local line = buffer:gsub("\r$", "")
+          process_line(line)
+        end
+        if stdout then
+          stdout:read_stop()
+          stdout:close()
+        end
+        stdout_closed = true
+        on_finish()
       end
-    else
-      -- EOF
-      if #buffer > 0 then
-        local line = buffer:gsub("\r$", "")
-        process_line(line)
-      end
-      stdout:read_stop()
-      stdout:close()
-      stdout_closed = true
-      on_finish()
-    end
-  end)
+    end)
+  end
 
   -- Also read stderr to prevent buffer blocking, but ignore output
-  uv.read_start(stderr, function(err, data)
-    if not data then
-      stderr:read_stop()
-      stderr:close()
-    end
-  end)
+  if stderr then
+    uv.read_start(stderr, function(err, data)
+      if not data then
+        if stderr then
+          stderr:read_stop()
+          stderr:close()
+        end
+      end
+    end)
+  end
 end
 
 local function scan_tree_async_lua(root, callback, on_progress)

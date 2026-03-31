@@ -34,11 +34,11 @@ local M = {}
 local DIRTY_DIRS_THRESHOLD = 10
 
 ---@class ClientState
----@field watcher uv_fs_event_t|nil
----@field poller uv_fs_poll_t|nil
----@field watchdog uv_timer_t|nil
----@field sln_poll_timer uv_timer_t|nil
----@field batch_queue table|nil
+---@field watcher uv.uv_fs_event_t|table|nil
+---@field poller uv.uv_fs_poll_t|nil
+---@field watchdog uv.uv_timer_t|nil
+---@field sln_poll_timer uv.uv_timer_t|nil
+---@field batch_queue {events: table, timer: uv.uv_timer_t|nil}|nil
 ---@field snapshot table<string, any>
 ---@field last_event number
 ---@field restart_scheduled boolean
@@ -47,11 +47,12 @@ local DIRTY_DIRS_THRESHOLD = 10
 ---@field dirty_dirs table<string, boolean>
 ---@field needs_full_scan boolean
 ---@field sln_info table|nil
----@field csproj_reload_pending table|nil
+---@field csproj_reload_pending {timer: uv.uv_timer_t|nil, pending: boolean}|nil
 ---@field root string|nil
 ---@field autocmd_ids number[]|nil
 ---@field recovery_consecutive_failures number
 ---@field recovery_current_backoff number
+---@field backend_name string|nil
 
 ---@type table<number, ClientState>
 local client_states = {}
@@ -425,6 +426,9 @@ local function handle_csproj_reload(client, sln_info)
     state.csproj_reload_pending = { timer = nil, pending = false }
   end
   local pending = state.csproj_reload_pending
+  if not pending then
+    return
+  end
 
   if pending.timer then
     safe_close_handle(pending.timer)
@@ -445,7 +449,7 @@ local function handle_csproj_reload(client, sln_info)
     pending.pending = false
 
     vim.schedule(function()
-      if client.is_stopped and client.is_stopped() then
+      if client:is_stopped() then
         return
       end
 
@@ -460,7 +464,7 @@ local function handle_csproj_reload(client, sln_info)
       if config.options.enable_autorestore and project_paths[1] then
         pcall(restore_mod.schedule_restore, project_paths[1], function()
           vim.defer_fn(function()
-            if client.is_stopped and client.is_stopped() then
+            if client:is_stopped() then
               return
             end
             send_csproj_change_events(project_paths)
@@ -538,45 +542,50 @@ local function queue_events(client_id, evs)
       state.batch_queue = { events = {}, timer = nil }
     end
     local queue = state.batch_queue
+    if not queue then
+      return
+    end
     vim.list_extend(queue.events, evs)
 
     if not queue.timer then
       local t = uv.new_timer()
-      queue.timer = t
-      t:start(config.options.batching.interval or 300, 0, function()
-        local changes = queue.events
-        queue.events = {}
-        safe_close_handle(queue.timer)
-        queue.timer = nil
-        if #changes > 0 then
-          local max_events = config.options.max_events_per_batch or 200
+      if t then
+        queue.timer = t
+        t:start(config.options.batching.interval or 300, 0, function()
+          local changes = queue.events
+          queue.events = {}
+          safe_close_handle(queue.timer)
+          queue.timer = nil
+          if #changes > 0 then
+            local max_events = config.options.max_events_per_batch or 200
 
-          local function send_chunk(idx)
-            if idx > #changes then
-              return
+            local function send_chunk(idx)
+              if idx > #changes then
+                return
+              end
+
+              local end_idx = math.min(idx + max_events - 1, #changes)
+              local chunk = {}
+              for i = idx, end_idx do
+                table.insert(chunk, changes[i])
+              end
+
+              pcall(notify_roslyn, chunk)
+
+              if end_idx < #changes then
+                -- Yield to main loop to prevent freezing UI during massive updates
+                vim.defer_fn(function()
+                  send_chunk(end_idx + 1)
+                end, 10)
+              end
             end
 
-            local end_idx = math.min(idx + max_events - 1, #changes)
-            local chunk = {}
-            for i = idx, end_idx do
-              table.insert(chunk, changes[i])
-            end
-
-            pcall(notify_roslyn, chunk)
-
-            if end_idx < #changes then
-              -- Yield to main loop to prevent freezing UI during massive updates
-              vim.defer_fn(function()
-                send_chunk(end_idx + 1)
-              end, 10)
-            end
+            vim.schedule(function()
+              send_chunk(1)
+            end)
           end
-
-          vim.schedule(function()
-            send_chunk(1)
-          end)
-        end
-      end)
+        end)
+      end
     end
   else
     vim.schedule(function()
@@ -729,7 +738,7 @@ function M.resync()
 end
 
 function M.start(client)
-  if not client or (client.is_stopped and client.is_stopped()) then
+  if not client or client:is_stopped() then
     return
   end
 
@@ -800,7 +809,7 @@ function M.start(client)
 
     vim.defer_fn(function()
       state.restart_scheduled = false
-      if client.is_stopped() then
+      if client:is_stopped() then
         return
       end
 
@@ -893,7 +902,7 @@ function M.start(client)
         state.recovery_current_backoff = config.options.recovery_initial_delay_ms or 300
         if config.options.recovery_verify_enabled then
           vim.defer_fn(function()
-            if client.is_stopped() then
+            if client:is_stopped() then
               return
             end
             state.needs_full_scan = true
@@ -1190,7 +1199,7 @@ function M.start(client)
       notify("[PROJECT] Starting project watcher timer", vim.log.levels.DEBUG)
 
       sln_timer:start(POLL_INTERVAL, POLL_INTERVAL, function()
-        if client.is_stopped and client.is_stopped() then
+        if client:is_stopped() then
           safe_close_handle(sln_timer)
           state.sln_poll_timer = nil
           return
@@ -1371,7 +1380,7 @@ function M.start(client)
       if args.data.client_id == client.id then
         vim.schedule(function()
           local still_active = vim.lsp.get_client_by_id(client.id)
-          if still_active and not (still_active.is_stopped and still_active.is_stopped()) then
+          if still_active and not (still_active.is_stopped and still_active:is_stopped()) then
             pcall(autocmds_mod.clear_client, client.id)
             notify("LspDetach: Buffer detached, client still active", vim.log.levels.DEBUG)
             return
@@ -1415,7 +1424,7 @@ function M.reload_projects()
           local diag_mod = get_diagnostics_mod()
           if diag_mod and diag_mod.request_visible_diagnostics then
             vim.defer_fn(function()
-              if client.is_stopped and client.is_stopped() then
+              if client:is_stopped() then
                 return
               end
               diag_mod.request_visible_diagnostics(client.id)

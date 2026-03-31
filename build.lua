@@ -59,17 +59,26 @@ local function download_binary()
   local repo = "khoido2003/roslyn-filewatch.nvim"
   local asset_name
 
+  local is_arm64 = arch:match("arm64") or arch:match("aarch64")
+
   if is_win then
-    asset_name = "roslyn_filewatch_rs-windows-x86_64.dll"
-  elseif is_mac then
-    -- uv.os_uname().machine returns "arm64" on Apple Silicon, "x86_64" on Intel
-    if arch:match("x86_64") then
-      asset_name = "roslyn_filewatch_rs-macos-x86_64.so"
+    if is_arm64 then
+      asset_name = "roslyn_filewatch_rs-windows-arm64.dll"
     else
+      asset_name = "roslyn_filewatch_rs-windows-x86_64.dll"
+    end
+  elseif is_mac then
+    if is_arm64 then
       asset_name = "roslyn_filewatch_rs-macos-arm64.so"
+    else
+      asset_name = "roslyn_filewatch_rs-macos-x86_64.so"
     end
   elseif is_linux then
-    asset_name = "roslyn_filewatch_rs-linux-x86_64.so"
+    if is_arm64 then
+      asset_name = "roslyn_filewatch_rs-linux-arm64.so"
+    else
+      asset_name = "roslyn_filewatch_rs-linux-x86_64.so"
+    end
   else
     print("Unsupported platform: " .. sysname)
     return false
