@@ -2,6 +2,8 @@
 ---@field schedule_restore fun(project_path: string, on_complete?: fun(project_path: string))
 ---@field is_restoring fun(project_path: string): boolean
 
+---@diagnostic disable: undefined-field, undefined-doc-name
+
 local config = require("roslyn_filewatch.config")
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")
@@ -28,10 +30,11 @@ local function notify_batch(status)
       vim.notify("[roslyn-filewatch] Restoring dependencies...", vim.log.levels.INFO)
     end
   elseif status == "end" then
-    -- Only notify end if queue is empty and nothing is processing
     if #restore_queue == 0 and not processing_active then
-      total_batch_active = false
-      vim.notify("[roslyn-filewatch] All dependencies restored.", vim.log.levels.INFO)
+      if total_batch_active then
+        total_batch_active = false
+        vim.notify("[roslyn-filewatch] All dependencies restored.", vim.log.levels.INFO)
+      end
     end
   end
 end
@@ -103,77 +106,58 @@ end
 ---@param on_complete? fun(project_path: string)|number Callback or delay_ms
 ---@param delay_ms? number Delay in ms (default 2000)
 function M.schedule_restore(project_path, on_complete, delay_ms)
-  -- Handle argument overloading: schedule_restore(path, delay_ms)
+  if not project_path or project_path == "" then
+    return
+  end
+
   if type(on_complete) == "number" then
     delay_ms = on_complete
     on_complete = nil
   end
 
-  if not config.options.enable_autorestore then
-    -- If autorestore is disabled, call callback immediately
-    if on_complete then
-      vim.schedule(function()
-        pcall(on_complete, project_path)
-      end)
-    end
-    return
-  end
+  delay_ms = delay_ms or (config.options.restore_debounce_ms or 1000)
 
-  -- Normalize path
-  project_path = utils.normalize_path(project_path)
-
-  -- Cancel existing debounce timer for this file
   if debounce_timers[project_path] then
-    pcall(function()
-      if not debounce_timers[project_path]:is_closing() then
-        debounce_timers[project_path]:stop()
-        debounce_timers[project_path]:close()
-      end
-    end)
+    local old_timer = debounce_timers[project_path]
+    if not old_timer:is_closing() then
+      old_timer:stop()
+      old_timer:close()
+    end
     debounce_timers[project_path] = nil
   end
 
-  local t = uv.new_timer()
-  if not t then
+  local timer = uv.new_timer()
+  if not timer then
     return
   end
-  debounce_timers[project_path] = t
 
-  -- Debounce (default 2000ms, or custom delay)
-  -- For Unity, we often want a longer delay (e.g. 5000ms) to let regeneration finish
-  local delay = delay_ms or 2000
+  debounce_timers[project_path] = timer
 
-  t:start(delay, 0, function()
+  timer:start(delay_ms, 0, function()
+    local t = debounce_timers[project_path]
+    if t then
+      pcall(t.stop, t)
+      pcall(t.close, t)
+    end
     debounce_timers[project_path] = nil
-    pcall(function()
-      if not t:is_closing() then
-        t:stop()
-        t:close()
-      end
-    end)
 
-    vim.schedule(function()
-      -- Store callback even if project is already queued
-      -- (so we can notify when the existing restore completes)
-      if on_complete then
-        if not restore_callbacks[project_path] then
-          restore_callbacks[project_path] = {}
-        end
-        table.insert(restore_callbacks[project_path], on_complete)
-      end
+    if queued_set[project_path] then
+      return
+    end
 
-      -- Add to queue if not already there
-      if not queued_set[project_path] then
-        table.insert(restore_queue, { path = project_path, on_complete = nil })
-        queued_set[project_path] = true
-
-        -- Kick off processing if idle
-        if not processing_active then
-          process_next()
-        end
+    if on_complete then
+      if not restore_callbacks[project_path] then
+        restore_callbacks[project_path] = {}
       end
-      -- If already queued, the callback will be called when the existing restore completes
-    end)
+      table.insert(restore_callbacks[project_path], on_complete)
+    end
+
+    table.insert(restore_queue, { path = project_path, on_complete = on_complete })
+    queued_set[project_path] = true
+
+    if not processing_active then
+      vim.schedule(process_next)
+    end
   end)
 end
 

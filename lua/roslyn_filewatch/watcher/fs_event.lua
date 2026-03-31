@@ -1,6 +1,9 @@
 ---@class roslyn_filewatch.fs_event
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv.uv_fs_event_t|nil, string|nil
 ---@field clear fun(client_id: number)
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")

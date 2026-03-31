@@ -1,6 +1,7 @@
 ---@class roslyn_filewatch.rename
 ---@field clear fun(client_id: number)
 ---@field on_delete fun(client_id: number, path: string, prev_entry: roslyn_filewatch.SnapshotEntry, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, callbacks: roslyn_filewatch.RenameCallbacks): boolean
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field on_create fun(client_id: number, path: string, st: uv.fs_stat.result, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, callbacks: roslyn_filewatch.RenameCreateCallbacks): boolean
 
 ---@class roslyn_filewatch.RenameCallbacks
@@ -21,7 +22,10 @@
 
 ---@class PendingDeleteBuffer
 ---@field map table<string, PendingDelete>
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field timer uv.uv_timer_t|nil
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local uv = vim.uv or vim.loop
 local utils = require("roslyn_filewatch.watcher.utils")

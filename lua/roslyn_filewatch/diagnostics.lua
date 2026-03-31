@@ -9,6 +9,8 @@
 local M = {}
 
 local config = require("roslyn_filewatch.config")
+---@diagnostic disable: undefined-field, undefined-doc-name
+
 local uv = vim.uv or vim.loop
 
 ---@type table<string, number> Key: "client_id:bufnr", Value: last request timestamp (ms)

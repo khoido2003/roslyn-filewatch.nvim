@@ -1,6 +1,9 @@
 ---@class roslyn_filewatch.watcher_backend
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, roots: string[], snapshots: table, deps: table): table|nil, string|nil
 ---@field stop fun(handle: table)
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local M = {}
 

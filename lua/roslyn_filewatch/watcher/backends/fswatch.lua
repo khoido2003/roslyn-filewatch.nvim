@@ -1,6 +1,9 @@
 ---@class roslyn_filewatch.watcher_backend.fswatch
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, roots: string[], snapshots: table, deps: table): table|nil, string|nil
 ---@field stop fun(handle: table|nil)
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")

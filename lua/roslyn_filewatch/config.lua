@@ -238,6 +238,9 @@ M.options = {
   --- Enable auto-restore of NuGet packages on .csproj change (default: true)
   enable_autorestore = true,
 
+  --- Debounce time in ms for dotnet restore commands
+  restore_debounce_ms = 1000,
+
   --- Regeneration detection: automatically pause event processing during heavy file generation
   --- (Unity asset imports, Godot project regeneration, etc.)
   regen_detection_enabled = true,

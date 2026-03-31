@@ -1,10 +1,13 @@
 ---@class roslyn_filewatch.watchdog
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, root: string, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, deps: roslyn_filewatch.WatchdogDeps): uv.uv_timer_t|nil, string|nil
 
 ---@class roslyn_filewatch.WatchdogDeps
 ---@field notify fun(msg: string, level?: number)
 ---@field restart_watcher fun(reason?: string, delay_ms?: number, disable_fs_event?: boolean)
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field get_handle fun(): uv.uv_fs_event_t|table|nil
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field get_poller? fun(): uv.uv_fs_poll_t|nil
 ---@field last_events table<number, number>
 ---@field watchdog_idle number Seconds of idle before restarting
@@ -14,6 +17,8 @@
 
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local M = {}
 

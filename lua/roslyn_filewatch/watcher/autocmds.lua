@@ -1,4 +1,5 @@
 ---@class roslyn_filewatch.autocmds
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, root: string, snapshots: table<number, table<string, roslyn_filewatch.SnapshotEntry>>, deps: roslyn_filewatch.AutocmdDeps): number[]
 
 ---@class roslyn_filewatch.AutocmdDeps
@@ -16,6 +17,8 @@ local utils = require("roslyn_filewatch.watcher.utils")
 local to_roslyn_path = utils.to_roslyn_path
 local request_diagnostics_refresh = utils.request_diagnostics_refresh
 local notify_project_open = utils.notify_project_open
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local M = {}
 

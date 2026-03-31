@@ -3,6 +3,8 @@
 ---@field is_regenerating fun(client_id: number): boolean
 ---@field clear fun(client_id: number)
 
+---@diagnostic disable: undefined-field, undefined-doc-name
+
 local uv = vim.uv or vim.loop
 local config = require("roslyn_filewatch.config")
 

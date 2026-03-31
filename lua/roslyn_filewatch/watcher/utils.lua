@@ -1,5 +1,7 @@
 ---@class roslyn_filewatch.utils
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field mtime_ns fun(stat: uv.fs_stat.result|roslyn_filewatch.SnapshotEntry|nil): number
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field identity_from_stat fun(st: uv.fs_stat.result|roslyn_filewatch.SnapshotEntry|nil): string|nil
 ---@field same_file_info fun(a: roslyn_filewatch.SnapshotEntry|nil, b: roslyn_filewatch.SnapshotEntry|nil): boolean
 ---@field normalize_path fun(p: string|nil): string
@@ -15,6 +17,8 @@
 ---@field dev number|nil Device ID (may be nil on Windows)
 
 local uv = vim.uv or vim.loop
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local M = {}
 

@@ -1,6 +1,9 @@
 ---@class roslyn_filewatch.fs_poll
+---@diagnostic disable-next-line: undefined-doc-name
 ---@field start fun(client: vim.lsp.Client, root: string, snapshots: table, deps: table): uv.uv_fs_poll_t|nil, string|nil
 ---@field stop fun(client_id: number)
+
+---@diagnostic disable: undefined-field, undefined-doc-name
 
 local uv = vim.uv or vim.loop
 
