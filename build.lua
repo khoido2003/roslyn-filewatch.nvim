@@ -1,4 +1,4 @@
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local sysname = uv.os_uname().sysname:lower()
 local arch = uv.os_uname().machine:lower()
 local is_win = sysname:match("windows")
@@ -107,7 +107,9 @@ else
 end
 
 if vim.fn.executable("cargo") == 1 then
-  build_from_source()
+  if not build_from_source() then
+    download_binary()
+  end
 else
   download_binary()
 end
