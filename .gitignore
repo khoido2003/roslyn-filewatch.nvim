@@ -1,6 +1,5 @@
 # Rust
 rust/target/
-rust/Cargo.lock
 
 # Compiled Native Binaries
 lua/roslyn_filewatch_rs.dll
