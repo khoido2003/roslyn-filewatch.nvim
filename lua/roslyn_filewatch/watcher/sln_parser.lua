@@ -93,7 +93,13 @@ local function parse_sln_content(content, sln_dir)
       local normalized = project_path:gsub("\\", "/")
       local project_dir = normalized:match("^(.+)/[^/]+$")
       if project_dir then
-        local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+        local abs_dir
+        if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+          abs_dir = utils.normalize_path(project_dir)
+        else
+          abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+        end
+
         if not seen[abs_dir] then
           seen[abs_dir] = true
           table.insert(project_dirs, abs_dir)
@@ -118,7 +124,13 @@ local function parse_slnx_content(content, sln_dir)
     local project_dir = normalized:match("^(.+)/[^/]+$")
     if project_dir then
       has_subdirectory_projects = true
-      local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+      local abs_dir
+      if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+        abs_dir = utils.normalize_path(project_dir)
+      else
+        abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+      end
+
       if not seen[abs_dir] then
         seen[abs_dir] = true
         table.insert(project_dirs, abs_dir)
@@ -134,7 +146,13 @@ local function parse_slnx_content(content, sln_dir)
     local project_dir = normalized:match("^(.+)/[^/]+$")
     if project_dir then
       has_subdirectory_projects = true
-      local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+      local abs_dir
+      if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+        abs_dir = utils.normalize_path(project_dir)
+      else
+        abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+      end
+
       if not seen[abs_dir] then
         seen[abs_dir] = true
         table.insert(project_dirs, abs_dir)
@@ -209,7 +227,12 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
               local project_dir = normalized:match("^(.+)/[^/]+$")
               if project_dir then
                 has_sub = true
-                local abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+                local abs_dir
+                if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+                  abs_dir = utils.normalize_path(project_dir)
+                else
+                  abs_dir = utils.normalize_path(sln_dir .. "/" .. project_dir)
+                end
                 if not seen[abs_dir] then
                   seen[abs_dir] = true
                   table.insert(dirs, abs_dir)
@@ -239,7 +262,13 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
                 local project_dir = normalized:match("^(.+)/[^/]+$")
                 if project_dir then
                   has_sub = true
-                  local abs_dir = w_sln_dir .. "/" .. project_dir
+                  local abs_dir
+                  if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+                    abs_dir = project_dir
+                  else
+                    abs_dir = w_sln_dir .. "/" .. project_dir
+                  end
+
                   -- We will normalize after the thread joins back
                   if not w_seen[abs_dir] then
                     w_seen[abs_dir] = true
@@ -256,7 +285,13 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
                 local project_dir = normalized:match("^(.+)/[^/]+$")
                 if project_dir then
                   has_sub = true
-                  local abs_dir = w_sln_dir .. "/" .. project_dir
+                  local abs_dir
+                  if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+                    abs_dir = project_dir
+                  else
+                    abs_dir = w_sln_dir .. "/" .. project_dir
+                  end
+
                   if not w_seen[abs_dir] then
                     w_seen[abs_dir] = true
                     table.insert(w_dirs, abs_dir)
@@ -275,7 +310,13 @@ function M.get_project_dirs_async(sln_path, sln_type, callback)
                   local normalized = project_path:gsub("\\", "/")
                   local project_dir = normalized:match("^(.+)/[^/]+$")
                   if project_dir then
-                    local abs_dir = w_sln_dir .. "/" .. project_dir
+                    local abs_dir
+                    if project_dir:match("^%a:") or project_dir:match("^/") or project_dir:match("^\\\\") then
+                      abs_dir = project_dir
+                    else
+                      abs_dir = w_sln_dir .. "/" .. project_dir
+                    end
+
                     if not w_seen[abs_dir] then
                       w_seen[abs_dir] = true
                       table.insert(w_dirs, abs_dir)

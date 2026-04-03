@@ -479,7 +479,15 @@ function M.start(client, root, snapshots, deps)
       end
     end
 
-    handle:start(root, { recursive = true }, on_event_callback)
+    local watch_path = root
+    if utils.is_windows() then
+      -- Use backslashes and uppercase drive for native fs_event on Windows
+      watch_path = root:gsub("/", "\\"):gsub("^(%a):", function(l)
+        return l:upper() .. ":"
+      end)
+    end
+
+    handle:start(watch_path, { recursive = true }, on_event_callback)
   end)
 
   if not ok_start then

@@ -207,7 +207,7 @@ function M.start(client, root, snapshots, deps)
               -- This ensures Roslyn reloads the project and recognizes new files
               -- SKIPPED if checking an old file (reduces duplicate restores on startup)
               if not startup_handled and is_recent then
-                local loop_now = vim.loop.now()
+                local loop_now = uv.now()
                 local last_reload = last_project_reload_time[client.id] or 0
 
                 if loop_now - last_reload > NEW_FILE_PROJECT_RELOAD_DEBOUNCE_MS then
@@ -375,10 +375,16 @@ function M.start(client, root, snapshots, deps)
       vim.schedule(function()
         local lsp_client = vim.lsp.get_client_by_id(client.id)
         local remaining_bufs = (lsp_client and lsp_client.attached_buffers) or {}
+
+        local bufnrs = {}
+        for b, _ in pairs(remaining_bufs) do
+          table.insert(bufnrs, b)
+        end
+
         -- Filter out the current buffer being unloaded
         local other_bufs = vim.tbl_filter(function(buf)
           return buf ~= args.buf and vim.api.nvim_buf_is_valid(buf)
-        end, remaining_bufs or {})
+        end, bufnrs)
 
         if #other_bufs == 0 then
           -- All buffers deleted - reset the project open flag
