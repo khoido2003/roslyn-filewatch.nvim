@@ -15,7 +15,7 @@
 ---@field get_snapshot? fun(): table<string, roslyn_filewatch.SnapshotEntry>|nil
 ---@field mark_needs_full_scan? fun()
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("roslyn_filewatch.config")
 
 ---@diagnostic disable: undefined-field, undefined-doc-name

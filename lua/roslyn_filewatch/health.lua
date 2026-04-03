@@ -23,7 +23,7 @@ local function check_neovim()
 end
 
 local function check_platform()
-  local uv = vim.uv or vim.loop
+  local uv = vim.uv
   local uname = uv.os_uname()
   local sysname = uname and uname.sysname or "unknown"
   info("Platform: " .. sysname)
@@ -43,12 +43,12 @@ local function check_platform()
 end
 
 local function check_libuv()
-  local uv = vim.uv or vim.loop
+  local uv = vim.uv
   if not uv then
     error_fn("libuv not available")
     return
   end
-  ok("libuv: " .. (vim.uv and "vim.uv" or "vim.loop"))
+  ok("libuv: vim.uv")
 
   local test_handle = uv.new_fs_event()
   if test_handle then

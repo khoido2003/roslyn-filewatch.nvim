@@ -2,15 +2,15 @@
 
 local M = {}
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@type table<string, roslyn_filewatch.Options>
 M.presets = {
   unity = {
     batching = { enabled = true, interval = 1000 },
-    max_events_per_batch = 1000,
-    activity_quiet_period = 15,
-    poll_interval = 15000,
+    max_events_per_batch = 2000,
+    activity_quiet_period = 10,
+    poll_interval = 20000,
     processing_debounce_ms = 500,
     watchdog_idle = 120,
     ignore_dirs = {
@@ -54,6 +54,9 @@ M.presets = {
       ".vs",
       ".vscode",
       "node_modules",
+      ".collabignore",
+      "AssetStoreTools",
+      "PlasticSCM",
     },
     deferred_loading = true,
     deferred_loading_delay_ms = 2000,

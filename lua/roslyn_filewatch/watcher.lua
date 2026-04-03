@@ -4,7 +4,7 @@
 ---@diagnostic disable-next-line: undefined-doc-name
 ---@field stop fun(client: vim.lsp.Client)
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 ---@diagnostic disable: undefined-field, undefined-doc-name
@@ -486,24 +486,26 @@ local function process_auto_restore(client_id, evs, state)
     return
   end
 
-  local restore_triggered = false
+  local restore_triggered_for_project = false
   for _, ev in ipairs(evs) do
     local uri = ev.uri
     if uri and (uri:match("%.csproj$") or uri:match("%.vbproj$") or uri:match("%.fsproj$")) then
       pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
-      restore_triggered = true
+      restore_triggered_for_project = true
     end
   end
 
-  if not restore_triggered then
+  if not restore_triggered_for_project then
+    local restore_triggered_for_solution = false
     for _, ev in ipairs(evs) do
       if ev.type == 1 and ev.uri then
         local path = vim.uri_to_fname(ev.uri)
         if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
-          if state.sln_info and state.sln_info.path then
-            pcall(restore_mod.schedule_restore, state.sln_info.path, 5000)
+          if state.sln_info and state.sln_info.path and not restore_triggered_for_solution then
+            pcall(restore_mod.schedule_restore, state.sln_info.path, 1000)
+            restore_triggered_for_solution = true
           end
-          break
+          -- No break here, continue checking other events in case a project file was also changed
         end
       end
     end
@@ -550,6 +552,11 @@ local function queue_events(client_id, evs)
       return
     end
     vim.list_extend(queue.events, evs)
+
+    -- If no events were added, no need to start a timer
+    if #queue.events == 0 then
+      return
+    end
 
     if not queue.timer then
       local t = uv.new_timer()
@@ -651,6 +658,12 @@ local function cleanup_client(client_id)
   pcall(function()
     if autocmds_mod and autocmds_mod.clear_client then
       autocmds_mod.clear_client(client_id)
+    end
+  end)
+
+  pcall(function()
+    if diagnostics_mod and diagnostics_mod.clear_client then
+      diagnostics_mod.clear_client(client_id)
     end
   end)
 
@@ -1203,113 +1216,115 @@ function M.start(client)
       notify("[PROJECT] Starting project watcher timer", vim.log.levels.DEBUG)
 
       sln_timer:start(POLL_INTERVAL, POLL_INTERVAL, function()
-        if client:is_stopped() then
-          safe_close_handle(sln_timer)
-          state.sln_poll_timer = nil
-          return
-        end
-
-        local cached = state.sln_info
-        if not cached then
-          return
-        end
-
-        if cached.csproj_only then
-          scan_csproj_async(root, function(collected_mtimes)
-            if not state.sln_info then
-              return
-            end
-
-            local previous_csproj = state.sln_info.csproj_files or {}
-            local new_projects_list = {}
-            local current_csproj_set = {}
-
-            for path, current_mtime in pairs(collected_mtimes) do
-              current_csproj_set[path] = current_mtime
-              local old_mtime = previous_csproj[path]
-              if not old_mtime or old_mtime ~= current_mtime then
-                table.insert(new_projects_list, to_roslyn_path(path))
-                if old_mtime and old_mtime ~= current_mtime then
-                  pcall(restore_mod.schedule_restore, path)
-                end
-              end
-            end
-
-            state.sln_info.csproj_files = current_csproj_set
-
-            if #new_projects_list > 0 then
-              vim.schedule(function()
-                for _, c in ipairs(vim.lsp.get_clients()) do
-                  if vim.tbl_contains(config.options.client_names, c.name) then
-                    notify_project_open(c, new_projects_list, notify)
-                    request_diagnostics_refresh(c, 2000)
-                  end
-                end
-              end)
-            end
-          end)
-          return
-        end
-
-        if not cached.path then
-          return
-        end
-
-        uv.fs_stat(cached.path, function(err, stat)
-          if err or not stat then
+        vim.schedule(function()
+          if client:is_stopped() then
+            safe_close_handle(sln_timer)
+            state.sln_poll_timer = nil
             return
           end
 
-          local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
-          if current_mtime == cached.mtime then
+          local cached = state.sln_info
+          if not cached then
             return
           end
 
-          local old_csproj = cached.csproj_files
-          state.sln_info = { path = cached.path, mtime = current_mtime, csproj_files = old_csproj }
-
-          vim.schedule(function()
-            if not state.sln_info or not state.sln_info.path then
-              return
-            end
-
-            local previous_csproj = state.sln_info.csproj_files or {}
-
+          if cached.csproj_only then
             scan_csproj_async(root, function(collected_mtimes)
+              if not state.sln_info then
+                return
+              end
+
+              local previous_csproj = state.sln_info.csproj_files or {}
               local new_projects_list = {}
               local current_csproj_set = {}
-              local restore_needed = false
 
-              for path, current_mtime_sec in pairs(collected_mtimes) do
-                current_csproj_set[path] = current_mtime_sec
+              for path, current_mtime in pairs(collected_mtimes) do
+                current_csproj_set[path] = current_mtime
                 local old_mtime = previous_csproj[path]
-                if state.sln_info.csproj_files and (not old_mtime or old_mtime ~= current_mtime_sec) then
+                if not old_mtime or old_mtime ~= current_mtime then
                   table.insert(new_projects_list, to_roslyn_path(path))
-                  if old_mtime and old_mtime ~= current_mtime_sec then
-                    restore_needed = true
+                  if old_mtime and old_mtime ~= current_mtime then
+                    pcall(restore_mod.schedule_restore, path)
                   end
                 end
-              end
-
-              if restore_needed then
-                pcall(restore_mod.schedule_restore, state.sln_info.path)
-              end
-
-              if not state.sln_info.csproj_files then
-                state.sln_info.csproj_files = current_csproj_set
-                return
               end
 
               state.sln_info.csproj_files = current_csproj_set
 
               if #new_projects_list > 0 then
-                for _, c in ipairs(vim.lsp.get_clients()) do
-                  if vim.tbl_contains(config.options.client_names, c.name) then
-                    notify_project_open(c, new_projects_list, notify)
-                    request_diagnostics_refresh(c, 2000)
+                vim.schedule(function()
+                  for _, c in ipairs(vim.lsp.get_clients()) do
+                    if vim.tbl_contains(config.options.client_names, c.name) then
+                      notify_project_open(c, new_projects_list, notify)
+                      request_diagnostics_refresh(c, 2000)
+                    end
+                  end
+                end)
+              end
+            end)
+            return
+          end
+
+          if not cached.path then
+            return
+          end
+
+          uv.fs_stat(cached.path, function(err, stat)
+            if err or not stat then
+              return
+            end
+
+            local current_mtime = stat.mtime.sec * 1e9 + (stat.mtime.nsec or 0)
+            if current_mtime == cached.mtime then
+              return
+            end
+
+            local old_csproj = cached.csproj_files
+            state.sln_info = { path = cached.path, mtime = current_mtime, csproj_files = old_csproj }
+
+            vim.schedule(function()
+              if not state.sln_info or not state.sln_info.path then
+                return
+              end
+
+              local previous_csproj = state.sln_info.csproj_files or {}
+
+              scan_csproj_async(root, function(collected_mtimes)
+                local new_projects_list = {}
+                local current_csproj_set = {}
+                local restore_needed = false
+
+                for path, current_mtime_sec in pairs(collected_mtimes) do
+                  current_csproj_set[path] = current_mtime_sec
+                  local old_mtime = previous_csproj[path]
+                  if state.sln_info.csproj_files and (not old_mtime or old_mtime ~= current_mtime_sec) then
+                    table.insert(new_projects_list, to_roslyn_path(path))
+                    if old_mtime and old_mtime ~= current_mtime_sec then
+                      restore_needed = true
+                    end
                   end
                 end
-              end
+
+                if restore_needed then
+                  pcall(restore_mod.schedule_restore, state.sln_info.path)
+                end
+
+                if not state.sln_info.csproj_files then
+                  state.sln_info.csproj_files = current_csproj_set
+                  return
+                end
+
+                state.sln_info.csproj_files = current_csproj_set
+
+                if #new_projects_list > 0 then
+                  for _, c in ipairs(vim.lsp.get_clients()) do
+                    if vim.tbl_contains(config.options.client_names, c.name) then
+                      notify_project_open(c, new_projects_list, notify)
+                      request_diagnostics_refresh(c, 2000)
+                    end
+                  end
+                end
+              end)
             end)
           end)
         end)
@@ -1404,7 +1419,6 @@ function M.start(client)
           cleanup_client(client.id)
           client_states[client.id] = nil
         end)
-        return true
       end
     end,
   })

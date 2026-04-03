@@ -5,7 +5,7 @@
 ---@diagnostic disable: undefined-field, undefined-doc-name
 
 local config = require("roslyn_filewatch.config")
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}
@@ -21,19 +21,26 @@ local debounce_timers = {}
 ---@type table<string, fun(string)[]> Callbacks to call when restore completes for a project
 local restore_callbacks = {}
 
+---@type uv.uv_timer_t|nil Timer to settle multiple restore calls into a single batch
+local settle_timer = nil
+
 --- Notify user about batch status
 ---@param status "start" | "end"
 local function notify_batch(status)
   if status == "start" then
     if not total_batch_active then
       total_batch_active = true
-      vim.notify("[roslyn-filewatch] Restoring dependencies...", vim.log.levels.INFO)
+      vim.schedule(function()
+        vim.notify("[roslyn-filewatch] Restoring dependencies...", vim.log.levels.INFO)
+      end)
     end
   elseif status == "end" then
     if #restore_queue == 0 and not processing_active then
       if total_batch_active then
         total_batch_active = false
-        vim.notify("[roslyn-filewatch] All dependencies restored.", vim.log.levels.INFO)
+        vim.schedule(function()
+          vim.notify("[roslyn-filewatch] All dependencies restored.", vim.log.levels.INFO)
+        end)
       end
     end
   end
@@ -50,7 +57,6 @@ local function process_next()
   processing_active = true
   local queue_item = table.remove(restore_queue, 1)
   local project_path = queue_item.path
-  local on_complete_callback = queue_item.on_complete
   queued_set[project_path] = nil
   local project_name = project_path:match("([^/]+)$") or project_path
 
@@ -72,13 +78,6 @@ local function process_next()
             pcall(callback, project_path)
           end
           restore_callbacks[project_path] = nil
-        end)
-      end
-
-      -- Call the per-restore callback if provided
-      if on_complete_callback then
-        vim.schedule(function()
-          pcall(on_complete_callback, project_path)
         end)
       end
     end
@@ -110,6 +109,9 @@ function M.schedule_restore(project_path, on_complete, delay_ms)
     return
   end
 
+  -- Normalize path once
+  project_path = utils.normalize_path(project_path)
+
   if type(on_complete) == "number" then
     delay_ms = on_complete
     on_complete = nil
@@ -117,6 +119,20 @@ function M.schedule_restore(project_path, on_complete, delay_ms)
 
   delay_ms = delay_ms or (config.options.restore_debounce_ms or 1000)
 
+  -- Add callback to registry early so it's not lost if already debouncing or queued
+  if on_complete then
+    if not restore_callbacks[project_path] then
+      restore_callbacks[project_path] = {}
+    end
+    table.insert(restore_callbacks[project_path], on_complete)
+  end
+
+  -- If already in queue, just wait for it to process
+  if queued_set[project_path] then
+    return
+  end
+
+  -- Debounce per project path
   if debounce_timers[project_path] then
     local old_timer = debounce_timers[project_path]
     if not old_timer:is_closing() then
@@ -134,6 +150,7 @@ function M.schedule_restore(project_path, on_complete, delay_ms)
   debounce_timers[project_path] = timer
 
   timer:start(delay_ms, 0, function()
+    -- Cleanup timer handle
     local t = debounce_timers[project_path]
     if t then
       pcall(t.stop, t)
@@ -141,21 +158,56 @@ function M.schedule_restore(project_path, on_complete, delay_ms)
     end
     debounce_timers[project_path] = nil
 
+    -- Re-check if already queued (unlikely but safe)
     if queued_set[project_path] then
       return
     end
 
-    if on_complete then
-      if not restore_callbacks[project_path] then
-        restore_callbacks[project_path] = {}
+    -- If we are scheduling a solution, we can potentially skip pending project restores
+    -- that are likely covered by this solution restore.
+    if project_path:match("%.sln$") then
+      local root_dir = project_path:match("^(.+)/[^/]+$")
+      if root_dir then
+        local to_remove = {}
+        for i, item in ipairs(restore_queue) do
+          if item.path:match("%.csproj$") or item.path:match("%.vbproj$") or item.path:match("%.fsproj$") then
+            if utils.path_starts_with(item.path, root_dir) then
+              table.insert(to_remove, i)
+              queued_set[item.path] = nil
+            end
+          end
+        end
+        for i = #to_remove, 1, -1 do
+          table.remove(restore_queue, to_remove[i])
+        end
       end
-      table.insert(restore_callbacks[project_path], on_complete)
     end
 
-    table.insert(restore_queue, { path = project_path, on_complete = on_complete })
+    -- Add to queue
+    table.insert(restore_queue, { path = project_path })
     queued_set[project_path] = true
 
-    if not processing_active then
+    -- If already processing, it will pick it up eventually
+    if processing_active then
+      return
+    end
+
+    -- Settle batch before starting processing
+    if settle_timer then
+      pcall(settle_timer.stop, settle_timer)
+      pcall(settle_timer.close, settle_timer)
+    end
+
+    settle_timer = uv.new_timer()
+    if settle_timer then
+      settle_timer:start(100, 0, function()
+        pcall(settle_timer.stop, settle_timer)
+        pcall(settle_timer.close, settle_timer)
+        settle_timer = nil
+        vim.schedule(process_next)
+      end)
+    else
+      -- Fallback if timer creation fails
       vim.schedule(process_next)
     end
   end)
@@ -165,6 +217,7 @@ end
 ---@param project_path string
 ---@return boolean
 function M.is_restoring(project_path)
+  project_path = utils.normalize_path(project_path)
   return queued_set[project_path] == true or (processing_active and total_batch_active)
 end
 

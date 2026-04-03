@@ -16,7 +16,7 @@
 ---@field ino number|nil Inode number (may be nil on Windows)
 ---@field dev number|nil Device ID (may be nil on Windows)
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@diagnostic disable: undefined-field, undefined-doc-name
 

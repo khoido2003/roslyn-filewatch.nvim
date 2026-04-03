@@ -3,7 +3,7 @@
 ---@field start fun(client: vim.lsp.Client, roots: string[], snapshots: table, deps: table): table|nil, string|nil
 ---@field stop fun(handle: table|nil)
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 

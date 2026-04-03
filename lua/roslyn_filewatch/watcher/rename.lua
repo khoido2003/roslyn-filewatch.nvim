@@ -27,7 +27,7 @@
 
 ---@diagnostic disable: undefined-field, undefined-doc-name
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local utils = require("roslyn_filewatch.watcher.utils")
 
 local mtime_ns = utils.mtime_ns

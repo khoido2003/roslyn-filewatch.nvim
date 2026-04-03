@@ -4,7 +4,7 @@
 
 ---Lightweight .gitignore parser for respecting git ignore patterns.
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}

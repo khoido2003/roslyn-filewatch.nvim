@@ -10,7 +10,7 @@
 ---@field sln_mtimes? table<number, { path: string|nil, mtime: number, csproj_files: table<string, number>|nil, csproj_only?: boolean }>|nil Solution/project tracking data
 ---@field restore_mod? roslyn_filewatch.restore|nil Restore module for triggering project restore
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local utils = require("roslyn_filewatch.watcher.utils")
 
 -- Import shared utilities
@@ -400,8 +400,8 @@ function M.start(client, root, snapshots, deps)
   })
   table.insert(ids, id_unload)
 
-  -- BufEnter, BufWritePost, FileChangedRO
-  local id_early = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO" }, {
+  -- Combined autocmd for file lifecycle events
+  local id_main = vim.api.nvim_create_autocmd({ "BufEnter", "BufWritePost", "FileChangedRO", "BufReadPost" }, {
     group = group,
     callback = function(args)
       if should_ignore_buf(args.buf) then
@@ -420,33 +420,7 @@ function M.start(client, root, snapshots, deps)
       ensure_in_snapshot(bufpath)
     end,
   })
-  table.insert(ids, id_early)
-
-  -- BufReadPost, BufWritePost
-  local id_extra = vim.api.nvim_create_autocmd({ "BufReadPost", "BufWritePost" }, {
-    group = group,
-    callback = function(args)
-      if should_ignore_buf(args.buf) then
-        return
-      end
-
-      if not is_buffer_attached_to_client(args.buf) then
-        return
-      end
-
-      local bufpath = vim.api.nvim_buf_get_name(args.buf)
-      if not is_in_client_root(bufpath) then
-        return
-      end
-
-      if handle_file_check(bufpath) then
-        return
-      end
-
-      ensure_in_snapshot(bufpath)
-    end,
-  })
-  table.insert(ids, id_extra)
+  table.insert(ids, id_main)
 
   return ids
 end

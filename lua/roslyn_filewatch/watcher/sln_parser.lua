@@ -2,7 +2,7 @@
 ---@field find_sln fun(root: string): string|nil, "sln"|"slnx"|"slnf"|nil
 ---@field get_project_dirs fun(sln_path: string, sln_type?: "sln"|"slnx"|"slnf"): string[]
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}

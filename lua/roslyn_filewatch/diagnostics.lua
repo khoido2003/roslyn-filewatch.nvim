@@ -11,7 +11,7 @@ local M = {}
 local config = require("roslyn_filewatch.config")
 ---@diagnostic disable: undefined-field, undefined-doc-name
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 
 ---@type table<string, number> Key: "client_id:bufnr", Value: last request timestamp (ms)
 local last_request_times = {}
@@ -200,7 +200,6 @@ function M.request_visible_diagnostics(client_id)
   if not client then
     return
   end
-
   local attached_bufs = client.attached_buffers or {}
   for bufnr, _ in pairs(attached_bufs) do
     if is_buffer_visible(bufnr) then
@@ -209,43 +208,28 @@ function M.request_visible_diagnostics(client_id)
   end
 end
 
---- Clear all pending timers for a client
+--- Clear all throttling state for a client
 ---@param client_id number
 function M.clear_client(client_id)
   local prefix = tostring(client_id) .. ":"
-  local to_remove = {}
 
-  for key, timer in pairs(pending_timers) do
+  -- Clear request times
+  for key, _ in pairs(last_request_times) do
     if key:sub(1, #prefix) == prefix then
-      table.insert(to_remove, key)
-      pcall(function()
-        if timer and not timer:is_closing() then
-          timer:stop()
-          timer:close()
-        end
-      end)
+      last_request_times[key] = nil
     end
   end
 
-  for _, key in ipairs(to_remove) do
-    pending_timers[key] = nil
-    last_request_times[key] = nil
-  end
-end
-
---- Clear all state
-function M.clear_all()
+  -- Clear and stop pending timers
   for key, timer in pairs(pending_timers) do
-    pcall(function()
+    if key:sub(1, #prefix) == prefix then
       if timer and not timer:is_closing() then
-        timer:stop()
-        timer:close()
+        pcall(timer.stop, timer)
+        pcall(timer.close, timer)
       end
-    end)
+      pending_timers[key] = nil
+    end
   end
-  pending_timers = {}
-  last_request_times = {}
-  heavy_activity = false
 end
 
 return M

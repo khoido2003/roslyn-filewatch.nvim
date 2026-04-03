@@ -40,7 +40,7 @@ function M.reset_stats()
 end
 
 local pending_opens = {}
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local open_timer = nil
 
 local function schedule_project_open(client, csproj_path)

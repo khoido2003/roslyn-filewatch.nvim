@@ -1,4 +1,4 @@
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local sysname = uv.os_uname().sysname:lower()
 local arch = uv.os_uname().machine:lower()
 local is_win = sysname:match("windows")

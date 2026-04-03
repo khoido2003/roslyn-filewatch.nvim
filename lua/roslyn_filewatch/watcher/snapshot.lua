@@ -3,7 +3,7 @@
 ---@field scan_tree_async fun(root: string, callback: fun(out_map: table), on_progress?: fun(scanned: number))
 ---@field is_scanning fun(root: string): boolean
 
-local uv = vim.uv or vim.loop
+local uv = vim.uv
 local config = require("roslyn_filewatch.config")
 local utils = require("roslyn_filewatch.watcher.utils")
 
@@ -161,7 +161,7 @@ local function scan_tree_async_fd(fd_exe, root, callback, on_progress)
     end
 
     local chunk = 0
-    local CHUNK_SIZE = 2000
+    local CHUNK_SIZE = 100
 
     while chunk < CHUNK_SIZE and process_idx <= #pending_paths do
       local path = pending_paths[process_idx]
@@ -398,7 +398,7 @@ local function scan_tree_async_lua(root, callback, on_progress)
     local chunk_files = 0
     local dirs_this_chunk = 0
     local MAX_DIRS_PER_CHUNK = 50
-    local CHUNK_SIZE = 2000
+    local CHUNK_SIZE = 100 -- Reduced from 2000 to avoid blocking main thread
 
     while dir_idx <= #dir_queue and dirs_this_chunk < MAX_DIRS_PER_CHUNK and chunk_files < CHUNK_SIZE do
       local dir = dir_queue[dir_idx]
