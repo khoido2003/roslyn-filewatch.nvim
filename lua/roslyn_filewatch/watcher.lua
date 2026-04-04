@@ -488,17 +488,17 @@ local function process_auto_restore(client_id, evs, state)
 
   for _, ev in ipairs(evs) do
     local uri = ev.uri
-    if
-      uri
-      and (
-        uri:match("%.csproj$")
-        or uri:match("%.vbproj$")
-        or uri:match("%.fsproj$")
-        or uri:match("%.slnx?$")
-        or uri:match("%.slnf$")
-      )
-    then
-      pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
+    if uri then
+      local lower_uri = uri:lower()
+      if
+        lower_uri:match("%.csproj$")
+        or lower_uri:match("%.vbproj$")
+        or lower_uri:match("%.fsproj$")
+        or lower_uri:match("%.slnx?$")
+        or lower_uri:match("%.slnf$")
+      then
+        pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
+      end
     end
   end
 end
@@ -511,7 +511,8 @@ local function process_csproj_only_reload(client_id, evs, state)
   for _, ev in ipairs(evs) do
     if ev.uri and ev.type == 1 then
       local path = vim.uri_to_fname(ev.uri)
-      if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+      local lower_path = path:lower()
+      if lower_path:match("%.cs$") or lower_path:match("%.vb$") or lower_path:match("%.fs$") then
         local clients_list = vim.lsp.get_clients()
         for _, c in ipairs(clients_list) do
           if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then

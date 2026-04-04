@@ -88,9 +88,11 @@ local function process_next()
   end
 
   -- Run dotnet restore with resource limits
-  -- -maxcpucount:1 prevents MSBuild from spawning many worker nodes (reduces memory usage)
-  -- -nodeReuse:false ensures MSBuild nodes don't stay alive after the restore
-  local cmd = { "dotnet", "restore", project_path, "-maxcpucount:1", "-nodeReuse:false" }
+  -- --disable-parallel: Prevents parallel project restore
+  -- -p:MaxCpuCount=1: Forwards MSBuild property to limit processes to 1
+  -- -p:MSBuildNodeReuse=false: Disables node reuse (keeps memory footprint low)
+  local cmd =
+    { "dotnet", "restore", project_path, "--disable-parallel", "-p:MaxCpuCount=1", "-p:MSBuildNodeReuse=false" }
 
   local spawn_ok = false
   if vim.system then
