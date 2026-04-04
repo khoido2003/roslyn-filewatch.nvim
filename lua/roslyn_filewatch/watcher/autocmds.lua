@@ -179,7 +179,8 @@ function M.start(client, root, snapshots, deps)
 
         -- For source files, ALWAYS reload the project (both solution and csproj-only)
         -- This ensures Roslyn reloads and recognizes new files
-        if npath:match("%.cs$") or npath:match("%.vb$") or npath:match("%.fs$") then
+        local lower_npath = npath:lower()
+        if lower_npath:match("%.cs$") or lower_npath:match("%.vb$") or lower_npath:match("%.fs$") then
           local config = require("roslyn_filewatch.config")
 
           -- Check if file is recently created (within last 60 seconds)

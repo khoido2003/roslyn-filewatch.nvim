@@ -152,7 +152,8 @@ function M.roslyn_changes(changes)
   for _, change in ipairs(changes) do
     if change.type == 1 or change.type == 3 then
       local path = vim.uri_to_fname(change.uri)
-      if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
+      local lower_path = path:lower()
+      if lower_path:match("%.cs$") or lower_path:match("%.vb$") or lower_path:match("%.fs$") then
         table.insert(modified_source_files, path)
       end
     end
@@ -197,10 +198,12 @@ function M.roslyn_renames(files)
 
   local modified_source_files = {}
   for _, p in ipairs(files) do
-    if p.old:match("%.cs$") or p.old:match("%.vb$") or p.old:match("%.fs$") then
+    local old_lower = p.old:lower()
+    local new_lower = p.new_path:lower()
+    if old_lower:match("%.cs$") or old_lower:match("%.vb$") or old_lower:match("%.fs$") then
       table.insert(modified_source_files, p.old)
     end
-    if p.new_path:match("%.cs$") or p.new_path:match("%.vb$") or p.new_path:match("%.fs$") then
+    if new_lower:match("%.cs$") or new_lower:match("%.vb$") or new_lower:match("%.fs$") then
       table.insert(modified_source_files, p.new_path)
     end
   end

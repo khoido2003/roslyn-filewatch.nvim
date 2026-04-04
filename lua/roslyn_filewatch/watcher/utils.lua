@@ -75,16 +75,40 @@ function M.is_case_insensitive()
     return true
   end
 
+  -- For macOS (Darwin), check the filesystem directly if possible.
+  -- Case-sensitivity can be per-volume, but for C# development, most projects
+  -- are on the main volume which is typically case-insensitive.
   local ok, uname = pcall(function()
     return uv.os_uname()
   end)
-  if ok and uname and uname.sysname then
-    _is_case_insensitive_cache = uname.sysname == "Darwin" -- macOS
-  else
-    _is_case_insensitive_cache = false
+
+  if ok and uname and uname.sysname == "Darwin" then
+    -- Darwin is usually case-insensitive, but we can verify it by probing the current directory.
+    -- check if we can access the current script with a different case.
+    local script_path = debug.getinfo(1, "S").source:sub(2)
+    if script_path then
+      local lower = script_path:lower()
+      local upper = script_path:upper()
+
+      local stat_lower = uv.fs_stat(lower)
+      local stat_upper = uv.fs_stat(upper)
+
+      if stat_lower and stat_upper then
+        -- If both exist and have same dev/ino, it's case-insensitive
+        if stat_lower.dev == stat_upper.dev and stat_lower.ino == stat_upper.ino then
+          _is_case_insensitive_cache = true
+          return true
+        end
+      end
+    end
+
+    -- Default for macOS is usually case-insensitive
+    _is_case_insensitive_cache = true
+    return true
   end
 
-  return _is_case_insensitive_cache
+  _is_case_insensitive_cache = false
+  return false
 end
 
 --- Compute mtime in nanoseconds
