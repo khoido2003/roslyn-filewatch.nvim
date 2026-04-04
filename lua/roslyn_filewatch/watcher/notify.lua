@@ -68,31 +68,6 @@ function M.roslyn_changes(changes)
   if not changes or type(changes) ~= "table" or #changes == 0 then
     return
   end
-  local additional_changes = {}
-  for _, change in ipairs(changes) do
-    if change.type == 1 or change.type == 3 then
-      local path = vim.uri_to_fname(change.uri)
-      local lower_path = path:lower()
-      if lower_path:match("%.cs$") or lower_path:match("%.vb$") or lower_path:match("%.fs$") then
-        local dir = path:match("^(.+)[/\\][^/\\]+$")
-        if dir then
-          local found = vim.fs.find(function(name)
-            return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
-          end, { path = dir, upward = true, limit = 1, type = "file" })
-          for _, csproj in ipairs(found) do
-            local normalized = csproj:gsub("\\\\", "/"):gsub("\\", "/")
-            table.insert(additional_changes, {
-              uri = vim.uri_from_fname(normalized),
-              type = 2,
-              _ignore_restore = true,
-            })
-          end
-        end
-      end
-    end
-  end
-
-  local all_changes = vim.list_extend(vim.list_extend({}, changes), additional_changes)
 
   local clients = vim.lsp.get_clients()
   for _, client in ipairs(clients) do
@@ -101,7 +76,7 @@ function M.roslyn_changes(changes)
       notify_stats.total_notifications = notify_stats.total_notifications + 1
 
       local success = pcall(function()
-        client:notify("workspace/didChangeWatchedFiles", { changes = all_changes })
+        client:notify("workspace/didChangeWatchedFiles", { changes = changes })
       end)
       if success then
         notify_stats.last_success_time = os.time()
@@ -113,33 +88,6 @@ end
 function M.roslyn_renames(files)
   if not files or #files == 0 then
     return
-  end
-
-  local additional_changes = {}
-  local seen_csproj = {}
-  for _, p in ipairs(files) do
-    for _, fpath in ipairs({ p.old, p.new_path }) do
-      local lower = fpath:lower()
-      if lower:match("%.cs$") or lower:match("%.vb$") or lower:match("%.fs$") then
-        local dir = fpath:match("^(.+)[/\\][^/\\]+$")
-        if dir then
-          local found = vim.fs.find(function(name)
-            return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
-          end, { path = dir, upward = true, limit = 1, type = "file" })
-          for _, csproj in ipairs(found) do
-            local normalized = csproj:gsub("\\\\", "/"):gsub("\\", "/")
-            if not seen_csproj[normalized] then
-              seen_csproj[normalized] = true
-              table.insert(additional_changes, {
-                uri = vim.uri_from_fname(normalized),
-                type = 2,
-                _ignore_restore = true,
-              })
-            end
-          end
-        end
-      end
-    end
   end
 
   local clients = vim.lsp.get_clients()
@@ -157,11 +105,6 @@ function M.roslyn_renames(files)
         pcall(function()
           client:notify("workspace/didRenameFiles", payload)
         end)
-        if #additional_changes > 0 then
-          pcall(function()
-            client:notify("workspace/didChangeWatchedFiles", { changes = additional_changes })
-          end)
-        end
       end)
     end
   end

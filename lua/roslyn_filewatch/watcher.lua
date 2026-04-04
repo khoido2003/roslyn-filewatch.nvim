@@ -412,19 +412,23 @@ local function collect_roslyn_project_paths(sln_info)
   return paths
 end
 
-local function send_csproj_change_events(project_paths)
+local function send_csproj_change_events(project_paths, do_notify_fn)
   if #project_paths == 0 then
     return
   end
   local events = {}
   for _, path in ipairs(project_paths) do
-    table.insert(events, { uri = vim.uri_from_fname(path), type = 2 })
+    table.insert(events, { uri = vim.uri_from_fname(path), type = 2, _ignore_restore = true })
   end
-  pcall(notify_roslyn, events)
+  if do_notify_fn then
+    do_notify_fn(events)
+  else
+    pcall(notify_roslyn, events)
+  end
   notify("[CSPROJ] Sent csproj change events (" .. #events .. " file(s))", vim.log.levels.DEBUG)
 end
 
-local function handle_csproj_reload(client, sln_info, changed_path)
+local function handle_csproj_reload(client, sln_info, changed_path, do_notify_fn)
   local state = get_client_state(client.id)
   if not state.csproj_reload_pending then
     state.csproj_reload_pending = { timer = nil, pending = false }
@@ -481,6 +485,7 @@ local function handle_csproj_reload(client, sln_info, changed_path)
         end
       end
 
+      send_csproj_change_events(project_paths, do_notify_fn)
       request_diagnostics_refresh(client, 500)
     end)
   end)
@@ -510,20 +515,20 @@ local function process_auto_restore(client_id, evs, state)
   end
 end
 
-local function process_csproj_only_reload(client_id, evs, state)
-  if not config.options.solution_aware or not state.sln_info or not state.sln_info.csproj_only then
+local function process_project_reload(client_id, evs, state, do_notify_fn)
+  if not config.options.solution_aware or not state.sln_info then
     return
   end
 
   for _, ev in ipairs(evs) do
-    if ev.uri and ev.type == 1 then
+    if ev.uri and (ev.type == 1 or ev.type == 3) then
       local path = vim.uri_to_fname(ev.uri)
       local lower_path = path:lower()
       if lower_path:match("%.cs$") or lower_path:match("%.vb$") or lower_path:match("%.fs$") then
         local clients_list = vim.lsp.get_clients()
         for _, c in ipairs(clients_list) do
           if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
-            handle_csproj_reload(c, state.sln_info, path)
+            handle_csproj_reload(c, state.sln_info, path, do_notify_fn)
             break
           end
         end
@@ -540,63 +545,67 @@ local function queue_events(client_id, evs)
 
   local state = get_client_state(client_id)
   process_auto_restore(client_id, evs, state)
-  process_csproj_only_reload(client_id, evs, state)
 
-  if config.options.batching and config.options.batching.enabled then
-    if not state.batch_queue then
-      state.batch_queue = { events = {}, timer = nil }
-    end
-    local queue = state.batch_queue
-    if not queue then
-      return
-    end
-    vim.list_extend(queue.events, evs)
-
-    if not queue.timer then
-      local t = uv.new_timer()
-      if t then
-        queue.timer = t
-        t:start(config.options.batching.interval or 300, 0, function()
-          local changes = queue.events
-          queue.events = {}
-          safe_close_handle(queue.timer)
-          queue.timer = nil
-          if #changes > 0 then
-            local max_events = config.options.max_events_per_batch or 200
-
-            local function send_chunk(idx)
-              if idx > #changes then
-                return
-              end
-
-              local end_idx = math.min(idx + max_events - 1, #changes)
-              local chunk = {}
-              for i = idx, end_idx do
-                table.insert(chunk, changes[i])
-              end
-
-              pcall(notify_roslyn, chunk)
-
-              if end_idx < #changes then
-                -- Yield to main loop to prevent freezing UI during massive updates
-                vim.defer_fn(function()
-                  send_chunk(end_idx + 1)
-                end, 10)
-              end
-            end
-
-            vim.schedule(function()
-              send_chunk(1)
-            end)
-          end
-        end)
+  local function do_notify(changes)
+    if config.options.batching and config.options.batching.enabled then
+      if not state.batch_queue then
+        state.batch_queue = { events = {}, timer = nil }
       end
+      local queue = state.batch_queue
+      if not queue then
+        return
+      end
+      vim.list_extend(queue.events, changes)
+
+      if not queue.timer then
+        local t = uv.new_timer()
+        if t then
+          queue.timer = t
+          t:start(config.options.batching.interval or 300, 0, function()
+            local batch = queue.events
+            queue.events = {}
+            safe_close_handle(queue.timer)
+            queue.timer = nil
+            if #batch > 0 then
+              local max_events = config.options.max_events_per_batch or 200
+
+              local function send_chunk(idx)
+                if idx > #batch then
+                  return
+                end
+
+                local end_idx = math.min(idx + max_events - 1, #batch)
+                local chunk = {}
+                for i = idx, end_idx do
+                  table.insert(chunk, batch[i])
+                end
+
+                pcall(notify_roslyn, chunk)
+
+                if end_idx < #batch then
+                  -- Yield to main loop to prevent freezing UI during massive updates
+                  vim.defer_fn(function()
+                    send_chunk(end_idx + 1)
+                  end, 10)
+                end
+              end
+
+              vim.schedule(function()
+                send_chunk(1)
+              end)
+            end
+          end)
+        end
+      end
+    else
+      vim.schedule(function()
+        pcall(notify_roslyn, changes)
+      end)
     end
-  else
-    vim.schedule(function()
-      pcall(notify_roslyn, evs)
-    end)
   end
+
+  process_project_reload(client_id, evs, state, do_notify)
+  do_notify(evs)
 end
 
 local function cleanup_client(client_id)
