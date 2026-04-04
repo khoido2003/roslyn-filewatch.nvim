@@ -87,17 +87,28 @@ local function process_next()
     vim.schedule(process_next)
   end
 
-  -- Run dotnet restore
+  -- Run dotnet restore with resource limits
+  -- -maxcpucount:1 prevents MSBuild from spawning many worker nodes (reduces memory usage)
+  -- -nodeReuse:false ensures MSBuild nodes don't stay alive after the restore
+  local cmd = { "dotnet", "restore", project_path, "-maxcpucount:1", "-nodeReuse:false" }
+
+  local spawn_ok = false
   if vim.system then
-    vim.system({ "dotnet", "restore", project_path }, { text = true }, function(out)
+    local ok, res = pcall(vim.system, cmd, { text = true }, function(out)
       on_complete(out.code, out.stderr or out.stdout)
     end)
+    spawn_ok = ok
   else
-    vim.fn.jobstart({ "dotnet", "restore", project_path }, {
+    local ok, job_id = pcall(vim.fn.jobstart, cmd, {
       on_exit = function(_, code)
         on_complete(code, nil)
       end,
     })
+    spawn_ok = ok and job_id > 0
+  end
+
+  if not spawn_ok then
+    on_complete(-1, "Failed to spawn dotnet restore process")
   end
 end
 

@@ -240,29 +240,8 @@ function M.start(client, root, snapshots, deps)
                       )
                     end)
 
-                    -- Trigger restore if enabled
-                    if config.options.enable_autorestore and deps.restore_mod then
-                      -- For solution projects, restore the solution; for csproj-only, restore the csproj
-                      local restore_target = sln_info.path or next(sln_info.csproj_files)
-                      if restore_target then
-                        vim.schedule(function()
-                          pcall(deps.restore_mod.schedule_restore, restore_target, function(_)
-                            -- After restore, send another project/open and refresh diagnostics
-                            vim.defer_fn(function()
-                              if client:is_stopped() then
-                                return
-                              end
-                              notify_project_open(client, project_paths, notify)
-                              request_diagnostics_refresh(client, 500)
-                              notify("[AUTOCMD] Post-restore project reload complete", vim.log.levels.DEBUG)
-                            end, 500)
-                          end)
-                        end)
-                      end
-                    else
-                      -- No restore - just refresh diagnostics after a delay
-                      request_diagnostics_refresh(client, 1500)
-                    end
+                    -- Refresh diagnostics after project reload
+                    request_diagnostics_refresh(client, 1500)
                   end
                 else
                   -- Debounced - still refresh diagnostics for responsiveness
