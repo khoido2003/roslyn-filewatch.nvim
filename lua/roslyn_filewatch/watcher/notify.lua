@@ -39,56 +39,6 @@ function M.reset_stats()
   notify_stats.last_notification_time = 0
 end
 
-local pending_opens = {}
-local uv = vim.uv or vim.loop
-local open_timer = nil
-
-local function schedule_project_open(client, csproj_path)
-  local utils = require("roslyn_filewatch.watcher.utils")
-  local path = utils.to_roslyn_path(csproj_path)
-
-  if not pending_opens[client.id] then
-    pending_opens[client.id] = {}
-  end
-  pending_opens[client.id][path] = true
-
-  if open_timer and not open_timer:is_closing() then
-    open_timer:stop()
-    open_timer:close()
-  end
-
-  open_timer = uv.new_timer()
-  if open_timer then
-    open_timer:start(500, 0, function()
-      local timer = open_timer
-      open_timer = nil
-      if timer and not timer:is_closing() then
-        pcall(timer.stop, timer)
-        pcall(timer.close, timer)
-      end
-
-      vim.schedule(function()
-        for client_id, paths in pairs(pending_opens) do
-          local c = vim.lsp.get_client_by_id(client_id)
-          if c and not (c.is_stopped and c:is_stopped()) then
-            local project_list = {}
-            for p in pairs(paths) do
-              table.insert(project_list, p)
-            end
-            if #project_list > 0 then
-              pcall(function()
-                ---@diagnostic disable-next-line: param-type-mismatch
-                c:notify("project/open", { projects = project_list })
-              end)
-            end
-          end
-        end
-        pending_opens = {}
-      end)
-    end)
-  end
-end
-
 local function configured_log_level()
   local ok, lvl = pcall(function()
     return config and config.options and config.options.log_level
@@ -114,60 +64,35 @@ function M.user(msg, level)
   end)
 end
 
----@param source_files string[]
----@param additional_changes table
----@return table seen_csproj
-local function find_csproj_changes(source_files, additional_changes)
-  local seen_csproj = {}
-  local checked_dirs = {}
-
-  for _, source_file in ipairs(source_files) do
-    local dir = source_file:match("^(.+)[/\\][^/\\]+$")
-    if dir and not checked_dirs[dir] then
-      checked_dirs[dir] = true
-
-      -- Efficient upward search for .csproj using vim.fs.find
-      local found = vim.fs.find(function(name)
-        return name:match("%.csproj$")
-      end, { path = dir, upward = true, limit = 2, type = "file" })
-
-      for _, path in ipairs(found) do
-        local normalized = path:gsub("\\", "/")
-        if not seen_csproj[normalized] then
-          seen_csproj[normalized] = true
-          table.insert(additional_changes, { uri = vim.uri_from_fname(normalized), type = 2 })
-        end
-      end
-    end
-  end
-  return seen_csproj
-end
-
 function M.roslyn_changes(changes)
   if not changes or type(changes) ~= "table" or #changes == 0 then
     return
   end
-
-  local modified_source_files = {}
+  local additional_changes = {}
   for _, change in ipairs(changes) do
     if change.type == 1 or change.type == 3 then
       local path = vim.uri_to_fname(change.uri)
       local lower_path = path:lower()
       if lower_path:match("%.cs$") or lower_path:match("%.vb$") or lower_path:match("%.fs$") then
-        table.insert(modified_source_files, path)
+        local dir = path:match("^(.+)[/\\][^/\\]+$")
+        if dir then
+          local found = vim.fs.find(function(name)
+            return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
+          end, { path = dir, upward = true, limit = 1, type = "file" })
+          for _, csproj in ipairs(found) do
+            local normalized = csproj:gsub("\\\\", "/"):gsub("\\", "/")
+            table.insert(additional_changes, {
+              uri = vim.uri_from_fname(normalized),
+              type = 2,
+              _ignore_restore = true,
+            })
+          end
+        end
       end
     end
   end
 
-  local additional_changes = {}
-  local seen_csproj = {}
-
-  if #modified_source_files > 0 then
-    seen_csproj = find_csproj_changes(modified_source_files, additional_changes)
-  end
-
-  local all_changes = vim.list_extend({}, changes)
-  vim.list_extend(all_changes, additional_changes)
+  local all_changes = vim.list_extend(vim.list_extend({}, changes), additional_changes)
 
   local clients = vim.lsp.get_clients()
   for _, client in ipairs(clients) do
@@ -181,12 +106,6 @@ function M.roslyn_changes(changes)
       if success then
         notify_stats.last_success_time = os.time()
       end
-
-      if #modified_source_files > 0 and #additional_changes > 0 then
-        for csproj_path in pairs(seen_csproj or {}) do
-          schedule_project_open(client, csproj_path)
-        end
-      end
     end
   end
 end
@@ -196,20 +115,32 @@ function M.roslyn_renames(files)
     return
   end
 
-  local modified_source_files = {}
+  local additional_changes = {}
+  local seen_csproj = {}
   for _, p in ipairs(files) do
-    local old_lower = p.old:lower()
-    local new_lower = p.new_path:lower()
-    if old_lower:match("%.cs$") or old_lower:match("%.vb$") or old_lower:match("%.fs$") then
-      table.insert(modified_source_files, p.old)
-    end
-    if new_lower:match("%.cs$") or new_lower:match("%.vb$") or new_lower:match("%.fs$") then
-      table.insert(modified_source_files, p.new_path)
+    for _, fpath in ipairs({ p.old, p.new_path }) do
+      local lower = fpath:lower()
+      if lower:match("%.cs$") or lower:match("%.vb$") or lower:match("%.fs$") then
+        local dir = fpath:match("^(.+)[/\\][^/\\]+$")
+        if dir then
+          local found = vim.fs.find(function(name)
+            return name:match("%.csproj$") or name:match("%.vbproj$") or name:match("%.fsproj$")
+          end, { path = dir, upward = true, limit = 1, type = "file" })
+          for _, csproj in ipairs(found) do
+            local normalized = csproj:gsub("\\\\", "/"):gsub("\\", "/")
+            if not seen_csproj[normalized] then
+              seen_csproj[normalized] = true
+              table.insert(additional_changes, {
+                uri = vim.uri_from_fname(normalized),
+                type = 2,
+                _ignore_restore = true,
+              })
+            end
+          end
+        end
+      end
     end
   end
-
-  local additional_changes = {}
-  local seen_csproj = find_csproj_changes(modified_source_files, additional_changes)
 
   local clients = vim.lsp.get_clients()
   for _, client in ipairs(clients) do
@@ -230,12 +161,6 @@ function M.roslyn_renames(files)
           pcall(function()
             client:notify("workspace/didChangeWatchedFiles", { changes = additional_changes })
           end)
-        end
-
-        if #modified_source_files > 0 and #additional_changes > 0 then
-          for csproj_path in pairs(seen_csproj or {}) do
-            schedule_project_open(client, csproj_path)
-          end
         end
       end)
     end

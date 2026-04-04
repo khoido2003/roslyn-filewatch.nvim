@@ -424,7 +424,7 @@ local function send_csproj_change_events(project_paths)
   notify("[CSPROJ] Sent csproj change events (" .. #events .. " file(s))", vim.log.levels.DEBUG)
 end
 
-local function handle_csproj_reload(client, sln_info)
+local function handle_csproj_reload(client, sln_info, changed_path)
   local state = get_client_state(client.id)
   if not state.csproj_reload_pending then
     state.csproj_reload_pending = { timer = nil, pending = false }
@@ -462,21 +462,26 @@ local function handle_csproj_reload(client, sln_info)
         return
       end
 
-      send_csproj_change_events(project_paths)
-      notify_project_open(client, project_paths, notify)
-
-      if config.options.enable_autorestore and project_paths[1] then
-        pcall(restore_mod.schedule_restore, project_paths[1], function()
-          vim.defer_fn(function()
-            if client:is_stopped() then
-              return
+      if changed_path then
+        local best_match = nil
+        local max_len = -1
+        local norm_changed = normalize_path(changed_path)
+        for _, p in ipairs(project_paths) do
+          local dir = p:match("^(.*)[\\/][^\\/]+$") or p
+          dir = normalize_path(dir)
+          if dir == norm_changed or norm_changed:sub(1, #dir + 1) == dir .. "/" then
+            if #dir > max_len then
+              best_match = p
+              max_len = #dir
             end
-            send_csproj_change_events(project_paths)
-            notify_project_open(client, project_paths, notify)
-            request_diagnostics_refresh(client, 500)
-          end, 500)
-        end)
+          end
+        end
+        if best_match then
+          project_paths = { best_match }
+        end
       end
+
+      request_diagnostics_refresh(client, 500)
     end)
   end)
 end
@@ -487,17 +492,19 @@ local function process_auto_restore(client_id, evs, state)
   end
 
   for _, ev in ipairs(evs) do
-    local uri = ev.uri
-    if uri then
-      local lower_uri = uri:lower()
-      if
-        lower_uri:match("%.csproj$")
-        or lower_uri:match("%.vbproj$")
-        or lower_uri:match("%.fsproj$")
-        or lower_uri:match("%.slnx?$")
-        or lower_uri:match("%.slnf$")
-      then
-        pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
+    if not ev._ignore_restore then
+      local uri = ev.uri
+      if uri then
+        local lower_uri = uri:lower()
+        if
+          lower_uri:match("%.csproj$")
+          or lower_uri:match("%.vbproj$")
+          or lower_uri:match("%.fsproj$")
+          or lower_uri:match("%.slnx?$")
+          or lower_uri:match("%.slnf$")
+        then
+          pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
+        end
       end
     end
   end
@@ -516,7 +523,7 @@ local function process_csproj_only_reload(client_id, evs, state)
         local clients_list = vim.lsp.get_clients()
         for _, c in ipairs(clients_list) do
           if vim.tbl_contains(config.options.client_names, c.name) and c.id == client_id then
-            handle_csproj_reload(c, state.sln_info)
+            handle_csproj_reload(c, state.sln_info, path)
             break
           end
         end
