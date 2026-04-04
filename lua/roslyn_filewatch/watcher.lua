@@ -486,26 +486,19 @@ local function process_auto_restore(client_id, evs, state)
     return
   end
 
-  local restore_triggered = false
   for _, ev in ipairs(evs) do
     local uri = ev.uri
-    if uri and (uri:match("%.csproj$") or uri:match("%.vbproj$") or uri:match("%.fsproj$")) then
+    if
+      uri
+      and (
+        uri:match("%.csproj$")
+        or uri:match("%.vbproj$")
+        or uri:match("%.fsproj$")
+        or uri:match("%.slnx?$")
+        or uri:match("%.slnf$")
+      )
+    then
       pcall(restore_mod.schedule_restore, vim.uri_to_fname(uri), 2000)
-      restore_triggered = true
-    end
-  end
-
-  if not restore_triggered then
-    for _, ev in ipairs(evs) do
-      if ev.type == 1 and ev.uri then
-        local path = vim.uri_to_fname(ev.uri)
-        if path:match("%.cs$") or path:match("%.vb$") or path:match("%.fs$") then
-          if state.sln_info and state.sln_info.path then
-            pcall(restore_mod.schedule_restore, state.sln_info.path, 5000)
-          end
-          break
-        end
-      end
     end
   end
 end

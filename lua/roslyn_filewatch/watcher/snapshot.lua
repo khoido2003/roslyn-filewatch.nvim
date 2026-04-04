@@ -496,63 +496,61 @@ function M.scan_tree(root, out_map)
 
   local gitignore_matcher, gitignore_mod = get_cached_gitignore(root)
 
-  local function scan_dir(path)
+  local stack = { root }
+  while #stack > 0 do
+    local path = table.remove(stack)
     local fd = uv.fs_scandir(path)
-    if not fd then
-      return
-    end
-
-    while true do
-      local name, typ = uv.fs_scandir_next(fd)
-      if not name then
-        break
-      end
-
-      local fullpath = normalize_path(path .. "/" .. name)
-
-      if gitignore_matcher and gitignore_mod then
-        if gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
-          goto continue
+    if fd then
+      while true do
+        local name, typ = uv.fs_scandir_next(fd)
+        if not name then
+          break
         end
-      end
 
-      if typ == "directory" then
-        local skip = false
-        if config._ignore_dirs_set then
-          skip = config._ignore_dirs_set[name:lower()] == true
-        else
-          local cmp_name = is_win and name:lower() or name
-          local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
-          for _, dir in ipairs(dirs_to_check) do
-            if cmp_name == dir then
-              skip = true
-              break
+        local fullpath = normalize_path(path .. "/" .. name)
+
+        if gitignore_matcher and gitignore_mod then
+          if gitignore_mod.is_ignored(gitignore_matcher, fullpath, typ == "directory") then
+            goto continue
+          end
+        end
+
+        if typ == "directory" then
+          local skip = false
+          if config._ignore_dirs_set then
+            skip = config._ignore_dirs_set[name:lower()] == true
+          else
+            local cmp_name = is_win and name:lower() or name
+            local dirs_to_check = is_win and ignore_dirs_lower or ignore_dirs
+            for _, dir in ipairs(dirs_to_check) do
+              if cmp_name == dir then
+                skip = true
+                break
+              end
+            end
+          end
+
+          if not skip then
+            table.insert(stack, fullpath)
+          end
+        elseif typ == "file" then
+          if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
+            local st = uv.fs_stat(fullpath)
+            if st then
+              out_map[fullpath] = {
+                mtime = mtime_ns(st),
+                size = st.size,
+                ino = st.ino,
+                dev = st.dev,
+              }
             end
           end
         end
 
-        if not skip then
-          scan_dir(fullpath)
-        end
-      elseif typ == "file" then
-        if should_watch_path(fullpath, ignore_dirs, watch_extensions) then
-          local st = uv.fs_stat(fullpath)
-          if st then
-            out_map[fullpath] = {
-              mtime = mtime_ns(st),
-              size = st.size,
-              ino = st.ino,
-              dev = st.dev,
-            }
-          end
-        end
+        ::continue::
       end
-
-      ::continue::
     end
   end
-
-  scan_dir(root)
 end
 
 function M.partial_scan(dirs, existing_map, root)

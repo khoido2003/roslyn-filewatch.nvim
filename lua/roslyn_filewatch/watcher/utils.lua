@@ -59,6 +59,34 @@ function M.is_windows()
   return _is_windows_cache
 end
 
+-- Cache for case-insensitive platform detection
+---@type boolean|nil
+local _is_case_insensitive_cache = nil
+
+--- Detect if running on a case-insensitive platform (Windows or macOS)
+---@return boolean
+function M.is_case_insensitive()
+  if _is_case_insensitive_cache ~= nil then
+    return _is_case_insensitive_cache
+  end
+
+  if M.is_windows() then
+    _is_case_insensitive_cache = true
+    return true
+  end
+
+  local ok, uname = pcall(function()
+    return uv.os_uname()
+  end)
+  if ok and uname and uname.sysname then
+    _is_case_insensitive_cache = uname.sysname == "Darwin" -- macOS
+  else
+    _is_case_insensitive_cache = false
+  end
+
+  return _is_case_insensitive_cache
+end
+
 --- Compute mtime in nanoseconds
 --- Accepts a uv.fs_stat() like table with .mtime = { sec, nsec }
 --- or a snapshot entry where .mtime is already a number (ns)
@@ -142,7 +170,7 @@ function M.normalize_path(p)
   return p
 end
 
---- Compare two paths for equality (case-insensitive on Windows)
+--- Compare two paths for equality (case-insensitive on Windows/macOS)
 ---@param a string|nil
 ---@param b string|nil
 ---@return boolean
@@ -154,15 +182,15 @@ function M.paths_equal(a, b)
   local norm_a = M.normalize_path(a)
   local norm_b = M.normalize_path(b)
 
-  if M.is_windows() then
-    -- Case-insensitive comparison on Windows
+  if M.is_case_insensitive() then
+    -- Case-insensitive comparison on Windows and macOS
     return norm_a:lower() == norm_b:lower()
   else
     return norm_a == norm_b
   end
 end
 
---- Check if path starts with a given prefix (case-insensitive on Windows)
+--- Check if path starts with a given prefix (case-insensitive on Windows/macOS)
 ---@param path string
 ---@param prefix string
 ---@return boolean
@@ -174,7 +202,7 @@ function M.path_starts_with(path, prefix)
   local norm_path = M.normalize_path(path)
   local norm_prefix = M.normalize_path(prefix)
 
-  if M.is_windows() then
+  if M.is_case_insensitive() then
     return norm_path:lower():sub(1, #norm_prefix) == norm_prefix:lower()
   else
     return norm_path:sub(1, #norm_prefix) == norm_prefix
