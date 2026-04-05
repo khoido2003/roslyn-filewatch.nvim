@@ -37,6 +37,7 @@ local _snapshots = nil
 local _last_events = nil
 local _sln_infos = nil
 local _backend_names = nil
+local _presets = nil
 local _stats = nil
 
 function M.register_refs(refs)
@@ -47,6 +48,7 @@ function M.register_refs(refs)
   _last_events = refs.last_events
   _sln_infos = refs.sln_infos
   _backend_names = refs.backend_names
+  _presets = refs.presets
   _stats = refs.stats
 end
 
@@ -98,11 +100,11 @@ function M.get_status()
         has_watcher = _watchers and _watchers[client.id] ~= nil or false,
         has_poller = _pollers and _pollers[client.id] ~= nil or false,
         has_watchdog = _watchdogs and _watchdogs[client.id] ~= nil or false,
+        preset = _presets and _presets[client.id],
         file_count = 0,
         last_event = _last_events and _last_events[client.id] or nil,
         sln_file = nil,
         project_count = 0,
-        preset = config.options._applied_preset,
         start_time = _stats and _stats[client.id] and _stats[client.id].start_time or nil,
         total_events = _stats and _stats[client.id] and _stats[client.id].total_events or 0,
         scan_count = _stats and _stats[client.id] and _stats[client.id].scan_count or 0,
@@ -153,9 +155,6 @@ function M.show()
 
   -- Global stats
   add_kv("Scanning Tier", status.scanning_tier:upper(), "Type")
-  if config.options._applied_preset then
-    add_kv("Active Preset", config.options._applied_preset, "Constant")
-  end
 
   -- Clients
   if #status.clients == 0 then
@@ -173,6 +172,9 @@ function M.show()
       add_kv("Project Root", c.root, "Directory")
       add_kv("Solution", c.sln_file or "none", c.sln_file and "String" or "WarningMsg")
       add_kv("Backend", c.backend:upper(), "Type")
+      if c.preset then
+        add_kv("Active Preset", c.preset, "Constant")
+      end
 
       local state_parts = {}
       if c.has_watcher then

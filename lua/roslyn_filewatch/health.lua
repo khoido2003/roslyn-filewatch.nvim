@@ -129,11 +129,23 @@ local function check_watcher_logic()
     return
   end
 
-  local backend, name = backend_mod.get_best_backend()
-  if backend then
-    ok("Active Backend: " .. name:upper())
+  local force_polling = config.options.force_polling
+  local best_backend, best_name = backend_mod.get_best_backend()
+
+  if force_polling then
+    warn("Backend Strategy: FORCED POLLING")
+  elseif best_backend then
+    ok("Backend Strategy: " .. best_name:upper() .. " (preferred)")
   else
-    warn("Active Backend: POLLING (native tools missing)")
+    warn("Backend Strategy: POLLING (fallback, native tools missing)")
+  end
+
+  local status_mod_ok, status_mod = pcall(require, "roslyn_filewatch.status")
+  if status_mod_ok and status_mod.get_status then
+    local status = status_mod.get_status()
+    for _, c in ipairs(status.clients) do
+      ok(string.format("Client %d (%s) Active Backend: %s", c.id, c.name, c.backend:upper()))
+    end
   end
 
   local rs_ok, rs = pcall(require, "roslyn_filewatch_rs")

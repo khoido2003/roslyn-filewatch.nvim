@@ -61,6 +61,7 @@ local DIRTY_DIRS_THRESHOLD = 10
 ---@field total_events number
 ---@field scan_count number
 ---@field last_scan_duration number
+---@field applied_preset string|nil
 
 ---@type table<number, ClientState>
 local client_states = {}
@@ -169,6 +170,12 @@ pcall(function()
       end,
     })
 
+    local presets_proxy = setmetatable({}, {
+      __index = function(_, k)
+        return client_states[k] and client_states[k].applied_preset
+      end,
+    })
+
     local sln_info_proxy = setmetatable({}, {
       __index = function(_, k)
         return client_states[k] and client_states[k].sln_info
@@ -199,6 +206,7 @@ pcall(function()
       sln_infos = sln_info_proxy,
       dirty_dirs = dirty_dirs_proxy,
       backend_names = backend_names_proxy,
+      presets = presets_proxy,
       stats = stats_proxy,
     })
   end
@@ -795,9 +803,9 @@ function M.start(client)
   state.root = root
 
   config.apply_preset_for_root(root)
-  local applied_preset = config.options._applied_preset
-  if applied_preset then
-    notify("[PRESET] Applied '" .. applied_preset .. "' preset", vim.log.levels.DEBUG)
+  state.applied_preset = config.options._applied_preset
+  if state.applied_preset then
+    notify("[PRESET] Applied '" .. state.applied_preset .. "' preset", vim.log.levels.DEBUG)
   end
 
   local last_events_proxy

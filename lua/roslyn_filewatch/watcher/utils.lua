@@ -149,8 +149,8 @@ function M.normalize_path(p)
 
   local is_win = M.is_windows()
 
-  -- Unify separators to forward slash
-  if is_win or p:find("\\", 1, true) then
+  local looks_like_windows_path = p:match("^%a:[\\/]") or p:match("^\\\\")
+  if is_win or looks_like_windows_path then
     p = p:gsub("\\", "/")
   end
 

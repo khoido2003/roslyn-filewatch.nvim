@@ -95,7 +95,10 @@ function M.start(client, roots, snapshots, deps)
         obj._clock = parsed_clock.clock
 
         if obj._timer and not obj._timer:is_closing() then
-          local interval = config.options.poll_interval or 500
+          local interval = tonumber(config.options.poll_interval) or 500
+          if interval < 100 then
+            interval = 100
+          end
           obj._timer:start(100, interval, function()
             if not obj._running or not obj._clock then
               return
