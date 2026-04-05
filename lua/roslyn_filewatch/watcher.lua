@@ -57,6 +57,11 @@ local DIRTY_DIRS_THRESHOLD = 10
 ---@field recovery_consecutive_failures number
 ---@field recovery_current_backoff number
 ---@field backend_name string|nil
+---@field start_time number
+---@field total_events number
+---@field scan_count number
+---@field last_scan_duration number
+---@field applied_preset string|nil
 
 ---@type table<number, ClientState>
 local client_states = {}
@@ -82,6 +87,10 @@ local function get_client_state(client_id)
       root = nil,
       recovery_consecutive_failures = 0,
       recovery_current_backoff = config.options.recovery_initial_delay_ms or 300,
+      start_time = os.time(),
+      total_events = 0,
+      scan_count = 0,
+      last_scan_duration = 0,
     }
   end
   return client_states[client_id]
@@ -161,9 +170,30 @@ pcall(function()
       end,
     })
 
+    local presets_proxy = setmetatable({}, {
+      __index = function(_, k)
+        return client_states[k] and client_states[k].applied_preset
+      end,
+    })
+
     local sln_info_proxy = setmetatable({}, {
       __index = function(_, k)
         return client_states[k] and client_states[k].sln_info
+      end,
+    })
+
+    local stats_proxy = setmetatable({}, {
+      __index = function(_, k)
+        local s = client_states[k]
+        if not s then
+          return nil
+        end
+        return {
+          start_time = s.start_time,
+          total_events = s.total_events,
+          scan_count = s.scan_count,
+          last_scan_duration = s.last_scan_duration,
+        }
       end,
     })
 
@@ -176,6 +206,8 @@ pcall(function()
       sln_infos = sln_info_proxy,
       dirty_dirs = dirty_dirs_proxy,
       backend_names = backend_names_proxy,
+      presets = presets_proxy,
+      stats = stats_proxy,
     })
   end
 end)
@@ -412,7 +444,7 @@ local function collect_roslyn_project_paths(sln_info)
   return paths
 end
 
-local function send_csproj_change_events(project_paths, do_notify_fn)
+local function send_csproj_change_events(client_id, project_paths, do_notify_fn)
   if #project_paths == 0 then
     return
   end
@@ -423,7 +455,7 @@ local function send_csproj_change_events(project_paths, do_notify_fn)
   if do_notify_fn then
     do_notify_fn(events)
   else
-    pcall(notify_roslyn, events)
+    pcall(notify_roslyn, client_id, events)
   end
   notify("[CSPROJ] Sent csproj change events (" .. #events .. " file(s))", vim.log.levels.DEBUG)
 end
@@ -451,7 +483,9 @@ local function handle_csproj_reload(client, sln_info, changed_path, do_notify_fn
   end
   pending.timer = timer
 
-  timer:start(500, 0, function()
+  -- Throttled to 1000ms to prevent excessive project reloads during rapid edits
+  local reload_debounce = config.options.csproj_reload_debounce_ms or 1000
+  timer:start(reload_debounce, 0, function()
     safe_close_handle(timer)
     pending.timer = nil
     pending.pending = false
@@ -485,8 +519,8 @@ local function handle_csproj_reload(client, sln_info, changed_path, do_notify_fn
         end
       end
 
-      send_csproj_change_events(project_paths, do_notify_fn)
-      request_diagnostics_refresh(client, 500)
+      send_csproj_change_events(client.id, project_paths, do_notify_fn)
+      request_diagnostics_refresh(client, 1000)
     end)
   end)
 end
@@ -544,6 +578,7 @@ local function queue_events(client_id, evs)
   end
 
   local state = get_client_state(client_id)
+  state.total_events = state.total_events + #evs
   process_auto_restore(client_id, evs, state)
 
   local function do_notify(changes)
@@ -580,7 +615,7 @@ local function queue_events(client_id, evs)
                   table.insert(chunk, batch[i])
                 end
 
-                pcall(notify_roslyn, chunk)
+                pcall(notify_roslyn, client_id, chunk)
 
                 if end_idx < #batch then
                   -- Yield to main loop to prevent freezing UI during massive updates
@@ -599,7 +634,7 @@ local function queue_events(client_id, evs)
       end
     else
       vim.schedule(function()
-        pcall(notify_roslyn, changes)
+        pcall(notify_roslyn, client_id, changes)
       end)
     end
   end
@@ -696,29 +731,21 @@ function M.resync()
     if vim.tbl_contains(config.options.client_names, client.name) then
       local state = get_client_state(client.id)
 
-      -- If using poller, flag is enough
       if state.poller then
         state.needs_full_scan = true
       else
-        -- If using fs_event, we must trigger scan manually
         local helpers = {
           queue_events = queue_events,
           notify = notify,
           notify_roslyn_renames = notify_roslyn_renames,
-          last_events = nil, -- Don't pass client_states here! state.last_event is updated below
+          last_events = nil,
         }
-        -- Mock snapshots table structure for resync_snapshot_for
-        -- We can pass the state directly if the structure matches, but here we just
-        -- pass the state.snapshot directly since resync_snapshot_for expects snapshots[client_id]
-        -- But wait, resync_snapshot_for takes `snapshots` table as arg and uses `snapshots[client_id]`
-        -- To simplify:
         local snapshots_wrapper = {
           [client.id] = state.snapshot,
         }
 
         snapshot_mod.resync_snapshot_for(client.id, state.root, snapshots_wrapper, helpers)
 
-        -- Update state with result
         state.snapshot = snapshots_wrapper[client.id]
       end
 
@@ -776,13 +803,11 @@ function M.start(client)
   state.root = root
 
   config.apply_preset_for_root(root)
-  local applied_preset = config.options._applied_preset
-  if applied_preset then
-    notify("[PRESET] Applied '" .. applied_preset .. "' preset", vim.log.levels.DEBUG)
+  state.applied_preset = config.options._applied_preset
+  if state.applied_preset then
+    notify("[PRESET] Applied '" .. state.applied_preset .. "' preset", vim.log.levels.DEBUG)
   end
 
-  -- Forward-declare so restart_watcher closure captures it as a proper upvalue
-  -- (last_events_proxy is assigned below, after restart_watcher is defined)
   local last_events_proxy
   local snapshots_proxy
 
@@ -835,14 +860,12 @@ function M.start(client)
         end
         safe_close_handle(state.watcher)
         state.watcher = nil
+        state.backend_name = nil
       end
 
-      local use_fs_event = not config.options.force_polling
-      if state.fs_event_disabled_until > 0 and os.time() < state.fs_event_disabled_until then
-        use_fs_event = false
-      end
+      local now = os.time()
+      local use_fs_event = not config.options.force_polling and now >= state.fs_event_disabled_until
 
-      -- Solution-aware sub-watching: determine if we can restrict watched roots
       local watch_roots = { root }
       if config.options.solution_aware and state.sln_info and state.sln_info.csproj_files then
         local csproj_dirs = {}
@@ -855,7 +878,6 @@ function M.start(client)
 
         local unique_dirs = vim.tbl_keys(csproj_dirs)
         if #unique_dirs > 0 then
-          -- Filter out directories that are subdirectories of others to optimize
           table.sort(unique_dirs)
           local optimized_roots = {}
           for i, dir in ipairs(unique_dirs) do
@@ -871,7 +893,7 @@ function M.start(client)
             end
           end
 
-          if #optimized_roots < 50 then -- Sanity check: don't pass 1000 roots to watcher cli
+          if #optimized_roots < 50 then
             watch_roots = optimized_roots
             notify(
               "Solution-aware: restricting watch to " .. #watch_roots .. " optimized project root(s)",
@@ -883,7 +905,6 @@ function M.start(client)
 
       local restart_success = false
       if use_fs_event then
-        -- Reuse the outer snapshots_proxy instead of creating a new one
         local backend_api, backend_name = backend_mod.get_best_backend()
         if backend_api then
           notify(string.format("Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
@@ -893,7 +914,7 @@ function M.start(client)
             notify_roslyn_renames = notify_roslyn_renames,
             restart_watcher = restart_watcher,
             mark_dirty_dir = mark_dirty_dir,
-            last_events = last_events_proxy, -- Important for fswatch/polling
+            last_events = last_events_proxy,
           })
 
           if handle then
@@ -933,8 +954,6 @@ function M.start(client)
               vim.log.levels.WARN
             )
           end)
-          -- Do not reset failures immediately to prevent restart loop
-          -- Instead we set a long backoff or let the user manually intervene
           state.recovery_current_backoff = config.options.recovery_max_delay_ms or 30000
         end
       end
@@ -952,8 +971,6 @@ function M.start(client)
     end,
   })
 
-  -- Assign the forward-declared last_events_proxy (declared before restart_watcher
-  -- so the closure captures it as a proper local upvalue, not a global)
   last_events_proxy = setmetatable({}, {
     __index = function(_, k)
       return client_states[k] and client_states[k].last_event
@@ -970,10 +987,9 @@ function M.start(client)
   local use_fs_event = not force_polling and now >= state.fs_event_disabled_until
 
   if use_fs_event then
-    -- Try native backends first (watchman → fswatch → fallback), same as restart_watcher
     local backend_api, backend_name = backend_mod.get_best_backend()
     if backend_api then
-      notify(string.format("[STARTUP] Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
+      notify(string.format("Selected backend: %s for %s", backend_name, client.name), vim.log.levels.DEBUG)
       local handle, err = backend_api.start(client, { root }, snapshots_proxy, {
         notify = notify,
         queue_events = queue_events,
@@ -1056,10 +1072,17 @@ function M.start(client)
 
   -- Perform initial scan if using fs_event (as it has no poll loop)
   if not state.poller and state.watcher then
+    local scan_start = uv.hrtime()
     snapshot_mod.scan_tree_async(root, function(new_map)
+      local scan_end = uv.hrtime()
       state.snapshot = new_map
       state.needs_full_scan = false
-      notify("Initial scan complete: " .. vim.tbl_count(new_map) .. " files", vim.log.levels.DEBUG)
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (scan_end - scan_start) / 1e6 -- ms
+      notify(
+        string.format("Initial scan complete: %d files in %.2fms", vim.tbl_count(new_map), state.last_scan_duration),
+        vim.log.levels.DEBUG
+      )
     end)
   end
 
@@ -1130,11 +1153,39 @@ function M.start(client)
   end
 
   local poller, poll_err = fs_poll_mod.start(client, root, snapshots_proxy, {
-    scan_tree = scan_tree,
-    scan_tree_async = snapshot_mod.scan_tree_async,
+    scan_tree = function(scan_root, out_map)
+      local s_start = uv.hrtime()
+      scan_tree(scan_root, out_map)
+      local s_end = uv.hrtime()
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (s_end - s_start) / 1e6
+    end,
+    scan_tree_async = function(scan_root, callback)
+      local s_start = uv.hrtime()
+      snapshot_mod.scan_tree_async(scan_root, function(new_map)
+        local s_end = uv.hrtime()
+        state.scan_count = (state.scan_count or 0) + 1
+        state.last_scan_duration = (s_end - s_start) / 1e6
+        callback(new_map)
+      end)
+    end,
     is_scanning = snapshot_mod.is_scanning,
-    partial_scan = snapshot_mod.partial_scan,
-    partial_scan_async = snapshot_mod.partial_scan_async,
+    partial_scan = function(dirs, out_map, scan_root)
+      local s_start = uv.hrtime()
+      snapshot_mod.partial_scan(dirs, out_map, scan_root)
+      local s_end = uv.hrtime()
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (s_end - s_start) / 1e6
+    end,
+    partial_scan_async = function(dirs, out_map, scan_root, callback)
+      local s_start = uv.hrtime()
+      snapshot_mod.partial_scan_async(dirs, out_map, scan_root, function(new_map)
+        local s_end = uv.hrtime()
+        state.scan_count = (state.scan_count or 0) + 1
+        state.last_scan_duration = (s_end - s_start) / 1e6
+        callback(new_map)
+      end)
+    end,
     get_dirty_dirs = get_and_clear_dirty_dirs,
     should_full_scan = should_full_scan,
     identity_from_stat = identity_from_stat,

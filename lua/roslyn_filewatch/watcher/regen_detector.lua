@@ -22,14 +22,6 @@ function M.set_on_regen_start(callback)
   on_regen_start_callback = callback
 end
 
----@class RegenState
----@field events number[]
----@field is_regenerating boolean
----@field regen_start_time number|nil
----@field quiet_timer uv.uv_timer_t|nil
----@field last_event_time number
-
----@type table<number, RegenState>
 local client_states = {}
 
 local function get_config()
@@ -109,7 +101,6 @@ local function stop_regen_mode(client_id, state)
 end
 
 local function schedule_quiet_exit(client_id, state, quiet_period_ms)
-  ---@type uv.uv_timer_t|nil
   local timer = state.quiet_timer
   if timer and not timer:is_closing() then
     pcall(timer.stop, timer)
@@ -134,12 +125,12 @@ local function schedule_quiet_exit(client_id, state, quiet_period_ms)
 end
 
 function M.on_event(client_id)
-  local state = get_state(client_id)
-  local burst_threshold, burst_window_ms, quiet_period_ms, max_duration_ms = get_config()
-
   if config.options.regen_detection_enabled == false then
     return
   end
+
+  local state = get_state(client_id)
+  local burst_threshold, burst_window_ms, quiet_period_ms, max_duration_ms = get_config()
 
   local current_time = now_ms()
   state.last_event_time = current_time

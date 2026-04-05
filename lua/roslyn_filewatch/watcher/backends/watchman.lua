@@ -11,10 +11,7 @@ local utils = require("roslyn_filewatch.watcher.utils")
 
 local M = {}
 
---- Watchman backend using 'watchman-make' or native 'watchman' CLI
---- We use the watchman JSON interface over CLI since it's most robust
 function M.start(client, roots, snapshots, deps)
-  -- Validate roots list; fall back to client.config.root_dir only when roots is empty
   if not roots or #roots == 0 then
     local fallback = client.config and client.config.root_dir
     if not fallback then
@@ -22,7 +19,6 @@ function M.start(client, roots, snapshots, deps)
     end
     roots = { fallback }
   end
-  -- Watchman backend currently only supports a single root; reject multiple roots early
   if #roots > 1 then
     return nil, "Watchman backend currently supports a single root (" .. #roots .. " provided)"
   end
@@ -32,7 +28,6 @@ function M.start(client, roots, snapshots, deps)
   end
   root = utils.normalize_path(root)
 
-  -- Allocate the poll timer before constructing the object so failures are caught
   local timer = uv.new_timer()
   if not timer then
     return nil, "Failed to allocate watchman poll timer"
@@ -52,7 +47,6 @@ function M.start(client, roots, snapshots, deps)
     end
   end
 
-  -- Helper to queue events
   local function process_watchman_files(files)
     if not files or #files == 0 then
       return
@@ -64,15 +58,14 @@ function M.start(client, roots, snapshots, deps)
       path = utils.normalize_path(path)
 
       if utils.should_watch_path(path, config.options.ignore_dirs or {}, config.options.watch_extensions or {}) then
-        local ev_type = 2 -- Changed
+        local ev_type = 2
         if not f.exists then
-          ev_type = 3 -- Deleted
+          ev_type = 3
         elseif f.new then
-          ev_type = 1 -- Created
+          ev_type = 1
         end
         table.insert(events, { uri = vim.uri_from_fname(path), type = ev_type })
 
-        -- Keep internal last_events updated for status
         if deps.last_events then
           deps.last_events[client.id] = os.time()
         end
@@ -84,13 +77,11 @@ function M.start(client, roots, snapshots, deps)
     end
   end
 
-  -- watchman watch the project
   vim.system({ "watchman", "watch-project", root }, { text = true }, function(watch_out)
     if not obj._running then
       return
     end
 
-    -- Get initial clock
     vim.system({ "watchman", "clock", root }, { text = true }, function(clock_out)
       if not obj._running then
         return
@@ -103,14 +94,16 @@ function M.start(client, roots, snapshots, deps)
       if ok_json and parsed_clock and parsed_clock.clock then
         obj._clock = parsed_clock.clock
 
-        -- Step 3: Start async polling using the clock
         if obj._timer and not obj._timer:is_closing() then
-          obj._timer:start(100, config.options.poll_interval or 2000, function()
+          local interval = tonumber(config.options.poll_interval) or 500
+          if interval < 100 then
+            interval = 100
+          end
+          obj._timer:start(100, interval, function()
             if not obj._running or not obj._clock then
               return
             end
 
-            -- Prevent overlap spawn
             if obj._is_polling then
               return
             end
@@ -131,7 +124,6 @@ function M.start(client, roots, snapshots, deps)
                   obj._clock = parsed_since.clock
                 end
 
-                -- Skip fresh instance warnings, only process incremental file changes
                 if parsed_since.files and not parsed_since.is_fresh_instance then
                   process_watchman_files(parsed_since.files)
                 end

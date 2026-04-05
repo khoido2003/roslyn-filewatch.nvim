@@ -20,20 +20,13 @@ function M.start(client, roots, snapshots, deps)
     end
   end
 
-  -- Build fswatch arguments
-  -- -r = recursive
-  -- -0 = NUL record separator (robust with spaces in paths)
-  -- --exclude = filters
   local args = { "-r", "-0", "--event=Created", "--event=Updated", "--event=Removed", "--event=Renamed" }
 
-  -- Exclude ignored directories
   for _, dir in ipairs(config.options.ignore_dirs or {}) do
-    -- fswatch uses regex for exclusions!
     table.insert(args, "--exclude")
     table.insert(args, "/" .. dir .. "/")
   end
 
-  -- Add root directories
   for _, root in ipairs(roots) do
     table.insert(args, utils.normalize_path(root))
   end
@@ -69,7 +62,6 @@ function M.start(client, roots, snapshots, deps)
     return nil, "Failed to spawn fswatch"
   end
 
-  -- Output buffering (NUL-delimited records)
   local buffer = ""
   local is_alive = true
   local path_seq = {}
@@ -105,28 +97,26 @@ function M.start(client, roots, snapshots, deps)
                   if not is_alive or path_seq[path] ~= current_seq then
                     return
                   end
-                  local event_type = 2 -- Default Changed
+                  local event_type = 2
                   local client_snapshots = snapshots[client.id] or {}
                   local prev_mt = client_snapshots[path]
 
                   if not stat_err and stat then
                     local current_mt = string.format("%d:%d", stat.mtime.sec or 0, stat.mtime.nsec or 0)
                     if not prev_mt then
-                      event_type = 1 -- Created
+                      event_type = 1
                     elseif prev_mt ~= current_mt then
-                      event_type = 2 -- Changed
+                      event_type = 2
                     else
-                      -- File exists but unchanged; skip event
                       snapshots[client.id] = client_snapshots
                       return
                     end
                     client_snapshots[path] = current_mt
                   else
                     if prev_mt then
-                      event_type = 3 -- Deleted
+                      event_type = 3
                       client_snapshots[path] = nil
                     else
-                      -- Unknown file failed stat; ignore (don't emit spurious Delete)
                       return
                     end
                   end

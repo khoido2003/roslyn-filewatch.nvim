@@ -24,6 +24,8 @@
 ---@field diagnostic_throttling? roslyn_filewatch.DiagnosticThrottlingOptions
 ---@field enable_snippets? boolean Enable snippets (default: false)
 ---@field enable_autorestore? boolean Enable auto-restore of NuGet packages (default: true)
+---@field restore_debounce_ms? number Debounce time for dotnet restore (default: 1000)
+---@field csproj_reload_debounce_ms? number Debounce time for CSProj reload (default: 1000)
 ---@field _applied_preset? string The actually applied preset name (set internally)
 ---@field regen_detection_enabled? boolean Enable regeneration detection (default: true)
 ---@field regen_burst_threshold? number Events in burst window to trigger regen mode
@@ -240,6 +242,9 @@ M.options = {
 
   --- Debounce time in ms for dotnet restore commands
   restore_debounce_ms = 1000,
+
+  --- Debounce time in ms for CSProj reload
+  csproj_reload_debounce_ms = 1000,
 
   --- Regeneration detection: automatically pause event processing during heavy file generation
   --- (Unity asset imports, Godot project regeneration, etc.)
