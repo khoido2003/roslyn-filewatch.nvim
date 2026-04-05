@@ -64,49 +64,45 @@ function M.user(msg, level)
   end)
 end
 
-function M.roslyn_changes(changes)
+function M.roslyn_changes(client_id, changes)
   if not changes or type(changes) ~= "table" or #changes == 0 then
     return
   end
 
-  local clients = vim.lsp.get_clients()
-  for _, client in ipairs(clients) do
-    if vim.tbl_contains(config.options.client_names, client.name) then
-      notify_stats.last_notification_time = os.time()
-      notify_stats.total_notifications = notify_stats.total_notifications + 1
+  local client = vim.lsp.get_client_by_id(client_id)
+  if client and vim.tbl_contains(config.options.client_names, client.name) then
+    notify_stats.last_notification_time = os.time()
+    notify_stats.total_notifications = notify_stats.total_notifications + 1
 
-      local success = pcall(function()
-        client:notify("workspace/didChangeWatchedFiles", { changes = changes })
-      end)
-      if success then
-        notify_stats.last_success_time = os.time()
-      end
+    local success = pcall(function()
+      client:notify("workspace/didChangeWatchedFiles", { changes = changes })
+    end)
+    if success then
+      notify_stats.last_success_time = os.time()
     end
   end
 end
 
-function M.roslyn_renames(files)
+function M.roslyn_renames(client_id, files)
   if not files or #files == 0 then
     return
   end
 
-  local clients = vim.lsp.get_clients()
-  for _, client in ipairs(clients) do
-    if vim.tbl_contains(config.options.client_names, client.name) then
-      local payload = { files = {} }
-      for _, p in ipairs(files) do
-        table.insert(payload.files, {
-          oldUri = p.oldUri or vim.uri_from_fname(p.old),
-          newUri = p.newUri or vim.uri_from_fname(p.new_path),
-        })
-      end
-
-      vim.schedule(function()
-        pcall(function()
-          client:notify("workspace/didRenameFiles", payload)
-        end)
-      end)
+  local client = vim.lsp.get_client_by_id(client_id)
+  if client and vim.tbl_contains(config.options.client_names, client.name) then
+    local payload = { files = {} }
+    for _, p in ipairs(files) do
+      table.insert(payload.files, {
+        oldUri = p.oldUri or vim.uri_from_fname(p.old),
+        newUri = p.newUri or vim.uri_from_fname(p.new_path),
+      })
     end
+
+    vim.schedule(function()
+      pcall(function()
+        client:notify("workspace/didRenameFiles", payload)
+      end)
+    end)
   end
 end
 

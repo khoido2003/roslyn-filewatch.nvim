@@ -96,10 +96,6 @@ function M.clear(client_id)
   last_resync_ts[client_id] = nil
 end
 
---- Check if a path should be watched (delegates to shared utils implementation)
----@param fullpath string
----@param cfg table config module
----@return boolean
 local function should_watch_path(fullpath, cfg)
   local opts = cfg.options
   if not opts then
@@ -117,7 +113,8 @@ local function record_error(client_id, msg, notify_fn, restart_fn)
   ec.count = ec.count + 1
   error_counters[client_id] = ec
 
-  local is_perm_error = msg and (msg:match("EPERM") or msg:lower():match("permission"))
+  local msg_str = tostring(msg or "")
+  local is_perm_error = msg_str:match("EPERM") or msg_str:lower():match("permission")
 
   if is_perm_error and ec.count >= ERROR_THRESHOLD then
     pcall(notify_fn, "Persistent EPERM errors; restarting watcher", vim.log.levels.ERROR)
@@ -131,9 +128,9 @@ local function record_error(client_id, msg, notify_fn, restart_fn)
   end
 
   if is_perm_error then
-    pcall(notify_fn, "EPERM error: " .. tostring(msg), vim.log.levels.WARN)
+    pcall(notify_fn, "EPERM error: " .. msg_str, vim.log.levels.WARN)
   else
-    pcall(notify_fn, "fs_event error: " .. tostring(msg), vim.log.levels.ERROR)
+    pcall(notify_fn, "fs_event error: " .. msg_str, vim.log.levels.ERROR)
   end
   return false
 end
@@ -279,12 +276,7 @@ function M.start(client, root, snapshots, deps)
         pcall(mark_dirty_dir, client_id, fullpath)
       end
 
-      if not should_watch_path(fullpath, cfg) then
-        on_done()
-        return
-      end
-
-      local prev_mt = snapshots[client.id] and snapshots[client.id][fullpath]
+      local prev_mt = snapshots[client_id] and snapshots[client_id][fullpath]
 
       uv.fs_stat(fullpath, function(stat_err, st)
         vim.schedule(function()
@@ -459,7 +451,6 @@ function M.start(client, root, snapshots, deps)
         table.insert(q.events, filename)
 
         if #q.events > MAX_RAW_QUEUE_SIZE then
-          -- Efficient truncation: keep only the last MAX_RAW_QUEUE_SIZE entries
           local keep_from = #q.events - MAX_RAW_QUEUE_SIZE + 1
           local new_events = { table.unpack(q.events, keep_from) }
           q.events = new_events
@@ -481,7 +472,6 @@ function M.start(client, root, snapshots, deps)
 
     local watch_path = root
     if utils.is_windows() then
-      -- Use backslashes and uppercase drive for native fs_event on Windows
       watch_path = root:gsub("/", "\\"):gsub("^(%a):", function(l)
         return l:upper() .. ":"
       end)

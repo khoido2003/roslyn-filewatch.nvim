@@ -36,14 +36,10 @@ local function check_rust_module()
   end
   if not rust_warned then
     rust_warned = true
-    -- Silently fall back to fd/Lua scanning.
-    -- Users can check :checkhealth for missing optional tools.
   end
   return false, nil
 end
 
---- Build options table for the Rust fast_snapshot call
----@return table
 local function build_rust_options()
   local opts = config.options or {}
   return {
@@ -53,10 +49,6 @@ local function build_rust_options()
   }
 end
 
---- Call Rust fast_snapshot and normalize the result into snapshot format
----@param rs table The Rust module
----@param root string Root directory
----@return table<string, roslyn_filewatch.SnapshotEntry>|nil
 local function call_rust_snapshot(rs, root)
   local ok_snap, result = pcall(rs.fast_snapshot, root, build_rust_options())
   if not ok_snap or type(result) ~= "table" then
@@ -437,12 +429,8 @@ function M.scan_tree_async(root, callback, on_progress)
   end
   scanning_in_progress[root] = true
 
-  -- Try Rust module first — call directly on main thread (fast native code)
   local ok, rs = check_rust_module()
   if ok and rs then
-    -- Call Rust directly — no serialization round-trip, no uv.new_work overhead
-    -- The Rust module is fast enough to run synchronously without blocking UI
-    -- because it now filters by extensions/ignore_dirs, reducing work dramatically
     local result = call_rust_snapshot(rs, root)
     if result then
       scanning_in_progress[root] = nil
@@ -451,7 +439,6 @@ function M.scan_tree_async(root, callback, on_progress)
       end)
       return
     end
-    -- Fall through to fd/lua if Rust call failed
   end
 
   local fd_exe = nil
@@ -471,7 +458,6 @@ end
 function M.scan_tree(root, out_map)
   root = normalize_path(root)
 
-  -- Try Rust module — now with proper filtering and nanosecond precision
   local ok, rs = check_rust_module()
   if ok and rs then
     local result = call_rust_snapshot(rs, root)
