@@ -57,6 +57,10 @@ local DIRTY_DIRS_THRESHOLD = 10
 ---@field recovery_consecutive_failures number
 ---@field recovery_current_backoff number
 ---@field backend_name string|nil
+---@field start_time number
+---@field total_events number
+---@field scan_count number
+---@field last_scan_duration number
 
 ---@type table<number, ClientState>
 local client_states = {}
@@ -82,6 +86,10 @@ local function get_client_state(client_id)
       root = nil,
       recovery_consecutive_failures = 0,
       recovery_current_backoff = config.options.recovery_initial_delay_ms or 300,
+      start_time = os.time(),
+      total_events = 0,
+      scan_count = 0,
+      last_scan_duration = 0,
     }
   end
   return client_states[client_id]
@@ -167,6 +175,21 @@ pcall(function()
       end,
     })
 
+    local stats_proxy = setmetatable({}, {
+      __index = function(_, k)
+        local s = client_states[k]
+        if not s then
+          return nil
+        end
+        return {
+          start_time = s.start_time,
+          total_events = s.total_events,
+          scan_count = s.scan_count,
+          last_scan_duration = s.last_scan_duration,
+        }
+      end,
+    })
+
     status_mod.register_refs({
       watchers = watchers_proxy,
       pollers = pollers_proxy,
@@ -176,6 +199,7 @@ pcall(function()
       sln_infos = sln_info_proxy,
       dirty_dirs = dirty_dirs_proxy,
       backend_names = backend_names_proxy,
+      stats = stats_proxy,
     })
   end
 end)
@@ -544,6 +568,7 @@ local function queue_events(client_id, evs)
   end
 
   local state = get_client_state(client_id)
+  state.total_events = state.total_events + #evs
   process_auto_restore(client_id, evs, state)
 
   local function do_notify(changes)
@@ -1056,10 +1081,17 @@ function M.start(client)
 
   -- Perform initial scan if using fs_event (as it has no poll loop)
   if not state.poller and state.watcher then
+    local scan_start = uv.hrtime()
     snapshot_mod.scan_tree_async(root, function(new_map)
+      local scan_end = uv.hrtime()
       state.snapshot = new_map
       state.needs_full_scan = false
-      notify("Initial scan complete: " .. vim.tbl_count(new_map) .. " files", vim.log.levels.DEBUG)
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (scan_end - scan_start) / 1e6 -- ms
+      notify(
+        string.format("Initial scan complete: %d files in %.2fms", vim.tbl_count(new_map), state.last_scan_duration),
+        vim.log.levels.DEBUG
+      )
     end)
   end
 
@@ -1130,11 +1162,39 @@ function M.start(client)
   end
 
   local poller, poll_err = fs_poll_mod.start(client, root, snapshots_proxy, {
-    scan_tree = scan_tree,
-    scan_tree_async = snapshot_mod.scan_tree_async,
+    scan_tree = function(scan_root, out_map)
+      local s_start = uv.hrtime()
+      scan_tree(scan_root, out_map)
+      local s_end = uv.hrtime()
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (s_end - s_start) / 1e6
+    end,
+    scan_tree_async = function(scan_root, callback)
+      local s_start = uv.hrtime()
+      snapshot_mod.scan_tree_async(scan_root, function(new_map)
+        local s_end = uv.hrtime()
+        state.scan_count = (state.scan_count or 0) + 1
+        state.last_scan_duration = (s_end - s_start) / 1e6
+        callback(new_map)
+      end)
+    end,
     is_scanning = snapshot_mod.is_scanning,
-    partial_scan = snapshot_mod.partial_scan,
-    partial_scan_async = snapshot_mod.partial_scan_async,
+    partial_scan = function(dirs, out_map, scan_root)
+      local s_start = uv.hrtime()
+      snapshot_mod.partial_scan(dirs, out_map, scan_root)
+      local s_end = uv.hrtime()
+      state.scan_count = (state.scan_count or 0) + 1
+      state.last_scan_duration = (s_end - s_start) / 1e6
+    end,
+    partial_scan_async = function(dirs, out_map, scan_root, callback)
+      local s_start = uv.hrtime()
+      snapshot_mod.partial_scan_async(dirs, out_map, scan_root, function(new_map)
+        local s_end = uv.hrtime()
+        state.scan_count = (state.scan_count or 0) + 1
+        state.last_scan_duration = (s_end - s_start) / 1e6
+        callback(new_map)
+      end)
+    end,
     get_dirty_dirs = get_and_clear_dirty_dirs,
     should_full_scan = should_full_scan,
     identity_from_stat = identity_from_stat,

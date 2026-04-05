@@ -25,6 +25,10 @@ local M = {}
 ---@field sln_file string|nil
 ---@field project_count number
 ---@field preset string|nil
+---@field start_time number|nil
+---@field total_events number|nil
+---@field scan_count number|nil
+---@field last_scan_duration number|nil
 
 local _watchers = nil
 local _pollers = nil
@@ -33,6 +37,7 @@ local _snapshots = nil
 local _last_events = nil
 local _sln_infos = nil
 local _backend_names = nil
+local _stats = nil
 
 function M.register_refs(refs)
   _watchers = refs.watchers
@@ -42,6 +47,7 @@ function M.register_refs(refs)
   _last_events = refs.last_events
   _sln_infos = refs.sln_infos
   _backend_names = refs.backend_names
+  _stats = refs.stats
 end
 
 --- Determine scanning tier in use
@@ -97,6 +103,10 @@ function M.get_status()
         sln_file = nil,
         project_count = 0,
         preset = config.options._applied_preset,
+        start_time = _stats and _stats[client.id] and _stats[client.id].start_time or nil,
+        total_events = _stats and _stats[client.id] and _stats[client.id].total_events or 0,
+        scan_count = _stats and _stats[client.id] and _stats[client.id].scan_count or 0,
+        last_scan_duration = _stats and _stats[client.id] and _stats[client.id].last_scan_duration or 0,
       }
 
       if _snapshots and _snapshots[client.id] then
@@ -124,7 +134,6 @@ function M.show()
   local status = M.get_status()
 
   local lines = {}
-  local hls = {}
 
   local function add(text, hl)
     table.insert(lines, { { text, hl or "Normal" } })
@@ -132,56 +141,39 @@ function M.show()
 
   local function add_kv(key, value, val_hl)
     table.insert(lines, {
-      { "  " .. key .. ": ", "Normal" },
-      { tostring(value), val_hl or "Normal" },
+      { string.format("  %-18s ", key .. ":"), "Identifier" },
+      { tostring(value), val_hl or "String" },
     })
-  end
-
-  local function add_bool(key, enabled)
-    local val = enabled and "on" or "off"
-    local hl = enabled and "DiagnosticOk" or "WarningMsg"
-    add_kv(key, val, hl)
   end
 
   -- Header
   add("")
-  add("roslyn-filewatch", "Title")
-  add(string.rep("─", 40), "Comment")
+  add(" Roslyn Filewatch Status", "Title")
+  add("  " .. string.rep("┄", 48), "Comment")
 
-  -- Global info
-  add_kv("Scanning", status.scanning_tier, "Identifier")
-
+  -- Global stats
+  add_kv("Scanning Tier", status.scanning_tier:upper(), "Type")
   if config.options._applied_preset then
-    add_kv("Preset", config.options._applied_preset, "String")
+    add_kv("Active Preset", config.options._applied_preset, "Constant")
   end
-
-  -- Config
-  add("")
-  add("  Config", "Bold")
-  add_bool("solution_aware", config.options.solution_aware ~= false)
-  add_bool("respect_gitignore", config.options.respect_gitignore ~= false)
-  add_bool("batching", config.options.batching and config.options.batching.enabled)
-  add_bool("force_polling", config.options.force_polling)
-  add_bool("autorestore", config.options.enable_autorestore ~= false)
-  add_kv("poll_interval", (config.options.poll_interval or 5000) .. "ms")
-  add_kv("log_level", config.options.log_level or "WARN")
 
   -- Clients
   if #status.clients == 0 then
     add("")
-    add("  No active Roslyn clients", "WarningMsg")
+    add("  No active Roslyn clients found.", "WarningMsg")
   else
     for _, c in ipairs(status.clients) do
       add("")
-      add(string.rep("─", 40), "Comment")
       table.insert(lines, {
-        { "  " .. c.name, "Identifier" },
-        { " #" .. c.id, "Number" },
+        { "  " .. c.name, "String" },
+        { " [ID: " .. c.id .. "]", "String" },
       })
-      add_kv("Root", c.root)
-      add_kv("Backend", c.backend, "Identifier")
+      add("  " .. string.rep("┄", 48), "Comment")
 
-      -- Watcher state
+      add_kv("Project Root", c.root, "Directory")
+      add_kv("Solution", c.sln_file or "none", c.sln_file and "String" or "WarningMsg")
+      add_kv("Backend", c.backend:upper(), "Type")
+
       local state_parts = {}
       if c.has_watcher then
         table.insert(state_parts, "watcher")
@@ -193,28 +185,32 @@ function M.show()
         table.insert(state_parts, "watchdog")
       end
       add_kv(
-        "Active",
-        #state_parts > 0 and table.concat(state_parts, " + ") or "none",
-        #state_parts > 0 and "DiagnosticOk" or "WarningMsg"
+        "Active Components",
+        #state_parts > 0 and table.concat(state_parts, " + ") or "NONE",
+        #state_parts > 0 and "DiagnosticOk" or "ErrorMsg"
       )
 
-      add_kv("Files", c.file_count, "Number")
-      add_kv("Last event", format_time_ago(c.last_event))
+      add("")
+      add("  Runtime Metrics:", "Question")
+      add_kv("Files Tracked", c.file_count, "Number")
+      add_kv("Projects", c.project_count, "Number")
+      add_kv("Total Events", c.total_events or 0, "Number")
+      add_kv("Last Event", format_time_ago(c.last_event), "Special")
 
-      -- Solution
-      if c.sln_file then
-        add_kv("Solution", c.sln_file, "String")
-        add_kv("Projects", c.project_count, "Number")
-      elseif c.project_count > 0 then
-        add_kv("Solution", "none (csproj-only mode)", "WarningMsg")
-        add_kv("Projects", c.project_count, "Number")
-      else
-        add_kv("Solution", "none", "WarningMsg")
+      if (c.scan_count or 0) > 0 then
+        local duration = string.format("%.2fms", c.last_scan_duration or 0)
+        add_kv("Scan Count", c.scan_count, "Number")
+        add_kv("Last Scan Time", duration, "Number")
+      end
+
+      if c.start_time then
+        add_kv("Uptime", format_time_ago(c.start_time), "Character")
       end
     end
   end
 
   add("")
+  add("  " .. string.rep("┄", 48), "Comment")
 
   -- Output
   for _, segs in ipairs(lines) do
