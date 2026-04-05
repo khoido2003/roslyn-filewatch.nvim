@@ -144,7 +144,8 @@ local function check_watcher_logic()
   if status_mod_ok and status_mod.get_status then
     local status = status_mod.get_status()
     for _, c in ipairs(status.clients) do
-      ok(string.format("Client %d (%s) Active Backend: %s", c.id, c.name, c.backend:upper()))
+      local backend = c.backend or "unknown"
+      ok(string.format("Client %d (%s) Active Backend: %s", c.id, c.name, backend:upper()))
     end
   end
 
