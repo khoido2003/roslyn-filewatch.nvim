@@ -3,6 +3,61 @@
   <img src="gallery/1.png" alt="checkhealth" width="400"/>
 </p>
 
+> [!IMPORTANT]
+> Modern Roslyn can handle file watching internally, which may make
+> this plugin unnecessary for many users.
+>
+> ### Using `nvim-lspconfig`
+>
+> Configure `roslyn_ls` with:
+>
+> ```lua
+> vim.lsp.config("roslyn_ls", {
+>   capabilities = {
+>     workspace = {
+>       didChangeWatchedFiles = {
+>         dynamicRegistration = false,
+>       },
+>     },
+>   },
+> })
+> ```
+>
+> This prevents Roslyn from registering Neovim file watchers and allows the
+> server to use its own internal file watching implementation.
+>
+> ### Using `roslyn.nvim`
+>
+> Configure:
+>
+> ```lua
+> return {
+>   "seblyng/roslyn.nvim",
+>   opts = {
+>     filewatching = "roslyn",
+>   },
+> }
+> ```
+>
+> which achieves the same behavior.
+>
+> ### Do I still need this plugin?
+>
+> If Roslyn's built-in file watching works well for your workflow, you may not
+> need this plugin.
+>
+> This plugin remains useful for users who:
+>
+> - Use older Neovim versions.
+> - Prefer explicit Neovim-managed project synchronization.
+> - Encounter issues with Roslyn's built-in file watching.
+> - Need functionality provided by this plugin beyond file watching.
+>
+> Performance characteristics vary depending on project size, operating system,
+> Neovim version, and Roslyn version.
+
+
+
 # roslyn-filewatch.nvim
 
 A lightweight, **file-watching and project-sync plugin** for Neovim that keeps the **Roslyn LSP** up-to-date with file changes.
