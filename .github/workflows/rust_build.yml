@@ -31,7 +31,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             asset_name: roslyn_filewatch_rs-windows-arm64.dll
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       - name: Install Rust
